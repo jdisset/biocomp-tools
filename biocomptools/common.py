@@ -52,9 +52,12 @@ DEFAULT_DATA_CONFIG = {
     'data_sampling_coords_for_density_threshold': 0.15,
 }
 DEFAULT_DATA_CONFIG_PATH = None
+DEFAULT_BIOCOMP_ROOT = '/Users/jeandisset/Dropbox (MIT)/Biocomp'
+DEFAULT_PROTEIN_ALIASES = {'EBFP': 'EBFP2', 'L0.G_MNEONGREEN': 'MNEONGREEN'}
 
-BIOCOMP_LOCAL_VAR_FILE = os.getenv('BIOCOMP_LOCAL_VAR_FILE', '__local_vars.py')
+DEFAULT_LOCAL_VAR_FILE = '__local_vars.py'
 
+BIOCOMP_LOCAL_VAR_FILE = os.getenv('BIOCOMP_LOCAL_VAR_FILE', DEFAULT_LOCAL_VAR_FILE)
 BIOCOMP_LOCAL_VARS = {}
 
 
@@ -67,35 +70,41 @@ def get_from_env_or_local_vars(
     global BIOCOMP_LOCAL_VARS
 
     if varname in os.environ:
+        tlog.debug(f'Variable {varname} found in environment')
         return os.environ[varname]
 
-    if filename in BIOCOMP_LOCAL_VARS:
-        if varname in BIOCOMP_LOCAL_VARS[filename]:
-            return BIOCOMP_LOCAL_VARS[filename][varname]
+    if filename not in BIOCOMP_LOCAL_VARS:
+        if os.path.exists(filename):
+            tlog.debug(f'Loading local vars from {filename}')
+            with open(filename, 'r') as f:
+                local_vars = {}
+                exec(f.read(), {}, local_vars)
+                tlog.debug(f'Local vars found: {local_vars.keys()}')
+                BIOCOMP_LOCAL_VARS[filename] = local_vars
 
-    if os.path.exists(filename):
-        tlog.debug(f'Loading local vars from {filename}')
-        with open(filename, 'r') as f:
-            local_vars = {}
-            exec(f.read(), {}, local_vars)
-            tlog.debug(f'Local vars found: {local_vars.keys()}')
-            BIOCOMP_LOCAL_VARS[filename] = local_vars
-            if varname in local_vars:
-                return local_vars[varname]
+    if filename in BIOCOMP_LOCAL_VARS and varname in BIOCOMP_LOCAL_VARS[filename]:
+        tlog.debug(f'Variable {varname} found in local vars')
+        return BIOCOMP_LOCAL_VARS[filename][varname]
 
     if raise_error and default is None:
         raise ValueError(f'Variable {varname} not found in either environment or {filename}')
     else:
-        tlog.debug(
-            f'Variable {varname} not found in either environment or {filename}, using default value'
-        )
+        tlog.debug(f'Variable {varname} not found in either env or {filename}, using default value')
         return default
 
+BIOCOMP_ROOT = get_from_env_or_local_vars(
+    'BIOCOMP_ROOT', default=DEFAULT_BIOCOMP_ROOT, raise_error=False
+)
+
+BIOCOMP_PROTEIN_ALIASES = get_from_env_or_local_vars(
+    'BIOCOMP_PROTEIN_ALIASES', default=DEFAULT_PROTEIN_ALIASES, raise_error=False
+)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                       --     general utils     --
+
+
 def parse_list(input_string):
     # Split the string by comma and then strip whitespaces from each element
     if input_string is None:
@@ -219,6 +228,13 @@ def update_table(df, table_name, key_column, conn=None, dry_run=False):
 def get_networks_in_collections(collections):
     if not isinstance(collections, list):
         collections = [collections]
+    # first we launch a query to check that all collections exist
+    query = "SELECT * FROM collections WHERE name IN %s"
+    existing_collections = query_to_df(query, (tuple(collections),))
+    diff = set(collections) - set(existing_collections['name'])
+    if len(diff) > 0:
+        raise ValueError(f'Collections {diff} not found in database')
+
     param_placeholders = ', '.join(['%s'] * len(collections))
     query = f"SELECT * FROM collection_network WHERE collection_name IN ({param_placeholders})"
     return query_to_df(query, collections)
@@ -249,6 +265,39 @@ def add_networks_to_collection(collection_name, network_names):
 
 
 ### {{{                   --     network objects loading utils     --
+
+def resolve_path(filepath, path_prefix):
+    if pd.isna(filepath):
+        raise ValueError(f'File path information missing')
+    filepath = Path(path_prefix) / filepath
+    filepath = Path(filepath).resolve()
+    if not Path(filepath).exists():
+        raise ValueError(f'File {filepath} not found')
+    return filepath
+
+
+def load_network_and_data_from_row(
+    network_row, lib, path_prefix=BIOCOMP_ROOT, protein_aliases=BIOCOMP_PROTEIN_ALIASES
+):
+
+    data_file = resolve_path(network_row['data_file'], path_prefix)
+    recipe_file = resolve_path(network_row['recipe_file'], path_prefix)
+
+    candidate_networks = bc.recipe.network_from_recipe(recipe_file, lib, inverse='all')
+
+    # when trying to load a network from the database, we have to select the right one
+    # After reading a recipe, we have several candidate networks, one for each possible inversion
+    # we can use the markers to select the right one
+    candidate_markers = [
+        set(bc.recipe.escape(n.get_inverted_input_proteins())) for n in candidate_networks
+    ]
+    target_markers = set(parse_list(network_row['markers']))
+    escaped_target_markers = bc.recipe.escape(target_markers)
+    network = candidate_networks[candidate_markers.index(escaped_target_markers)]
+    X, Y = bc.recipe.get_network_XY(network, data_file, color_aliases=protein_aliases)
+    return network, X, Y
+
+
 def get_network_row(netdf, net_name):
     if net_name not in netdf['name'].values:
         raise ValueError(f'Network id {net_name} not found in database')
@@ -259,40 +308,28 @@ def get_network_row(netdf, net_name):
 
 
 def load_network_and_data(
-    netdf, net_name, lib, path_prefix='/Users/jeandisset/Dropbox (MIT)/Biocomp'
+    netdf, net_name, lib, path_prefix=BIOCOMP_ROOT, protein_aliases=BIOCOMP_PROTEIN_ALIASES
 ):
-    row = get_network_row(netdf, net_name)
-    rfile, dfile = get_recipe_and_data_filepaths(
-        row['data_file'], row['recipe_file'], path_prefix=path_prefix
+    return load_network_and_data_from_row(
+        get_network_row(netdf, net_name),
+        lib,
+        path_prefix=path_prefix,
+        protein_aliases=protein_aliases,
     )
-    networks = bc.recipe.network_from_recipe(rfile, lib, inverse='all')
-    # we potentially have several networks, one for each possible inversion
-    # we can use the markers to select the right one
-    markers = [set(bc.recipe.escape(n.get_inverted_input_proteins())) for n in networks]
-    # outputs = [set(bc.recipe.escape(networks[0].get_output_proteins())) - m for m in markers]
-    target_markers = set(parse_list(row['markers']))
-    escaped_target_markers = bc.recipe.escape(target_markers)
-    network = networks[markers.index(escaped_target_markers)]
-    X, Y = bc.recipe.get_network_XY(network, dfile, color_aliases=protein_aliases)
-    return network, X, Y
 
 
-def get_recipe_and_data_filepaths(data_file, recipe_file, path_prefix=''):
-    # check data file present
-    if pd.isna(data_file):
-        raise ValueError(f'Data file information for network {net_name} is missing')
-    data_file = Path(path_prefix) / data_file
-    data_file = Path(data_file).resolve()
-    if not Path(data_file).exists():
-        raise ValueError(f'Data file {data_file} not found')
-    # check recipe file present
-    if pd.isna(recipe_file):
-        raise ValueError(f'Recipe file information for network {net_name} is missing')
-    recipe_file = Path(path_prefix) / recipe_file
-    recipe_file = Path(recipe_file).resolve()
-    if not Path(recipe_file).exists():
-        raise ValueError(f'Recipe file {recipe_file} not found')
-    return recipe_file, data_file
+def load_networks_and_data(netdf, lib, **kwargs):
+    # loads from a dataframe with network information
+    # needs columns: data_file, recipe_file, markers
+    # (markers is needed to disambiguate from all the potential recipe inversions)
+    networks, Xs, Ys = [], [], []
+    for _, row in netdf.iterrows():
+        tlog.info(f'Loading network {row["name"]}')
+        network, X, Y = load_network_and_data_from_row(row, lib, **kwargs)
+        networks.append(network)
+        Xs.append(X)
+        Ys.append(Y)
+    return networks, Xs, Ys
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
