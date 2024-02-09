@@ -33,3 +33,7 @@ from . import common as cm
 # Pick a list of collection_ids to identify the networks to train on (same for the prediction set)
 
 
+
+### {{{              --     find required networks from xp     --
+
+##────────────────────────────────────────────────────────────────────────────}}}

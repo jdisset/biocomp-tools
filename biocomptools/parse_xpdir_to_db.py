@@ -252,7 +252,6 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
         'genes': ', '.join(genes),
         'markers': ', '.join(net.get_inverted_input_proteins()),
         'output_proteins': ', '.join(net.get_output_proteins()),
-        'recipe_file': net.metadata['recipe_file'],
     }
     net_entry.update(new_entry)
 

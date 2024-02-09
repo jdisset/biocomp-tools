@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biocomp-tools"
+version = "0.1.0"
+description = "A set of tools and utils for the biocompiler."
+authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
+readme = "README.md"
+dependencies = [
+	"biocomp",
+]
+
+
+[project.scripts]
+#biocomptools_train= "biocomp-tools:train.main"
+

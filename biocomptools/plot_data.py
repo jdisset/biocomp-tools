@@ -99,7 +99,6 @@ prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 prog.parse_args()
 
 DBCONN = cm.connect_to_db()
-
 netdf = cm.load_table_as_dataframe(DBCONN, 'network')
 xpdf = cm.load_table_as_dataframe(DBCONN, 'experiment')
 

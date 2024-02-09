@@ -8,16 +8,24 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 import xxhash
+
 # using base58 instead of base64 because it's url-safe
 import base58
 
 import biocomp.utils as ut
 import biocomp as bc
 
+import psycopg2
+from psycopg2.extras import execute_values
+import logging
+import os
+from tqdm import tqdm
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                         --     defaults     --
+tlog = logging.getLogger('biocomp_tools_common')
+tlog.setLevel(logging.DEBUG)
 
 DEFAULT_CALIB_PATHS = [
     './data/calibrated_data_v3',
@@ -45,10 +53,49 @@ DEFAULT_DATA_CONFIG = {
 }
 DEFAULT_DATA_CONFIG_PATH = None
 
+BIOCOMP_LOCAL_VAR_FILE = os.getenv('BIOCOMP_LOCAL_VAR_FILE', '__local_vars.py')
+
+BIOCOMP_LOCAL_VARS = {}
+
+
+def get_from_env_or_local_vars(
+    varname, filename=BIOCOMP_LOCAL_VAR_FILE, default=None, raise_error=True
+):
+    """
+    Get a variable from the environment (in priority), or from local var file if available.
+    """
+    global BIOCOMP_LOCAL_VARS
+
+    if varname in os.environ:
+        return os.environ[varname]
+
+    if filename in BIOCOMP_LOCAL_VARS:
+        if varname in BIOCOMP_LOCAL_VARS[filename]:
+            return BIOCOMP_LOCAL_VARS[filename][varname]
+
+    if os.path.exists(filename):
+        tlog.debug(f'Loading local vars from {filename}')
+        with open(filename, 'r') as f:
+            local_vars = {}
+            exec(f.read(), {}, local_vars)
+            tlog.debug(f'Local vars found: {local_vars.keys()}')
+            BIOCOMP_LOCAL_VARS[filename] = local_vars
+            if varname in local_vars:
+                return local_vars[varname]
+
+    if raise_error and default is None:
+        raise ValueError(f'Variable {varname} not found in either environment or {filename}')
+    else:
+        tlog.debug(
+            f'Variable {varname} not found in either environment or {filename}, using default value'
+        )
+        return default
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     general utils     --
 
+### {{{                       --     general utils     --
 def parse_list(input_string):
     # Split the string by comma and then strip whitespaces from each element
     if input_string is None:
@@ -57,14 +104,151 @@ def parse_list(input_string):
         return input_string
     return [element.strip() for element in input_string.split(',')]
 
+
 def get_name_hash(name):
     # base58 encode the xxhash of the name
     hh = xxhash.xxh128(name).digest()
     return base58.b58encode(hh).decode('utf-8')
 
+
+def filter_df(df, **filters):
+    for key, value in filters.items():
+        if len(df) == 0:
+            return df
+        if callable(value):
+            df = df[df[key].apply(value)]
+        else:
+            df = df[df[key] == value]
+    return df
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     load utils     --
+### {{{                     --     general db utils     --
+
+
+def connect_to_db():
+    BIOCOMP_DB_NAME = get_from_env_or_local_vars('BIOCOMP_DB_NAME')
+    BIOCOMP_DB_USER = get_from_env_or_local_vars('BIOCOMP_DB_USER')
+    BIOCOMP_DB_PASS = get_from_env_or_local_vars('BIOCOMP_DB_PASS')
+    BIOCOMP_DB_HOST = get_from_env_or_local_vars('BIOCOMP_DB_HOST')
+    BIOCOMP_DB_PORT = get_from_env_or_local_vars('BIOCOMP_DB_PORT')
+    try:
+        conn = psycopg2.connect(
+            dbname=BIOCOMP_DB_NAME,
+            user=BIOCOMP_DB_USER,
+            password=BIOCOMP_DB_PASS,
+            host=BIOCOMP_DB_HOST,
+            port=BIOCOMP_DB_PORT,
+        )
+    except Exception as e:
+        tlog.error(f'Error connecting to database: {e}')
+        raise e
+    return conn
+
+
+def query_to_df(query, params=None, conn=None):
+    try:
+        if conn is None:
+            conn = connect_to_db()
+        cur = conn.cursor()
+        cur.execute(query, params)
+        df = pd.DataFrame(cur.fetchall(), columns=[desc[0] for desc in cur.description])
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+    return df
+
+
+def table_to_df(table_name, **kwargs):
+    return query_to_df(f'SELECT * FROM {table_name}', **kwargs)
+
+
+def execute_query(query, params=None, conn=None):
+    try:
+        if conn is None:
+            conn = connect_to_db()
+        cur = conn.cursor()
+        cur.execute(query, params)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def execute_many(query, params, conn=None, dry_run=False):
+    if dry_run:
+        tlog.info(f'Dry run: {query} with {len(params)} values:')
+        tlog.info(params)
+        return
+    try:
+        if conn is None:
+            conn = connect_to_db()
+        cur = conn.cursor()
+        execute_values(cur, query, params)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_table(df, table_name, key_column, conn=None, dry_run=False):
+    columns = df.columns.to_list()
+    query = f"""
+        INSERT INTO {table_name} ({', '.join(columns)})
+        VALUES %s ON CONFLICT ({key_column})
+        DO UPDATE SET ({', '.join(columns)}) = ({', '.join(['EXCLUDED.' + col for col in columns])})
+        """
+    execute_many(query, df.values, conn, dry_run=dry_run)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                       --     collection utils     --
+
+
+def get_networks_in_collections(collections):
+    if not isinstance(collections, list):
+        collections = [collections]
+    param_placeholders = ', '.join(['%s'] * len(collections))
+    query = f"SELECT * FROM collection_network WHERE collection_name IN ({param_placeholders})"
+    return query_to_df(query, collections)
+
+
+def create_collection(name, description):
+    execute_query(
+        "INSERT INTO collections (name, description) VALUES (%s, %s)", (name, description)
+    )
+
+
+def remove_all_from_collection(collection_name):
+    execute_query("DELETE FROM collection_network WHERE collection_name = %s", (collection_name,))
+
+
+def delete_collection(collection_name):
+    execute_query("DELETE FROM collections WHERE name = %s", (collection_name,))
+
+
+def add_networks_to_collection(collection_name, network_names):
+    if not isinstance(network_names, list):
+        network_names = [network_names]
+    values = [(collection_name, net) for net in network_names]
+    execute_many("INSERT INTO collection_network (collection_name, network_name) VALUES %s", values)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+### {{{                   --     network objects loading utils     --
 def get_network_row(netdf, net_name):
     if net_name not in netdf['name'].values:
         raise ValueError(f'Network id {net_name} not found in database')
@@ -73,22 +257,6 @@ def get_network_row(netdf, net_name):
         raise ValueError(f'Network name {net_name} is not unique in database')
     return net_row.iloc[0]
 
-def get_recipe_and_data_filepaths(data_file, recipe_file, path_prefix=''):
-    # check data file present
-    if pd.isna(data_file):
-        raise ValueError(f'Data file information for network {net_name} is missing')
-    data_file = Path(path_prefix) / data_file
-    data_file = Path(data_file).resolve()
-    if not Path(data_file).exists():
-        raise ValueError(f'Data file {data_file} not found')
-    # check recipe file present
-    if pd.isna(recipe_file):
-        raise ValueError(f'Recipe file information for network {net_name} is missing')
-    recipe_file = Path(path_prefix) / recipe_file
-    recipe_file = Path(recipe_file).resolve()
-    if not Path(recipe_file).exists():
-        raise ValueError(f'Recipe file {recipe_file} not found')
-    return recipe_file, data_file
 
 def load_network_and_data(
     netdf, net_name, lib, path_prefix='/Users/jeandisset/Dropbox (MIT)/Biocomp'
@@ -108,45 +276,28 @@ def load_network_and_data(
     X, Y = bc.recipe.get_network_XY(network, dfile, color_aliases=protein_aliases)
     return network, X, Y
 
+
+def get_recipe_and_data_filepaths(data_file, recipe_file, path_prefix=''):
+    # check data file present
+    if pd.isna(data_file):
+        raise ValueError(f'Data file information for network {net_name} is missing')
+    data_file = Path(path_prefix) / data_file
+    data_file = Path(data_file).resolve()
+    if not Path(data_file).exists():
+        raise ValueError(f'Data file {data_file} not found')
+    # check recipe file present
+    if pd.isna(recipe_file):
+        raise ValueError(f'Recipe file information for network {net_name} is missing')
+    recipe_file = Path(path_prefix) / recipe_file
+    recipe_file = Path(recipe_file).resolve()
+    if not Path(recipe_file).exists():
+        raise ValueError(f'Recipe file {recipe_file} not found')
+    return recipe_file, data_file
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-import logging
-tlog = logging.getLogger('biocomp_tools_common')
-tlog.setLevel(logging.DEBUG)
 
-
-### {{{                    --     database connection     --
-import psycopg2
-from local_vars import DBNAME, DBUSER, DBPASS, DBHOST, DBPORT
-
-def connect_to_db():
-    try:
-        conn = psycopg2.connect(
-            dbname=DBNAME, user=DBUSER, password=DBPASS, host=DBHOST, port=DBPORT
-        )
-    except Exception as e:
-        tlog.error(f'Error connecting to database: {e}')
-        raise e
-
-    return conn
-
-
-def load_table_as_dataframe(conn, table_name):
-    try:
-        cursor = conn.cursor()
-        cursor.execute(f'SELECT * FROM {table_name}')
-        rows = cursor.fetchall()
-        columns = [desc[0] for desc in cursor.description]
-        df = pd.DataFrame(rows, columns=columns)
-    except Exception as e:
-        tlog.error(f'Error loading table {table_name} as dataframe: {e}')
-        raise e
-    finally:
-        cursor.close()
-
-    return df
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                        --     CLIProgram     --
 class CLIProgram:
     def __init__(self):
@@ -182,6 +333,7 @@ class CLIProgram:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                         --     df tools     --
 
 
@@ -250,9 +402,3 @@ def reorder_columns_back(df, columns):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-
-### {{{              --     loading networks from database     --
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
