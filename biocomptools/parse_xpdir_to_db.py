@@ -38,6 +38,7 @@ from common import (
     DEFAULT_XP_CACHE_DIR,
     DEFAULT_DATA_CONFIG,
     DEFAULT_DATA_CONFIG_PATH,
+    BIOCOMP_ROOT,
 )
 
 import logging
@@ -47,19 +48,16 @@ prog = cm.CLIProgram()
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
 logging.getLogger('biocomp').setLevel(logging.ERROR)
-import psycopg2
-DBCONN = cm.connect_to_db()
 ### {{{                --     arg declaration and parsing     --
 
 # arguments:
-
 prog.add_argument('--calib_paths', type=str, nargs='+', default=DEFAULT_CALIB_PATHS)
 prog.add_argument('--calib_names', type=str, nargs='+', default=DEFAULT_CALIB_NAMES)
 prog.add_argument('--xp_path', type=str, default=DEFAULT_XP_PATH)
 # --xp_path: path to the experiment files, or empty to use env default
 prog.add_argument('--recipe_paths', type=str, nargs='+', default=DEFAULT_RECIPE_PATH)
 prog.add_argument('--xp_cache_dir', type=str, default=DEFAULT_XP_CACHE_DIR)
-prog.add_argument('--base_dir', type=str, default=Path(DEFAULT_XP_PATH).parent)
+prog.add_argument('--base_dir', type=str, default=BIOCOMP_ROOT)
 prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 
 # verbosity level
@@ -71,7 +69,7 @@ prog.parse_args([])
 prog.xp_path = Path(prog.xp_path)
 prog.base_dir = Path(prog.base_dir)
 prog.recipe_paths = [Path(p) for p in prog.recipe_paths]
-prog.lib = ut.load_lib()
+prog.lib = ut.load_lib(cm.get_env_or_local('BIOCOMP_LIB_PATH'))
 
 if prog.data_config is None:
     prog.data_config = DEFAULT_DATA_CONFIG
@@ -161,7 +159,7 @@ def calibration_info(xppath, calib_paths=prog.calib_paths, calib_names=prog.cali
 
 
 for xp in xp_entries.values():
-    calib_type, calib_plot, _ = calibration_info(xp['path'])
+    calib_type, calib_plot, _ = calibration_info(BIOCOMP_ROOT / xp['path'])
     xp['calibration_version'] = calib_type
     xp['has_calibration_diagnostics'] = calib_plot
 
@@ -257,8 +255,8 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
-### {{{                  --     create and update xpdf     --
 
+### {{{                  --     create and update xpdf     --
 
 xpdf = pd.DataFrame(xp_entries).T
 # replace all the *_errors types to string
@@ -267,118 +265,9 @@ for col in error_cols:
     xpdf[col] = xpdf[col].astype(str)
     xpdf[col] = xpdf[col].apply(lambda x: x.replace('nan', ''))
 
-logger.debug(f'Saving experiment table to {prog.database}')
-
-# def commit_to_db(conn, df, table_name, primary_key):
-# c = conn.cursor()
-# c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table_name,))
-# if not c.fetchone():
-# raise ValueError(f'{table_name} table not found in db')
-# # check if the table has the right columns
-# c.execute(f'PRAGMA table_info({table_name});')
-# columns = [col[1] for col in c.fetchall()]
-# if not all([col in columns for col in df.columns]):
-# missing_cols = [col for col in df.columns if col not in columns]
-# raise ValueError(f'{table_name} table is missing columns {missing_cols}')
-
-# # check that our df has unique names
-# if len(df[primary_key].unique()) != len(df):
-# raise ValueError(f'{table_name} table has non-unique {primary_key} values')
-
-# # insert or ignore, then update
-# strdf = df.astype(str)
-# # put the name column last
-# strdf = cm.reorder_columns_back(strdf, [primary_key])
-# colnames = strdf.columns.tolist()
-# c.executemany(
-# f'INSERT OR IGNORE INTO {table_name} ({", ".join(colnames)}) VALUES ({", ".join(["?"] * len(colnames))});',
-# strdf.values.tolist(),
-# )
-
-# conn.commit()
-# # update
-# c.executemany(
-# f'UPDATE {table_name} SET {", ".join([col + " = ?" for col in colnames[:-1]])} WHERE name = ?;',
-# strdf.values.tolist(),
-# )
-# conn.commit()
-# conn.close()
-
-
-from psycopg2 import sql
-
-
-def commit_to_db(conn, df, table_name, primary_key):
-    cursor = conn.cursor()
-    try:
-        # Check if the table has the right columns
-        cursor.execute(
-            sql.SQL("SELECT column_name FROM information_schema.columns WHERE table_name = %s;"),
-            (table_name,),
-        )
-        columns = [col[0] for col in cursor.fetchall()]
-        if not all(col in columns for col in df.columns):
-            missing_cols = [col for col in df.columns if col not in columns]
-            cursor.close()
-            raise ValueError(f'{table_name} table is missing columns {missing_cols}')
-
-        # Check that our df has unique primary key values
-        if len(df[primary_key].unique()) != len(df):
-            cursor.close()
-            raise ValueError(f'{table_name} table has non-unique {primary_key} values')
-
-        # Prepare data for insertion and update
-        strdf = df.astype(str)
-        colnames = strdf.columns.tolist()
-        records = strdf.values.tolist()
-
-        # Insert or ignore
-        insert_query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING;").format(
-            sql.Identifier(table_name),
-            sql.SQL(', ').join(map(sql.Identifier, colnames)),
-            sql.SQL(', ').join(sql.Placeholder() * len(colnames)),
-        )
-        cursor.executemany(insert_query, records)
-        conn.commit()
-
-        # Update
-        update_cols = sql.SQL(', ').join(
-            [
-                sql.SQL("{} = {}").format(sql.Identifier(col), sql.Placeholder())
-                for col in colnames
-                if col != primary_key
-            ]
-        )
-        update_query = sql.SQL("UPDATE {} SET {} WHERE {} = {};").format(
-            sql.Identifier(table_name), update_cols, sql.Identifier(primary_key), sql.Placeholder()
-        )
-        cursor.executemany(update_query, records)
-        conn.commit()
-
-    except Exception as e:
-        # Rollback the transaction on error
-        conn.rollback()
-        cursor.close()
-        raise e
-
-    else:
-        # Commit the transaction if no errors
-        conn.commit()
-
-    finally:
-        # Always close the cursor
-        if cursor is not None:
-            cursor.close()
-
-    cursor.close()
-
-
-commit_to_db(DBCONN, xpdf, 'experiment', 'name')
-
-logger.info(f'Experiment table saved to {prog.database}')
+cm.insert_or_update_table(xpdf, 'experiment', 'name')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                  --     create and update netdf     --
 netdf = pd.DataFrame(all_networks)
 netdf = netdf.drop(columns=['network'])
@@ -398,12 +287,7 @@ for xp in netdf['xp'].unique():
     if xp not in xpdf.index:
         raise ValueError(f'xp {xp} not found in experiment table')
 
-logger.debug(f'Saving network table to {prog.database}')
+cm.insert_or_update_table(netdf, 'network', 'name')
 
-commit_to_db(DBCONN, netdf, 'network', 'name')
-DBCONN.close()
-
-logger.info(f'Network table saved to {prog.database}')
-
-DBCONN.close()
 ##────────────────────────────────────────────────────────────────────────────}}}
+
