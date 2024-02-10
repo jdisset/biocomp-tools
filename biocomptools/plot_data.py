@@ -71,6 +71,7 @@ prog.add_argument(
 
 prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
+prog.add_argument('--plot_root', type=str, default='dataplots', help='Path to prepend to plot URLs')
 
 prog.parse_args()
 
@@ -110,11 +111,10 @@ netdf['network_obj'], netdf['X'], netdf['Y'] = cm.load_networks_and_data(
     netdf, lib, error_handler=error_handler
 )
 
-print(f'Loaded {len(netdf)} networks, with {len(load_errors)} errors')
-
 netdf['plot_error'] = netdf['name'].map(load_errors)
 
-cm.update_table(netdf, 'network', key_column='name', columns=['plot_error'], update_only=True)
+
+# cm.update_table(netdf, 'network', key_column='name', columns=['plot_error'], update_only=True)
 
 plotdf = netdf[netdf['plot_error'].isna()]
 plotdf = plotdf.reset_index(drop=True)
@@ -126,12 +126,17 @@ dman = du.DataManager(
     data_cfg=prog.data_config,
 )
 
+# drop new columns so they don't get transmitted to the workers
+plotdf = plotdf.drop(columns=['network_obj', 'X', 'Y'])
+netdf = netdf.drop(columns=['network_obj', 'X', 'Y'])
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                       --     plot function     --
 
+
 def generate_config(n_inputs, extra_args=None):
-    print(f'Generating config for {n_inputs} inputs, extra_args: {extra_args}')
+    cm.tlog.debug(f'Generating config for {n_inputs} inputs, extra_args: {extra_args}')
     extra_args = extra_args or {}
     plot_config = pu.BASE_DEFAULT_CONFIG
     plot_config['kde'] = False
@@ -145,6 +150,7 @@ def generate_config(n_inputs, extra_args=None):
         raise NotImplementedError(f'Plotting {n_inputs} inputs is not implemented')
     plot_config = ut.updated_dict(plot_config, extra_args)
     return plot_config
+
 
 def do_plot(network, x, y, rescaler, plot_config):
     ax, axes = None, None
@@ -198,7 +204,7 @@ def save_plot(net_row, fig, fpath):
         dpi=300,
     )
     plt.close(fig)
-    cm.tlog.info(f'Saved plot for {net_row.name} to {fpath}')
+    cm.tlog.debug(f'Saved plot for {net_row.name} to {fpath}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -207,10 +213,11 @@ def save_plot(net_row, fig, fpath):
 encoded_names = {net_name: cm.get_name_hash(net_name) for net_name in net_names}
 plot_errors = {}
 
-ray.init(ignore_reinit_error=True, num_cpus=8)
+ray.init(ignore_reinit_error=True, num_cpus=12)
 dman_ref = ray.put(dman)
 
 output_dir = prog.args.output_dir
+
 
 @ray.remote
 def submit_plot_job(net_row, overwrite=False, **kw):
@@ -218,77 +225,47 @@ def submit_plot_job(net_row, overwrite=False, **kw):
     network_id = net_row.Index
     net_name = net_row.name
     fpath = output_dir / f'{encoded_names[net_name]}.png'
-    # fpath = Path(f'/tmp/biocomp/{net_name}.png')
     if fpath.exists() and not overwrite:
-        print(f'File {fpath} already exists, skipping')
-        return None, fpath
+        cm.tlog.debug(f'File {fpath} exists, skipping')
+        return net_name, None
     else:
         fpath.parent.mkdir(parents=True, exist_ok=True)
-        print(f'Plotting {net_name} to {fpath}')
-    network = dmanager.get_networks()[network_id]
-    x, y = dmanager.get_X()[network_id], dmanager.get_Y()[network_id]
-    rescaler = pu.DataManagerRescaler(dmanager)
-    n_inputs = network.get_nb_inputs()
-    plot_config = generate_config(n_inputs, extra_args=kw)
-    try:
-        fig = do_plot(network, x, y, rescaler, plot_config)
-        save_plot(net_row, fig, fpath)
-        return net_name, None
-    except Exception as e:
-        return net_name, f'{e.__class__.__name__}: {e}'
+        cm.tlog.debug(f'Plotting network {net_name} to {fpath}')
+        network = dmanager.get_networks()[network_id]
+        x, y = dmanager.get_X()[network_id], dmanager.get_Y()[network_id]
+        rescaler = pu.DataManagerRescaler(dmanager)
+        n_inputs = network.get_nb_inputs()
+        plot_config = generate_config(n_inputs, extra_args=kw)
+        try:
+            fig = do_plot(network, x, y, rescaler, plot_config)
+            save_plot(net_row, fig, fpath)
+            return net_name, None
+        except Exception as e:
+            return net_name, f'{e.__class__.__name__}: {e}'
+
 
 t0 = time.time()
-results = [submit_plot_job.remote(row, overwrite=True) for row in plotdf.itertuples()]
+results = [submit_plot_job.remote(row, overwrite=False) for row in plotdf.itertuples()]
 results = ray.get(results)
 t1 = time.time()
-print(f'Elapsed time: {t1 - t0:.2f} s')
-print('done')
-
+cm.log.info(f'Elapsed time: {t1 - t0:.2f} s')
 
 ##
-plotdf['plot_error'] = plotdf['name'].map(plot_errors)
-print(f'Plot errors: {plot_errors}')
-base_dir_url = 'dataplots'
-DBCONN = cm.connect_to_db()
-with DBCONN.cursor() as cursor:
-    try:
-        sql = 'UPDATE network SET data_plot = %s WHERE name = %s'
-        for net_name in net_names:
-            if net_name not in plot_errors and net_name not in load_errors:
-                fname = f'{base_dir_url}/{encoded_names[net_name]}.png'
-                print(f'Updating network {net_name} with plot path {fname}')
-                cursor.execute(sql, (fname, net_name))
-            else:
-                cursor.execute(sql, (None, net_name))
-    except Exception as e:
-        print(f'Error updating network table: {e}')
-        raise e
-    finally:
-        DBCONN.commit()
-
-DBCONN.close()
-
-
-##
-# fetch list of network data plots from db:
-DBCONN = cm.connect_to_db()
-with DBCONN.cursor() as cursor:
-    try:
-        cursor.execute('SELECT name, data_plot FROM network')
-        rows = cursor.fetchall()
-    except Exception as e:
-        print(f'Error fetching network data plots: {e}')
-        raise e
-    finally:
-        DBCONN.close()
-
-rows = [r for r in rows if r[1] is not None]
-##
-
-# check that all files exist
-for r in rows:
-    fpath = Path('biocomp-static') / r[1]
-    if not fpath.exists():
-        print(f'File {fpath} does NOT exist!!')
+base_dir_url = prog.args.plot_root
+netdf['data_plot'] = None
+for net_name, err in results:
+    if err is not None:
+        netdf.loc[netdf['name'] == net_name, 'plot_error'] = err
+        netdf.loc[netdf['name'] == net_name, 'data_plot'] = None
     else:
-        print(f'File {fpath} DOES exists')
+        fname = f'{base_dir_url}/{encoded_names[net_name]}.png'
+        netdf.loc[netdf['name'] == net_name, 'data_plot'] = fname
+        netdf.loc[netdf['name'] == net_name, 'plot_error'] = None
+
+cm.log.info(f'Total plots: {netdf["data_plot"].notna().sum()}')
+
+##
+
+cm.update_table(
+    netdf, 'network', key_column='name', columns=['data_plot', 'plot_error'], update_only=True
+)
