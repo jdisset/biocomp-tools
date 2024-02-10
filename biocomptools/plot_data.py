@@ -1,6 +1,8 @@
 ### {{{                          --     imports     --
 import sys
+import ray
 
+from pathos.multiprocessing import ProcessPool
 import urllib.parse
 import openpyxl
 import pandas as pd
@@ -53,36 +55,10 @@ use a database file to load the network and plot it.
 ### {{{                   --     constants and config     --
 lib = ut.load_lib()
 protein_aliases = {'EBFP': 'EBFP2', 'L0.G_MNEONGREEN': 'MNEONGREEN'}
-path_prefix = '/Users/jeandisset/Dropbox (MIT)/Biocomp'
 
-DEFAULT_OUTPUT_DIR = Path('./biocomp-static/dataplots').resolve()
+BIOCOMP_ROOT = cm.get_env_or_local('BIOCOMP_ROOT', cm.DEFAULT_BIOCOMP_ROOT)
 
-BASE_DEFAULT_CONFIG = {
-    'xlims': (-0.027, 0.8),
-    'ylims': (-0.027, 0.8),
-    'log_density': True,
-    'size': (4, 4),
-    'skip_ticklabel_range': (0.0, 101),
-}
-
-DEFAULT_1D_CONFIG = {
-    'method': 'histogram',
-}
-
-DEFAULT_2D_CONFIG = {
-    'method': 'smooth',
-}
-
-DEFAULT_3D_CONFIG = {
-    'xlims': (-0.027, 0.85),
-    'ylims': (-0.027, 0.85),
-    'vlims': (-0.027, 0.85),
-    'method': 'smooth',
-    'slices': (0.1, 0.3, 0.5),
-    'radius': 0.11,
-    'knn': 500,
-    'min_points': 20,
-}
+DEFAULT_OUTPUT_DIR = Path(BIOCOMP_ROOT) / 'biocomp-static/dataplots'
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     arg declaration and parsing     --
@@ -98,9 +74,7 @@ prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 
 prog.parse_args()
 
-DBCONN = cm.connect_to_db()
-netdf = cm.load_table_as_dataframe(DBCONN, 'network')
-xpdf = cm.load_table_as_dataframe(DBCONN, 'experiment')
+netdf = cm.table_to_df('network')
 
 prog.database_mode = True
 
@@ -121,89 +95,71 @@ else:
     prog.data_config = json5.load(open(prog.data_config, 'r'))
 
 
-
-
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                           --     utils     --
-
-def get_network_nb_inputs(dman, net_id, net_id_to_dman_id):
-    assert net_id in net_id_to_dman_id
-    dmanid = net_id_to_dman_id[net_id]
-    network = dman.get_networks()[dmanid]
-    return network.get_nb_inputs()
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     load networks and data     --
 
-net_with_data = netdf[netdf['data_file'].notna()]
-net_names = net_with_data['name'].tolist()
+load_errors = {}
 
-net_name_to_dman_id, load_errors = {}, {}
-networks, Xs, Ys = [], [], []
 
-for net_name in tqdm(list(net_names), desc='Loading networks'):
-    net_name_to_dman_id[net_name] = len(networks)
-    try:
-        network, X, Y = cm.load_network_and_data(netdf, net_name, lib, path_prefix=path_prefix)
-        networks.append(network)
-        Xs.append(X)
-        Ys.append(Y)
-    except Exception as e:
-        load_errors[net_name] = f'{e.__class__.__name__}: {e}'
+def error_handler(net_name, e):
+    load_errors[net_name] = f'{e.__class__.__name__}: {e}'
+    return None, None, None
 
-dman = du.DataManager(Xs, Ys, networks, data_cfg=prog.data_config)
 
-load_errors
+netdf['network_obj'], netdf['X'], netdf['Y'] = cm.load_networks_and_data(
+    netdf, lib, error_handler=error_handler
+)
+
+print(f'Loaded {len(netdf)} networks, with {len(load_errors)} errors')
+
+netdf['plot_error'] = netdf['name'].map(load_errors)
+
+cm.update_table(netdf, 'network', key_column='name', columns=['plot_error'], update_only=True)
+
+plotdf = netdf[netdf['plot_error'].isna()]
+plotdf = plotdf.reset_index(drop=True)
+
+dman = du.DataManager(
+    plotdf['X'].tolist(),
+    plotdf['Y'].tolist(),
+    plotdf['network_obj'].tolist(),
+    data_cfg=prog.data_config,
+)
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                       --     plot function     --
 
-
-def make_network_title(netdf, net_id):
-    assert net_id in netdf['name'].values
-    net_row = netdf[netdf['name'] == net_id]
-    assert len(net_row) == 1
-    net_row = net_row.iloc[0]
-    title = r"\fontsize{12}{12}\selectfont " + net_row['recipe_name'] + '\n'
-    title += r"\fontsize{8}{8}\selectfont from " + net_row['xp'] + '\n'
-    return title
-
-
-def plot_network_data(dman, net_name, net_name_to_dman_id, extra_args=None):
-    plot_title = make_network_title(netdf, net_name)
-    assert net_name in net_name_to_dman_id
-    dmanid = net_name_to_dman_id[net_name]
-    network = dman.get_networks()[dmanid]
-    n_inputs = network.get_nb_inputs()
-
+def generate_config(n_inputs, extra_args=None):
+    print(f'Generating config for {n_inputs} inputs, extra_args: {extra_args}')
     extra_args = extra_args or {}
-    plot_config = BASE_DEFAULT_CONFIG
-
-    ax, axes = None, None
-
+    plot_config = pu.BASE_DEFAULT_CONFIG
+    plot_config['kde'] = False
     if n_inputs == 1:
-        plot_config = ut.updated_dict(plot_config, DEFAULT_1D_CONFIG)
+        plot_config = ut.updated_dict(plot_config, pu.DEFAULT_1D_CONFIG)
     elif n_inputs == 2:
-        plot_config = ut.updated_dict(plot_config, DEFAULT_2D_CONFIG)
+        plot_config = ut.updated_dict(plot_config, pu.DEFAULT_2D_CONFIG)
     elif n_inputs == 3:
-        plot_config = ut.updated_dict(plot_config, DEFAULT_3D_CONFIG)
+        plot_config = ut.updated_dict(plot_config, pu.DEFAULT_3D_CONFIG)
     else:
         raise NotImplementedError(f'Plotting {n_inputs} inputs is not implemented')
     plot_config = ut.updated_dict(plot_config, extra_args)
+    return plot_config
 
+def do_plot(network, x, y, rescaler, plot_config):
+    ax, axes = None, None
+    fig = None
+    n_inputs = network.get_nb_inputs()
     input_order = plot_config.get('input_order', None)
     if 'input_order' in plot_config:
         del plot_config['input_order']
-
-    fig = None
     if n_inputs <= 2:
         fig, ax = pu.mkfig(1, 1, size=plot_config['size'])
         if input_order is None:
             input_order = list(range(n_inputs))
-        pu.network_plot(dman, dmanid, ax=ax, input_order=input_order, **plot_config)
+        pu.direct_network_plot(
+            network, x, y, rescaler, ax=ax, input_order=input_order, **plot_config
+        )
     else:
         if 'slices' not in plot_config:
             raise ValueError('You must specify slices for 3D plots')
@@ -215,56 +171,83 @@ def plot_network_data(dman, net_name, net_name_to_dman_id, extra_args=None):
                 for i in range(n_inputs):
                     iorder = list(range(n_inputs))
                     iorder = iorder[i:] + iorder[:i]
-                    pu.network_plot(
-                        dman, dmanid, axes=axes[i, :], input_order=iorder, **plot_config
+                    pu.direct_network_plot(
+                        network, x, y, rescaler, axes=axes[i, :], input_order=iorder, **plot_config
                     )
             else:
                 fig, axes = pu.mkfig(1, nslices, size=plot_config['size'])
-                pu.network_plot(dman, dmanid, axes=axes, input_order=input_order, **plot_config)
-    fig.suptitle(plot_title, fontsize=12)
+                pu.direct_network_plot(
+                    network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
+                )
     return fig
+
+
+def make_network_title(net_row):
+    title = r"\fontsize{12}{12}\selectfont " + net_row.recipe_name + '\n'
+    title += r"\fontsize{8}{8}\selectfont from " + net_row.xp + '\n'
+    return title
+
+
+def save_plot(net_row, fig, fpath):
+    title = make_network_title(net_row)
+    fig.suptitle(title, fontsize=12)
+    fig.savefig(
+        fpath,
+        bbox_inches='tight',
+        pad_inches=0.05,
+        dpi=300,
+    )
+    plt.close(fig)
+    cm.tlog.info(f'Saved plot for {net_row.name} to {fpath}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 encoded_names = {net_name: cm.get_name_hash(net_name) for net_name in net_names}
 plot_errors = {}
 
+ray.init(ignore_reinit_error=True, num_cpus=8)
+dman_ref = ray.put(dman)
 
-def plot_and_save(net_name, **kw):
-    global dman
-    global prog
-    global plot_errors
-    global load_errors
-    global net_name_to_dman_id
-    if net_name not in load_errors:
-        try:
-            fpath = prog.args.output_dir / f'{encoded_names[net_name]}.png'
-            # if already exists, skip
-            if fpath.exists():
-                print(f'File {fpath} already exists, skipping')
-                return
+output_dir = prog.args.output_dir
 
-            f = plot_network_data(dman, net_name, net_name_to_dman_id, **kw)
-            f.savefig(
-                fpath,
-                bbox_inches='tight',
-                pad_inches=0.05,
-                dpi=300,
-            )
-            plt.close(f)
-        except Exception as e:
-            print(f'Error plotting {net_name}: {e}')
-            plot_errors[net_name] = e
+@ray.remote
+def submit_plot_job(net_row, overwrite=False, **kw):
+    dmanager = ray.get(dman_ref)
+    network_id = net_row.Index
+    net_name = net_row.name
+    fpath = output_dir / f'{encoded_names[net_name]}.png'
+    # fpath = Path(f'/tmp/biocomp/{net_name}.png')
+    if fpath.exists() and not overwrite:
+        print(f'File {fpath} already exists, skipping')
+        return None, fpath
+    else:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        print(f'Plotting {net_name} to {fpath}')
+    network = dmanager.get_networks()[network_id]
+    x, y = dmanager.get_X()[network_id], dmanager.get_Y()[network_id]
+    rescaler = pu.DataManagerRescaler(dmanager)
+    n_inputs = network.get_nb_inputs()
+    plot_config = generate_config(n_inputs, extra_args=kw)
+    try:
+        fig = do_plot(network, x, y, rescaler, plot_config)
+        save_plot(net_row, fig, fpath)
+        return net_name, None
+    except Exception as e:
+        return net_name, f'{e.__class__.__name__}: {e}'
 
+t0 = time.time()
+results = [submit_plot_job.remote(row, overwrite=True) for row in plotdf.itertuples()]
+results = ray.get(results)
+t1 = time.time()
+print(f'Elapsed time: {t1 - t0:.2f} s')
+print('done')
 
-for net_name in tqdm(net_names[:]):
-    plot_and_save(net_name, extra_args={'method': 'smooth'})
-
-
-# add the path in the data_plot_path column of the network table, if plot_errors is empty
 
 ##
+plotdf['plot_error'] = plotdf['name'].map(plot_errors)
+print(f'Plot errors: {plot_errors}')
 base_dir_url = 'dataplots'
 DBCONN = cm.connect_to_db()
 with DBCONN.cursor() as cursor:
@@ -304,7 +287,7 @@ rows = [r for r in rows if r[1] is not None]
 
 # check that all files exist
 for r in rows:
-    fpath = Path('biocomp-static')/r[1]
+    fpath = Path('biocomp-static') / r[1]
     if not fpath.exists():
         print(f'File {fpath} does NOT exist!!')
     else:

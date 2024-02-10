@@ -20,6 +20,7 @@ from psycopg2.extras import execute_values
 import logging
 import os
 from tqdm import tqdm
+from result import Ok, Err, Result, is_ok, is_err
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -61,9 +62,7 @@ BIOCOMP_LOCAL_VAR_FILE = os.getenv('BIOCOMP_LOCAL_VAR_FILE', DEFAULT_LOCAL_VAR_F
 BIOCOMP_LOCAL_VARS = {}
 
 
-def get_from_env_or_local_vars(
-    varname, filename=BIOCOMP_LOCAL_VAR_FILE, default=None, raise_error=True
-):
+def get_env_or_local(varname, default=None, filename=BIOCOMP_LOCAL_VAR_FILE, raise_error=True):
     """
     Get a variable from the environment (in priority), or from local var file if available.
     """
@@ -92,17 +91,24 @@ def get_from_env_or_local_vars(
         tlog.debug(f'Variable {varname} not found in either env or {filename}, using default value')
         return default
 
-BIOCOMP_ROOT = get_from_env_or_local_vars(
-    'BIOCOMP_ROOT', default=DEFAULT_BIOCOMP_ROOT, raise_error=False
-)
 
-BIOCOMP_PROTEIN_ALIASES = get_from_env_or_local_vars(
+BIOCOMP_ROOT = get_env_or_local('BIOCOMP_ROOT', default=DEFAULT_BIOCOMP_ROOT, raise_error=False)
+
+BIOCOMP_PROTEIN_ALIASES = get_env_or_local(
     'BIOCOMP_PROTEIN_ALIASES', default=DEFAULT_PROTEIN_ALIASES, raise_error=False
 )
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     general utils     --
+
+
+def notnull(x):
+    return x != '' and x is not None and x.lower() != 'none'
+
+
+def isnull(x):
+    return not notnull(x)
 
 
 def parse_list(input_string):
@@ -135,13 +141,12 @@ def filter_df(df, **filters):
 
 ### {{{                     --     general db utils     --
 
-
 def connect_to_db():
-    BIOCOMP_DB_NAME = get_from_env_or_local_vars('BIOCOMP_DB_NAME')
-    BIOCOMP_DB_USER = get_from_env_or_local_vars('BIOCOMP_DB_USER')
-    BIOCOMP_DB_PASS = get_from_env_or_local_vars('BIOCOMP_DB_PASS')
-    BIOCOMP_DB_HOST = get_from_env_or_local_vars('BIOCOMP_DB_HOST')
-    BIOCOMP_DB_PORT = get_from_env_or_local_vars('BIOCOMP_DB_PORT')
+    BIOCOMP_DB_NAME = get_env_or_local('BIOCOMP_DB_NAME')
+    BIOCOMP_DB_USER = get_env_or_local('BIOCOMP_DB_USER')
+    BIOCOMP_DB_PASS = get_env_or_local('BIOCOMP_DB_PASS')
+    BIOCOMP_DB_HOST = get_env_or_local('BIOCOMP_DB_HOST')
+    BIOCOMP_DB_PORT = get_env_or_local('BIOCOMP_DB_PORT')
     try:
         conn = psycopg2.connect(
             dbname=BIOCOMP_DB_NAME,
@@ -210,14 +215,52 @@ def execute_many(query, params, conn=None, dry_run=False):
         conn.close()
 
 
-def update_table(df, table_name, key_column, conn=None, dry_run=False):
-    columns = df.columns.to_list()
-    query = f"""
-        INSERT INTO {table_name} ({', '.join(columns)})
-        VALUES %s ON CONFLICT ({key_column})
-        DO UPDATE SET ({', '.join(columns)}) = ({', '.join(['EXCLUDED.' + col for col in columns])})
-        """
-    execute_many(query, df.values, conn, dry_run=dry_run)
+def convert_types_to_sql(df):
+    # convert types to sql types
+    df = df.copy()
+    for col in df.columns:
+        # posixpath to string
+        if df[col].dtype == 'O':
+            df[col] = df[col].astype(str)
+        # datetime to string
+        if df[col].dtype == 'datetime64[ns]':
+            df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+    return df
+
+
+def update_table(
+    df, table_name, key_column, conn=None, dry_run=False, columns=None, update_only=False
+):
+
+    df = convert_types_to_sql(df)
+    assert key_column in df.columns
+
+    if columns is not None:
+        # check that all columns are present in the dataframe
+        for col in columns:
+            if col not in df.columns:
+                raise ValueError(f'Column {col} not found in dataframe')
+    else:
+        columns = df.columns.to_list()
+
+    columns = list(set(columns + [key_column]))
+
+    if update_only:
+        query = f"""
+                UPDATE {table_name} SET {', '.join([f'{col} = v.{col}' for col in columns])}
+                FROM (VALUES %s) v({', '.join(columns)})
+                WHERE {table_name}.{key_column} = v.{key_column}
+                """
+    else:
+        query = f"""
+            INSERT INTO {table_name} ({', '.join(columns)})
+            VALUES %s ON CONFLICT ({key_column})
+            DO UPDATE SET ({', '.join(columns)}) = ({', '.join(['EXCLUDED.' + col for col in columns])})
+            """
+
+    execute_many(query, df[columns].values, conn, dry_run=dry_run)
+
+    tlog.info(f'Updated {len(df)} rows in table {table_name}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -263,11 +306,13 @@ def add_networks_to_collection(collection_name, network_names):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                   --     network objects loading utils     --
 
+# TODO MAYBE:
+# parallel load_network_and_data with ray
+
 def resolve_path(filepath, path_prefix):
-    if pd.isna(filepath):
+    if isnull(filepath):
         raise ValueError(f'File path information missing')
     filepath = Path(path_prefix) / filepath
     filepath = Path(filepath).resolve()
@@ -277,24 +322,37 @@ def resolve_path(filepath, path_prefix):
 
 
 def load_network_and_data_from_row(
-    network_row, lib, path_prefix=BIOCOMP_ROOT, protein_aliases=BIOCOMP_PROTEIN_ALIASES
+    network_row,
+    lib,
+    path_prefix=BIOCOMP_ROOT,
+    protein_aliases=BIOCOMP_PROTEIN_ALIASES,
+    error_handler=None,
 ):
 
-    data_file = resolve_path(network_row['data_file'], path_prefix)
-    recipe_file = resolve_path(network_row['recipe_file'], path_prefix)
+    if error_handler is None:
 
-    candidate_networks = bc.recipe.network_from_recipe(recipe_file, lib, inverse='all')
+        def error_handler(name, e):
+            raise e
 
-    # when trying to load a network from the database, we have to select the right one
-    # After reading a recipe, we have several candidate networks, one for each possible inversion
-    # we can use the markers to select the right one
-    candidate_markers = [
-        set(bc.recipe.escape(n.get_inverted_input_proteins())) for n in candidate_networks
-    ]
-    target_markers = set(parse_list(network_row['markers']))
-    escaped_target_markers = bc.recipe.escape(target_markers)
-    network = candidate_networks[candidate_markers.index(escaped_target_markers)]
-    X, Y = bc.recipe.get_network_XY(network, data_file, color_aliases=protein_aliases)
+        error_handler = error_handler
+
+    try:
+        data_file = resolve_path(network_row['data_file'], path_prefix)
+        recipe_file = resolve_path(network_row['recipe_file'], path_prefix)
+        candidate_networks = bc.recipe.network_from_recipe(recipe_file, lib, inverse='all')
+        # when trying to load a network from the database, we have to select the right one
+        # After reading a recipe, we have several candidate networks, one for each possible inversion
+        # we can use the markers to select the right one
+        candidate_markers = [
+            set(bc.recipe.escape(n.get_inverted_input_proteins())) for n in candidate_networks
+        ]
+        target_markers = set(parse_list(network_row['markers']))
+        escaped_target_markers = bc.recipe.escape(target_markers)
+        network = candidate_networks[candidate_markers.index(escaped_target_markers)]
+        X, Y = bc.recipe.get_network_XY(network, data_file, color_aliases=protein_aliases)
+    except Exception as e:
+        return error_handler(network_row['name'], e)
+
     return network, X, Y
 
 
@@ -324,11 +382,15 @@ def load_networks_and_data(netdf, lib, **kwargs):
     # (markers is needed to disambiguate from all the potential recipe inversions)
     networks, Xs, Ys = [], [], []
     for _, row in netdf.iterrows():
-        tlog.info(f'Loading network {row["name"]}')
-        network, X, Y = load_network_and_data_from_row(row, lib, **kwargs)
-        networks.append(network)
-        Xs.append(X)
-        Ys.append(Y)
+        try:
+            tlog.info(f'Loading network {row["name"]}')
+            network, X, Y = load_network_and_data_from_row(row, lib, **kwargs)
+            networks.append(network)
+            Xs.append(X)
+            Ys.append(Y)
+        except Exception as e:
+            tlog.error(f'Error loading network {row["name"]}: {e}')
+
     return networks, Xs, Ys
 
 
@@ -371,9 +433,8 @@ class CLIProgram:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 ### {{{                         --     df tools     --
-
-
 def merge_update(
     left_df, right_df, key_column, priority, use_left=None, use_right=None, how='outer'
 ):
