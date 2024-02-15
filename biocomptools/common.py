@@ -5,8 +5,6 @@ import json
 import sys
 from pathlib import Path
 import pandas as pd
-import openpyxl
-from openpyxl.styles import PatternFill, Font
 import xxhash
 
 # using base58 instead of base64 because it's url-safe
@@ -18,85 +16,28 @@ import biocomp as bc
 import psycopg2
 from psycopg2.extras import execute_values
 import logging
-import os
 from tqdm import tqdm
 from result import Ok, Err, Result, is_ok, is_err
 
-##────────────────────────────────────────────────────────────────────────────}}}
+from typing import Union, List, Tuple, Dict, Any, Callable, Collection
 
-### {{{                         --     defaults     --
+PathLike = Union[str, Path]
+
+import constants as ctes
+
+from constants import (
+    BIOCOMP_DB_NAME,
+    BIOCOMP_DB_USER,
+    BIOCOMP_DB_PASS,
+    BIOCOMP_DB_HOST,
+    BIOCOMP_DB_PORT,
+    BIOCOMP_ROOT,
+    BIOCOMP_PROTEIN_ALIASES,
+    BIOCOMP_NETWORK_CACHE_DIR,
+)
+
 tlog = logging.getLogger('biocomp_tools_common')
 tlog.setLevel(logging.DEBUG)
-
-DEFAULT_CALIB_PATHS = [
-    './data/calibrated_data_v3',
-    './data/calibrated_data_v2',
-    './data/calibrated_data',
-]
-DEFAULT_CALIB_NAMES = ['v3', 'v2', 'old']
-DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
-DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
-DEFAULT_XP_CACHE_DIR = './devtmp/cache/xp_objs'
-DEFAULT_DATA_CONFIG = {
-    'network_cache_location': './__cache/network',
-    'training_cache_location': './__cache/training',
-    'densities_cache_location': './__cache/densities',
-    'data_min_value': 500,
-    'data_max_value': 100000000.0,
-    'data_log_offset': 3000.0,
-    'data_log_factor': 100,
-    'data_log_poly_threshold': 300,
-    'data_log_poly_compression': 0.4,
-    'data_sampling_kde_bw_method': 0.02,
-    'data_sampling_max_density_samples': 4000,
-    'data_sampling_density_quantile_threshold': 0.025,
-    'data_sampling_coords_for_density_threshold': 0.15,
-}
-DEFAULT_DATA_CONFIG_PATH = None
-DEFAULT_BIOCOMP_ROOT = '/Users/jeandisset/Dropbox (MIT)/Biocomp'
-DEFAULT_PROTEIN_ALIASES = {'EBFP': 'EBFP2', 'L0.G_MNEONGREEN': 'MNEONGREEN'}
-
-DEFAULT_LOCAL_VAR_FILE = '__local_vars.py'
-
-BIOCOMP_LOCAL_VAR_FILE = os.getenv('BIOCOMP_LOCAL_VAR_FILE', DEFAULT_LOCAL_VAR_FILE)
-BIOCOMP_LOCAL_VARS = {}
-
-
-def get_env_or_local(varname, default=None, filename=BIOCOMP_LOCAL_VAR_FILE, raise_error=True):
-    """
-    Get a variable from the environment (in priority), or from local var file if available.
-    """
-    global BIOCOMP_LOCAL_VARS
-
-    if varname in os.environ:
-        tlog.debug(f'Variable {varname} found in environment')
-        return os.environ[varname]
-
-    if filename not in BIOCOMP_LOCAL_VARS:
-        if os.path.exists(filename):
-            tlog.debug(f'Loading local vars from {filename}')
-            with open(filename, 'r') as f:
-                local_vars = {}
-                exec(f.read(), {}, local_vars)
-                tlog.debug(f'Local vars found: {local_vars.keys()}')
-                BIOCOMP_LOCAL_VARS[filename] = local_vars
-
-    if filename in BIOCOMP_LOCAL_VARS and varname in BIOCOMP_LOCAL_VARS[filename]:
-        tlog.debug(f'Variable {varname} found in local vars')
-        return BIOCOMP_LOCAL_VARS[filename][varname]
-
-    if raise_error and default is None:
-        raise ValueError(f'Variable {varname} not found in either environment or {filename}')
-    else:
-        tlog.debug(f'Variable {varname} not found in either env or {filename}, using default value')
-        return default
-
-
-BIOCOMP_ROOT = get_env_or_local('BIOCOMP_ROOT', default=DEFAULT_BIOCOMP_ROOT, raise_error=False)
-
-BIOCOMP_PROTEIN_ALIASES = get_env_or_local(
-    'BIOCOMP_PROTEIN_ALIASES', default=DEFAULT_PROTEIN_ALIASES, raise_error=False
-)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -139,14 +80,12 @@ def filter_df(df, **filters):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                     --     general db utils     --
+### {{{                     --     db utils     --
+
+from typing import Optional, Collection
+
 
 def connect_to_db():
-    BIOCOMP_DB_NAME = get_env_or_local('BIOCOMP_DB_NAME')
-    BIOCOMP_DB_USER = get_env_or_local('BIOCOMP_DB_USER')
-    BIOCOMP_DB_PASS = get_env_or_local('BIOCOMP_DB_PASS')
-    BIOCOMP_DB_HOST = get_env_or_local('BIOCOMP_DB_HOST')
-    BIOCOMP_DB_PORT = get_env_or_local('BIOCOMP_DB_PORT')
     try:
         conn = psycopg2.connect(
             dbname=BIOCOMP_DB_NAME,
@@ -160,59 +99,90 @@ def connect_to_db():
         raise e
     return conn
 
+# list or tuple type:
+ListOrTuple = Union[List, Tuple]
 
-def query_to_df(query, params=None, conn=None):
+
+def execute_query(
+    query: str,
+    params: Optional[ListOrTuple] = None,
+    conn: Optional[psycopg2.extensions.connection] = None,
+    close_after=True,
+):
+    conn = conn or connect_to_db()
+    cur = conn.cursor()
     try:
-        if conn is None:
-            conn = connect_to_db()
-        cur = conn.cursor()
         cur.execute(query, params)
-        df = pd.DataFrame(cur.fetchall(), columns=[desc[0] for desc in cur.description])
+        # conn.commit()
     except Exception as e:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
-    return df
+        if close_after:
+            cur.close()
+            conn.close()
+
+    return cur, conn
 
 
-def table_to_df(table_name, **kwargs):
-    return query_to_df(f'SELECT * FROM {table_name}', **kwargs)
-
-
-def execute_query(query, params=None, conn=None):
-    try:
-        if conn is None:
-            conn = connect_to_db()
-        cur = conn.cursor()
-        cur.execute(query, params)
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        cur.close()
-        conn.close()
-
-
-def execute_many(query, params, conn=None, dry_run=False):
+def execute_many(
+    query: str,
+    params: ListOrTuple,
+    conn: Optional[psycopg2.extensions.connection] = None,
+    dry_run: bool = False,
+    close_after: bool = True,
+):
     if dry_run:
         tlog.info(f'Dry run: {query} with {len(params)} values:')
         tlog.info(params)
         return
+    conn = conn or connect_to_db()
+    cur = conn.cursor()
     try:
-        if conn is None:
-            conn = connect_to_db()
-        cur = conn.cursor()
         execute_values(cur, query, params)
         conn.commit()
     except Exception as e:
         conn.rollback()
         raise e
     finally:
-        cur.close()
-        conn.close()
+        if close_after:
+            cur.close()
+            conn.close()
+    return cur, conn
+
+
+def query_to_df(
+    query: str,
+    params: Optional[ListOrTuple] = None,
+    conn: Optional[psycopg2.extensions.connection] = None,
+):
+    conn = conn or connect_to_db()
+    cur, _ = execute_query(query, params, conn, close_after=False)
+    if cur.description is None:
+        return pd.DataFrame()
+    df = pd.DataFrame(cur.fetchall(), columns=[desc[0] for desc in cur.description])
+    cur.close()
+    conn.close()
+    return df
+
+
+def get_row(
+    query: str,
+    params: Optional[ListOrTuple] = None,
+    conn: Optional[psycopg2.extensions.connection] = None,
+):
+    df = query_to_df(query, params, conn)
+    if len(df) == 0:
+        return None
+    return df.iloc[0].to_dict()
+
+
+def get_row_by_id(table_name, key_column, id, conn=None):
+    return get_row(f'SELECT * FROM {table_name} WHERE {key_column} = %s', (id,), conn)
+
+
+def table_to_df(table_name, **kwargs):
+    return query_to_df(f'SELECT * FROM {table_name}', **kwargs)
 
 
 def convert_types_to_sql(df):
@@ -267,7 +237,6 @@ def update_table(
 
 ### {{{                       --     collection utils     --
 
-
 def get_networks_in_collections(collections):
     if not isinstance(collections, list):
         collections = [collections]
@@ -279,7 +248,12 @@ def get_networks_in_collections(collections):
         raise ValueError(f'Collections {diff} not found in database')
 
     param_placeholders = ', '.join(['%s'] * len(collections))
-    query = f"SELECT * FROM collection_network WHERE collection_name IN ({param_placeholders})"
+
+    query = f"""
+    SELECT DISTINCT n.*, collection_name FROM collection_network cn
+    JOIN network n ON cn.network_name = n.name
+    WHERE cn.collection_name IN ({param_placeholders})
+    """
     return query_to_df(query, collections)
 
 
@@ -311,6 +285,7 @@ def add_networks_to_collection(collection_name, network_names):
 # TODO MAYBE:
 # parallel load_network_and_data with ray
 
+
 def resolve_path(filepath, path_prefix):
     if isnull(filepath):
         raise ValueError(f'File path information missing')
@@ -327,19 +302,22 @@ def load_network_and_data_from_row(
     path_prefix=BIOCOMP_ROOT,
     protein_aliases=BIOCOMP_PROTEIN_ALIASES,
     error_handler=None,
+    cache_dir: Optional[PathLike] = BIOCOMP_NETWORK_CACHE_DIR,
 ):
 
     if error_handler is None:
 
-        def error_handler(name, e):
+        def __raise_on_error(name, e):
             raise e
 
-        error_handler = error_handler
+        error_handler = __raise_on_error
 
     try:
         data_file = resolve_path(network_row['data_file'], path_prefix)
         recipe_file = resolve_path(network_row['recipe_file'], path_prefix)
-        candidate_networks = bc.recipe.network_from_recipe(recipe_file, lib, inverse='all')
+        candidate_networks = bc.recipe.network_from_recipe(
+            recipe_file, lib, inverse='all', use_cache=cache_dir
+        )
         # when trying to load a network from the database, we have to select the right one
         # After reading a recipe, we have several candidate networks, one for each possible inversion
         # we can use the markers to select the right one
@@ -366,13 +344,19 @@ def get_network_row(netdf, net_name):
 
 
 def load_network_and_data(
-    netdf, net_name, lib, path_prefix=BIOCOMP_ROOT, protein_aliases=BIOCOMP_PROTEIN_ALIASES
+    netdf: pd.DataFrame,
+    net_name: str,
+    lib: bc.recipe.PartsLibrary,
+    path_prefix: PathLike = BIOCOMP_ROOT,
+    protein_aliases: Dict = BIOCOMP_PROTEIN_ALIASES,
+    cache_dir: Optional[PathLike] = BIOCOMP_NETWORK_CACHE_DIR,
 ):
     return load_network_and_data_from_row(
         get_network_row(netdf, net_name),
         lib,
         path_prefix=path_prefix,
         protein_aliases=protein_aliases,
+        cache_dir=cache_dir,
     )
 
 

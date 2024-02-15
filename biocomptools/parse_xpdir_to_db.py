@@ -30,13 +30,13 @@ from pathlib import Path
 from rich import print as rprint
 
 import common as cm
+from biocomp.datautils import DEFAULT_DATA_CONFIG
 from common import (
     DEFAULT_CALIB_PATHS,
     DEFAULT_CALIB_NAMES,
     DEFAULT_XP_PATH,
     DEFAULT_RECIPE_PATH,
     DEFAULT_XP_CACHE_DIR,
-    DEFAULT_DATA_CONFIG,
     DEFAULT_DATA_CONFIG_PATH,
     BIOCOMP_ROOT,
 )

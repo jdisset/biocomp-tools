@@ -16,3 +16,14 @@ dependencies = [
 [project.scripts]
 #biocomptools_train= "biocomp-tools:train.main"
 
+[tool.pyright]
+include = ["src"]
+
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+pythonVersion = "3.11"
+
+venvPath = "/opt/homebrew/Caskroom/miniconda/base/envs"
+venv = "py311"
+

@@ -34,14 +34,12 @@ from pathlib import Path
 from rich import print as rprint
 
 import common as cm
-from common import (
-    DEFAULT_CALIB_PATHS,
-    DEFAULT_CALIB_NAMES,
-    DEFAULT_XP_PATH,
-    DEFAULT_RECIPE_PATH,
-    DEFAULT_XP_CACHE_DIR,
-    DEFAULT_DATA_CONFIG,
+import constants as cte
+
+from biocomp.datautils import DEFAULT_DATA_CONFIG
+from constants import (
     DEFAULT_DATA_CONFIG_PATH,
+    BIOCOMP_ROOT,
 )
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -54,13 +52,9 @@ use a database file to load the network and plot it.
 
 ### {{{                   --     constants and config     --
 lib = ut.load_lib()
-protein_aliases = {'EBFP': 'EBFP2', 'L0.G_MNEONGREEN': 'MNEONGREEN'}
-
-BIOCOMP_ROOT = cm.get_env_or_local('BIOCOMP_ROOT', cm.DEFAULT_BIOCOMP_ROOT)
-
 DEFAULT_OUTPUT_DIR = Path(BIOCOMP_ROOT) / 'biocomp-static/dataplots'
-
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                --     arg declaration and parsing     --
 prog = cm.CLIProgram()
 
@@ -69,7 +63,7 @@ prog.add_argument(
     '--network_id', help='network id to plot: int, list of network ids, or "all"', default='all'
 )
 
-prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
+prog.add_argument('--data_config', type=str, default=None)
 prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 prog.add_argument('--plot_root', type=str, default='dataplots', help='Path to prepend to plot URLs')
 
