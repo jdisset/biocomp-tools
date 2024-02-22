@@ -63,6 +63,7 @@ prog.add_argument(
     '--network_id', help='network id to plot: int, list of network ids, or "all"', default='all'
 )
 
+# prog.add_argument('--recipe_file', type=str, default=None)
 prog.add_argument('--data_config', type=str, default=None)
 prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 prog.add_argument('--plot_root', type=str, default='dataplots', help='Path to prepend to plot URLs')

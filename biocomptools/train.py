@@ -33,8 +33,8 @@ import json
 from pathlib import Path
 from rich import print as rprint
 
-import common as cm
-import constants as cte
+from toollib import common as cm
+from toollib import constants as cte
 
 import logging
 from jax.tree_util import tree_flatten, tree_unflatten
@@ -115,10 +115,12 @@ prog.parse_args(
         '--',
         '--seed',
         '42',
+        '--config',
+        'n_replicates=5',
+        '--config',
+        'n_epochs=2',
     ]
 )
-
-prog.args.training_set
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -177,6 +179,7 @@ import wandb as wb
 from functools import partial
 
 trainprog = train.TrainingProgram()
+prog.args.trainprog_args
 trainprog.parse_args(prog.args.trainprog_args)
 
 # overwrite configurations
@@ -196,68 +199,68 @@ full_config = {
     **trainprog.compute_config.config,
 }
 
-
-# [x] start wandb logging
-# [x] fetch wb name and id
-
-WANDB_ENTITY = cte.get_env_or_local('WANDB_ENTITY', 'jdisset')
-assert wb.api.api_key, 'W&B API key not found'
-wb_run = wb.init(config=full_config, project=trainprog.wandb_project, entity=WANDB_ENTITY)
-assert wb_run, 'Failed to start W&B run'
-
-loggers = [
-    (1, bc.train.console_log),
-    (1, bc.train.wandb_log_epoch),
-    (trainprog.wandb_plot_period, partial(trainprog.wandb_plot_pred, dman=dman)),
-]
-
 # TODO:
 # [x] --n_replicates:
 #   [x] vmap over replicates
 #   [x] write "get_best_loss_id" function that returns the lowest *smoothed* loss
 #   [x] wandb_plot_pred should log only the best replicate
 #   [x] wandb_log_epoch should log each replicate's loss separately
+#   [x] make loss function a training parameter
 # [x] get best model from W&B
-
-# params, loss_history = bc.train.start(
-# dman, trainprog.training_config, trainprog.compute_config, loggers, seed=trainprog.seed
-# )
-
-
-def best_loss_id(loss_history):
-    pass
-
-
-# [x] use the wb name and id to log everything to the database
-# [ ] log networks being used into a network_training_run table (more reliable than the collection name)
-# [ ] but also log the arguments used to load the networks, including the collection names as its own column
+# [x] start wandb logging
+# [x] fetch wb name and id
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                      --     start training     --
+
+ndArray = bc.trainutils.ndArray
 from scipy.ndimage import gaussian_filter1d
-assert isinstance(training_config, dict)
 
-N_EPOCHS = 2
-N_REPLICATES = 20
+WANDB_ENTITY = cte.get_env_or_local('WANDB_ENTITY', 'jdisset')
+assert wb.api.api_key, 'W&B API key not found'
+wb_run = wb.init(config=full_config, project=trainprog.wandb_project, entity=WANDB_ENTITY)
+assert wb_run, 'Failed to start W&B run'
+save_dir = Path(wb_run.dir)
 
-training_config['epochs'] = N_EPOCHS
-training_config['n_replicates'] = N_REPLICATES
+loggers = [
+    (1, console_log),
+    (
+        trainprog.wandb_save_period,
+        partial(
+            bc.trainutils.local_save,
+            compute_config=compute_config,
+            training_config=training_config,
+            data_config=data_config,
+            save_dir=save_dir,
+        ),
+    ),
+    (1, bc.trainutils.wandb_log_epoch),
+]
 
-params, loss_history = train.start(
+
+params, loss_history = bc.train.start(
     dman,
     training_config,
     compute_config,
-    # loggers,
+    loggers,
 )
 
-##
 
-def get_best_smoothed_loss_id(loss_history, sigma=10):
+##────────────────────────────────────────────────────────────────────────────}}}##
+
+### {{{                      --     get best model     --
+
+
+def get_best_smoothed_loss_id(
+    loss_history: List[ndArray], sigma: float = 10.0
+) -> Tuple[int, np.ndarray]:
     all_losses = np.hstack(loss_history)
     smoothed_losses = gaussian_filter1d(all_losses, sigma=sigma)
-    best_loss_id = np.argmin(smoothed_losses)
+    best_loss_id = int(np.argmin(smoothed_losses))
     return best_loss_id, smoothed_losses
+
 
 best_loss_id, smoothed_losses = get_best_smoothed_loss_id(loss_history)
 
@@ -266,10 +269,29 @@ fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
 ax.plot(all_losses.T, alpha=0.5, color='gray', linewidth=0.5)
 ax.plot(smoothed_losses.T)
 
-##
 best_params = ut.tree_get(params, best_loss_id)
 
+##
+
+# test:
+bc.train.wandb_plot_pred(dman, best_params, 'Training')
 
 
+##────────────────────────────────────────────────────────────────────────────}}}##
 
-
+# TODO:
+# [x] W&B loss logger that works with replicates
+# [?] get best model id, plot predictions on training set to W&B
+# [ ] use the wb name and id to log everything to the database, including the best model id
+#   [ ] log networks being used into a network_training_run table (more reliable than the collection name)
+#   [ ] but also log the arguments used to load the networks, including the collection names as its own column
+# [ ] try this file as a standalone script
+# [ ] write down what the docker image should contain and do:
+#   [ ] copy of biocomp core
+#   [ ] copy of biocomp_tools
+# [ ] write terraform that attaches the EBS volume to the instance and provisions the instance
+# [ ] ansible that sends the right config files, and runs the docker image
+# [ ] test ansible on a local docker image (docker in docker) or on a VM
+# [ ] visualize training results
+# optional:
+# [ ] W&B pred plot logger that works with replicates

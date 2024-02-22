@@ -23,9 +23,9 @@ from typing import Union, List, Tuple, Dict, Any, Callable, Collection
 
 PathLike = Union[str, Path]
 
-import constants as ctes
 
-from constants import (
+from . import constants as cte
+from .constants import (
     BIOCOMP_DB_NAME,
     BIOCOMP_DB_USER,
     BIOCOMP_DB_PASS,
@@ -380,7 +380,6 @@ def load_networks_and_data(netdf, lib, **kwargs):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                        --     CLIProgram     --
 class CLIProgram:
     def __init__(self):
@@ -416,7 +415,6 @@ class CLIProgram:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 ### {{{                         --     df tools     --
 def merge_update(
@@ -484,3 +482,4 @@ def reorder_columns_back(df, columns):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
