@@ -113,12 +113,12 @@ def execute_query(
     cur = conn.cursor()
     try:
         cur.execute(query, params)
-        # conn.commit()
     except Exception as e:
         conn.rollback()
         raise e
     finally:
         if close_after:
+            conn.commit()
             cur.close()
             conn.close()
 
@@ -232,6 +232,22 @@ def update_table(
 
     tlog.info(f'Updated {len(df)} rows in table {table_name}')
 
+
+def insert_row(table_name, row, conn=None):
+    columns = ', '.join(row.keys())
+    values = ', '.join(['%s'] * len(row))
+    query = f"INSERT INTO {table_name} ({columns}) VALUES ({values})"
+    # convert values types to sql types
+    row = convert_types_to_sql(pd.DataFrame([row])).iloc[0].to_dict()
+    execute_query(query, list(row.values()), conn)
+
+def update_row(table_name, row, key_column, conn=None):
+    columns = ', '.join(row.keys())
+    values = ', '.join(['%s'] * len(row))
+    query = f"UPDATE {table_name} SET ({columns}) = ({values}) WHERE {key_column} = %s"
+    # convert values types to sql types
+    row = convert_types_to_sql(pd.DataFrame([row])).iloc[0].to_dict()
+    execute_query(query, list(row.values()) + [row[key_column]], conn)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
