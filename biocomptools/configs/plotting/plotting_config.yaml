@@ -1,0 +1,134 @@
+base_plotting_params:
+  colormap: bc_blues
+
+
+plot_callstack_params:
+# ┌──────────────────────────┐ 
+# │ Base function parameters │ 
+# └──────────────────────────┘ 
+# (default parameters for all "simple" functions)
+  heatmap_params:
+    bad_color: '#EEEEEE00'
+    cmap: ${plotting.colormap}
+    contours: 3
+    vlims: [null, null]
+
+  histogram_params:
+    cmap: ${plotting.colormap}
+    draw_colorbar: false
+    nbins: [256, 256]
+    noise_smooth: 0
+    use_log_density: true
+    vlims: [0.001, null]
+    xlims: [0, 1]
+    ylims: [0, 1]
+
+  knn_avg_params:
+    avg_method: mean
+    k: 500
+    min_points: 20
+
+  knn_grid_params:
+    grid_resolution: 200
+    is_density_plot: false
+    knn_avg_params: {}
+
+  mkfig_params:
+    cols: 1
+    dpi: 300
+    rows: 1
+    size: [4, 4]
+
+# ┌─────────────────────────┐ 
+# │ Nested calls parameters │ 
+# └─────────────────────────┘ 
+# (hierarchically override base functions parameters):
+# you can define partial specializations at any level
+# e.g:
+#
+# plot_network_params:
+#  heatmap_params:
+#   contours: 5
+#
+# means any call to heatmap that is nested inside plot_network
+# will have contours=5 (unless it is overridden at a more specific level)
+ 
+  plot_network_params:
+    density_quantile_threshold: 0.05
+    histogram_params: {}
+    input_order: null
+    method: smooth
+    protein_aliases: null
+    smooth_params:
+      smooth_2d_params:
+        heatmap_params: {}
+        knn_grid_params:
+          knn_avg_params: {}
+    use_y_as_x: false
+
+  network_figure_1d_params:
+    mkfig_params: {}
+    plot_network_params:
+      method: 'histogram'
+      histogram_params: {}
+      smooth_params:
+        smooth_2d_params:
+          heatmap_params: {}
+          knn_grid_params:
+            knn_avg_params: {}
+
+  network_figure_2d_params:
+    mkfig_params:
+      size: [5, 5]
+    plot_network_params:
+      histogram_params: {}
+      smooth_params:
+        smooth_2d_params:
+          heatmap_params: {}
+          knn_grid_params:
+            knn_avg_params: {}
+
+  network_figure_3d_params:
+    mkfig_params: {}
+    nslices: 3
+
+  network_figure_params:
+    network_figure_1d_params:
+      mkfig_params: {}
+      plot_network_params:
+        histogram_params: {}
+        smooth_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
+
+    network_figure_2d_params:
+      mkfig_params: {}
+      plot_network_params:
+        histogram_params: {}
+        smooth_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
+
+    network_figure_3d_params:
+      mkfig_params: {}
+
+  smooth_2d_params:
+    draw_colorbar: true
+    heatmap_params: {}
+    knn_grid_params:
+      grid_resolution: 256
+      knn_avg_params:
+        avg_method: mean
+    vlims: [null, null]
+    xlims: [0, 1]
+    ylims: [null, null]
+
+  smooth_params:
+    smooth_2d_params:
+      heatmap_params: {}
+      knn_grid_params:
+        knn_avg_params: {}

@@ -1,5 +1,4 @@
 ### {{{                          --     imports     --
-import sys
 import ray
 
 from typing import List, Tuple
@@ -17,20 +16,21 @@ from matplotlib import pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-import json5
 
 # pretty print from rich
 import json
 from pathlib import Path
 
-from toollib import common as cm
-from toollib import constants as cte
+from biocomptools.toollib import common as cm
 
 import logging
-from biocomp.train import console_log
+
+from omegaconf import OmegaConf
 
 logger = logging.getLogger('biocomp_tools_train')
 logger.setLevel(logging.INFO)
+config = cm.load_config()
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -66,3 +66,12 @@ prog.parse_args([])
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{       --     load plot config from ./configs/default.yaml     --
+this_file_path = Path(__file__).resolve()
+
+plot_config = OmegaConf.load(f'{this_file_path.parent}/configs/default.yaml')
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+

@@ -3,7 +3,12 @@ import sys
 import ray
 
 from typing import List, Tuple
+import argparse
+import json
+from pathlib import Path
 
+from omegaconf import DictConfig, OmegaConf
+import hydra
 import shutil
 from biocomp import utils as ut
 import json
@@ -24,16 +29,13 @@ import json
 from pathlib import Path
 
 from toollib import common as cm
-from toollib import constants as cte
 
 import logging
-from biocomp.train import console_log
 
 logger = logging.getLogger('biocomp_tools_train')
 logger.setLevel(logging.INFO)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 """
     Train a model, save it, log everything, and run predictions on the test set.
@@ -52,66 +54,6 @@ logger.setLevel(logging.INFO)
 # Pick a list of collection_ids to identify the networks to train on (same for the prediction set)
 
 ### {{{                  --     command line arguments     --
-
-prog = cm.CLIProgram()
-
-prog.add_argument(
-    '--compute_config_path',
-    help='Path of the compute config to use, use "db:<name>" to load from db',
-    default='db:default_compute_v0',
-)
-
-prog.add_argument(
-    '--data_config_path',
-    help='Path of the data config to use, use "db:<name>" to load from db',
-    default='db:default_data_v0',
-)
-
-prog.add_argument(
-    '--training_config_path',
-    help='Path of the training config to use, use "db:<name>" to load from db',
-    default='db:default_training_v0',
-)
-
-prog.add_argument(
-    '--export_dir',
-    help='Directory to save the results and the model',
-    default=(Path(cte.BIOCOMP_ROOT) / 'training_runs').as_posix(),
-)
-
-prog.add_argument(
-    'trainprog_args',
-    help='Arguments to pass to the training program',
-    nargs='*',
-)
-
-# required
-prog.add_argument(
-    '--training_set', help='List of collection_names to use for training', nargs='+', default=[]
-)
-prog.add_argument(
-    '--prediction_set', help='List of collection_names to use for prediction', nargs='+', default=[]
-)
-
-# prog.parse_args()
-# test args, we use training_set and prediction_set as single_uorfs and case_matrix_4_corners:
-prog.parse_args(
-    [
-        '--training_set',
-        'single_uorfs',
-        'case_matrix_4_corners',
-        '--prediction_set',
-        'single_uorfs',
-        'case_matrix_4_corners',
-        '--',
-        '--seed',
-        '42',
-        '--config',
-        'n_replicates=5',
-        '--config',
-        'n_epochs=2',
-    ]
-)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -193,20 +135,6 @@ full_config = {
     **trainprog.compute_config.config,
 }
 
-# TODO:
-# [x] --n_replicates:
-#   [x] vmap over replicates
-#   [x] write "get_best_loss_id" function that returns the lowest *smoothed* loss
-#   [x] wandb_plot_pred should log only the best replicate
-#   [x] wandb_log_epoch should log each replicate's loss separately
-#   [x] make loss function a training parameter
-# [x] get best model from W&B
-# [x] start wandb logging
-# [x] fetch wb name and id
-
-# print(json.dumps(full_config, indent=2))
-# full_config['n_epochs']
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -251,7 +179,6 @@ params, loss_history, epoch_history = bc.train.start(
     compute_config,
     loggers,
 )
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
@@ -380,11 +307,6 @@ cm.insert_row('training_run', entry)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     predictions     --
-
-wb_run.finish()
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
 # TODO:
 # [x] W&B loss logger that works with replicates
 # [-] get best model id, plot predictions on training set to W&B
@@ -402,11 +324,37 @@ wb_run.finish()
 # optional:
 # [ ] W&B pred plot logger that works with replicates
 
+wb_run.finish()
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
+import biocomp as bc
+from biocomp import compute as cmp
+from biocomp import utils as ut
+from biocomp import datautils as du
 
 # after training, we call the predict tool with the best model to generate the predictions in a local folder
 # then we upload the predictions to wandb AND to dropbox 
 # (if we ever run out of space on wandb, we can just link to the served dropbox folder)
 # one important aspect of predictions is the mode: do we want to predict at the same location as the training set, or on a grid + mask?
 # we log everything to the database
+
+# print(OmegaConf.to_yaml(du.DEFAULT_DATA_CONFIG))
+# print(OmegaConf.to_yaml(cmp.DEFAULT_COMPUTE_CONFIG))
+
+##
+
+def example_function(posarg_1, posarg_2, kwarg_1=1, kwarg_2=2):
+    print(f'{posarg_1=}, {posarg_2=}, {kwarg_1=}, {kwarg_2=}')
+
+partial1 = ut.partial(example_function, posarg_2='p2', kwarg_2=4)
+
+# ut.serialize_function(example_function)
+# ut.deserialize_function(ut.serialize_function(partial1))(2)
+
+ut.encode_function(partial1)
+ut.decode_function(ut.encode_function(partial1))(2)
+
+
+

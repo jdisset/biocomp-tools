@@ -29,25 +29,35 @@ import json
 from pathlib import Path
 from rich import print as rprint
 
-import common as cm
-from biocomp.datautils import DEFAULT_DATA_CONFIG
-from common import (
-    DEFAULT_CALIB_PATHS,
-    DEFAULT_CALIB_NAMES,
-    DEFAULT_XP_PATH,
-    DEFAULT_RECIPE_PATH,
-    DEFAULT_XP_CACHE_DIR,
-    DEFAULT_DATA_CONFIG_PATH,
-    BIOCOMP_ROOT,
-)
+# import common as cm
+# from biocomp.datautils import DEFAULT_DATA_CONFIG
+
 
 import logging
+from biocomptools.toollib import common as cm
+from biocomptools.toollib import plot as pl
 
+from omegaconf import OmegaConf
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+config = cm.load_config()
 prog = cm.CLIProgram()
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
 logging.getLogger('biocomp').setLevel(logging.ERROR)
+
+DEFAULT_CALIB_PATHS = list(config.calib.paths)
+DEFAULT_CALIB_NAMES = list(config.calib.names)
+
+DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
+DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
+DEFAULT_XP_CACHE_DIR = config.paths.cache.xp
+BIOCOMP_ROOT = config.paths.root
+
+DEFAULT_XP_PATH
+DEFAULT_RECIPE_PATH
+
+
 ### {{{                --     arg declaration and parsing     --
 
 # arguments:
@@ -58,7 +68,6 @@ prog.add_argument('--xp_path', type=str, default=DEFAULT_XP_PATH)
 prog.add_argument('--recipe_paths', type=str, nargs='+', default=DEFAULT_RECIPE_PATH)
 prog.add_argument('--xp_cache_dir', type=str, default=DEFAULT_XP_CACHE_DIR)
 prog.add_argument('--base_dir', type=str, default=BIOCOMP_ROOT)
-prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 
 # verbosity level
 prog.add_argument('--verbose', type=int, default=0)
@@ -69,14 +78,7 @@ prog.parse_args([])
 prog.xp_path = Path(prog.xp_path)
 prog.base_dir = Path(prog.base_dir)
 prog.recipe_paths = [Path(p) for p in prog.recipe_paths]
-prog.lib = ut.load_lib(cm.get_env_or_local('BIOCOMP_LIB_PATH'))
-
-if prog.data_config is None:
-    prog.data_config = DEFAULT_DATA_CONFIG
-else:
-    import json5
-
-    prog.data_config = json5.load(open(prog.data_config, 'r'))
+prog.lib = ut.load_lib()
 
 assert len(prog.calib_paths) == len(prog.calib_names)
 
@@ -178,7 +180,7 @@ for xpname, xp in list(xp_objs.items())[:]:
     networks, sample_names = xp.build_networks(
         ignore_errors=True,
         inverse='all',
-        use_cache=prog.data_config['network_cache_location'],
+        use_cache=config.paths.cache.networks,
         progress_callback=lambda _: progress.update(1),
     )
     X, Y = xp.get_XY(networks, sample_names, ignore_errors=True)
@@ -265,7 +267,9 @@ for col in error_cols:
     xpdf[col] = xpdf[col].astype(str)
     xpdf[col] = xpdf[col].apply(lambda x: x.replace('nan', ''))
 
-cm.insert_or_update_table(xpdf, 'experiment', 'name')
+# cm.insert_or_update_table(xpdf, 'experiment', 'name')
+
+cm.update_table(xpdf, 'experiment', 'name')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                  --     create and update netdf     --
@@ -287,7 +291,7 @@ for xp in netdf['xp'].unique():
     if xp not in xpdf.index:
         raise ValueError(f'xp {xp} not found in experiment table')
 
-cm.insert_or_update_table(netdf, 'network', 'name')
+cm.update_table(netdf, 'network', 'name')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 

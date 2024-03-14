@@ -23,21 +23,33 @@ from typing import Union, List, Tuple, Dict, Any, Callable, Collection
 
 PathLike = Union[str, Path]
 
+from omegaconf import OmegaConf
+import pkg_resources
 
-from . import constants as cte
-from .constants import (
-    BIOCOMP_DB_NAME,
-    BIOCOMP_DB_USER,
-    BIOCOMP_DB_PASS,
-    BIOCOMP_DB_HOST,
-    BIOCOMP_DB_PORT,
-    BIOCOMP_ROOT,
-    BIOCOMP_PROTEIN_ALIASES,
-    BIOCOMP_NETWORK_CACHE_DIR,
-)
+BASE_CONFIG_FILE_PATH = 'configs/default.yaml'
+BASE_CONFIG_FILE = pkg_resources.resource_filename('biocomptools', BASE_CONFIG_FILE_PATH)
 
 tlog = logging.getLogger('biocomp_tools_common')
 tlog.setLevel(logging.DEBUG)
+
+def load_config(*config_files):
+    config = OmegaConf.load(BASE_CONFIG_FILE)
+    OmegaConf.resolve(config)
+    if 'local_conf_file' in config and config.local_conf_file is not None:
+        local_conf_file = Path(config.local_conf_file)
+        if local_conf_file.exists():
+            local_config = OmegaConf.load(local_conf_file)
+            config = OmegaConf.merge(config, local_config)
+            tlog.debug(f'Loaded local config file {local_conf_file}')
+        else:
+            tlog.warning(f'Local config file {local_conf_file} not found')
+    for extra_config_file in config_files:
+        extra_config = OmegaConf.load(extra_config_file)
+        config = OmegaConf.merge(config, extra_config)
+        tlog.debug(f'Loaded extra config file {extra_config_file}')
+    return config
+
+config = load_config()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -88,11 +100,11 @@ from typing import Optional, Collection
 def connect_to_db():
     try:
         conn = psycopg2.connect(
-            dbname=BIOCOMP_DB_NAME,
-            user=BIOCOMP_DB_USER,
-            password=BIOCOMP_DB_PASS,
-            host=BIOCOMP_DB_HOST,
-            port=BIOCOMP_DB_PORT,
+            dbname=config.db.name,
+            user=config.db.user,
+            password=config.db.password,
+            host=config.db.host,
+            port=config.db.port,
         )
     except Exception as e:
         tlog.error(f'Error connecting to database: {e}')
@@ -232,6 +244,16 @@ def update_table(
 
     tlog.info(f'Updated {len(df)} rows in table {table_name}')
 
+def insert_row_if_not_exists(table_name, row, key_column, conn=None):
+    existing_row = get_row_by_id(table_name, key_column, row[key_column], conn)
+    if existing_row is None:
+        insert_row(table_name, row, conn)
+    else:
+        update_row(table_name, row, key_column, conn)
+
+def insert_if_not_exists(table_name, df, key_column, conn=None):
+    for _, row in df.iterrows():
+        insert_row_if_not_exists(table_name, row, key_column, conn)
 
 def insert_row(table_name, row, conn=None):
     columns = ', '.join(row.keys())
@@ -301,7 +323,6 @@ def add_networks_to_collection(collection_name, network_names):
 # TODO MAYBE:
 # parallel load_network_and_data with ray
 
-
 def resolve_path(filepath, path_prefix):
     if isnull(filepath):
         raise ValueError(f'File path information missing')
@@ -315,10 +336,10 @@ def resolve_path(filepath, path_prefix):
 def load_network_and_data_from_row(
     network_row,
     lib,
-    path_prefix=BIOCOMP_ROOT,
-    protein_aliases=BIOCOMP_PROTEIN_ALIASES,
+    path_prefix=config.paths.root,
+    protein_aliases=config.protein_aliases,
     error_handler=None,
-    cache_dir: Optional[PathLike] = BIOCOMP_NETWORK_CACHE_DIR,
+    cache_dir: Optional[PathLike] = config.paths.cache.networks,
 ):
 
     if error_handler is None:
@@ -363,9 +384,9 @@ def load_network_and_data(
     netdf: pd.DataFrame,
     net_name: str,
     lib: bc.recipe.PartsLibrary,
-    path_prefix: PathLike = BIOCOMP_ROOT,
-    protein_aliases: Dict = BIOCOMP_PROTEIN_ALIASES,
-    cache_dir: Optional[PathLike] = BIOCOMP_NETWORK_CACHE_DIR,
+    path_prefix: PathLike = config.paths.root,
+    protein_aliases: Dict = config.protein_aliases,
+    cache_dir: Optional[PathLike] = config.paths.cache.networks,
 ):
     return load_network_and_data_from_row(
         get_network_row(netdf, net_name),
@@ -431,6 +452,7 @@ class CLIProgram:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ### {{{                         --     df tools     --
 def merge_update(
@@ -498,4 +520,3 @@ def reorder_columns_back(df, columns):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

@@ -1,0 +1,25 @@
+# -------- main
+# local_conf file for biocomp that overrides the following. can be empty
+local_conf_file: ${oc.env:BIOCOMP_LOCAL_CONFIG_FILE, ???}
+protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
+
+db:
+  name: ${oc.env:BIOCOMP_DB_NAME, 'biocomp'}
+  user: ${oc.env:BIOCOMP_DB_USER, 'biocomp'}
+  port: ${oc.env:BIOCOMP_DB_PORT, 5432}
+  pass: ${oc.env:BIOCOMP_DB_PASS, ???}
+  host: ${oc.env:BIOCOMP_DB_HOST, ???}
+
+paths:
+  root: ${oc.env:BIOCOMP_ROOT, '/Users/jeandisset/Dropbox (MIT)/Biocomp'}
+  cache:
+    base_dir: ${oc.env:BIOCOMP_CACHE_DIR, '${paths.root}/__cache'}
+    networks: ${oc.env:BIOCOMP_NETWORK_CACHE_DIR, '${.base_dir}/networks'}
+    xp: ${oc.env:BIOCOMP_NETWORK_CACHE_DIR, '${.base_dir}/xp'}
+
+calib:
+  paths:
+    - "./data/calibrated_data_v3"
+    - "./data/calibrated_data_v2"
+    - "./data/calibrated_data"
+  names: ["v3", "v2", "old"]
