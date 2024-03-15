@@ -28,7 +28,7 @@ from hydra.plugins.search_path_plugin import SearchPathPlugin
 
 
 hydra.core.global_hydra.GlobalHydra.instance().clear()
-# initialize(config_path="conf")
+initialize()
 class BiocompSearchPathPlugin(SearchPathPlugin):
     def manipulate_search_path(self, search_path: ConfigSearchPath) -> None:
         # search_path.append(provider="biocomp", path="pkg://biocomp/config")
@@ -82,7 +82,7 @@ cs.store(name="config", node=PlotJob)
 # cfg = compose(config_name="plotting/plotting_config")
 cfg = compose(config_name="config")
 
-plot_data(cfg)
+print(OmegaConf.to_yaml(cfg))
 
 ##
 
@@ -93,8 +93,8 @@ lib = ut.load_lib()
 netdf = cm.table_to_df('network')
 
 # keep only the networks in xp 2023-11-17_PguConstraints1_BP_DR
-# netdf = netdf[netdf['xp'] == '2024-02-18_BPv4_BPv5']
-netdf = netdf[netdf['xp'] == '2023-03-26_MatrixCsy4']
+netdf = netdf[netdf['xp'] == '2024-02-18_BPv4_BPv5']
+# netdf = netdf[netdf['xp'] == '2023-03-26_MatrixCsy4']
 
 # select only the rows that have a data_file not None
 netdf = netdf[netdf['data_file'] != 'None']
@@ -133,6 +133,12 @@ dman = du.DataManager(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+import pandas as pd
+import numpy as np
+
+import biocomp.plotting.plotting_3d as p3d
+import biocomp.plotting.plotting_core as pc
+
 
 
 def network_plot(network, x, y, rescaler, mkfig_conf=None, plot_config=None):
@@ -175,28 +181,128 @@ def network_plot(network, x, y, rescaler, mkfig_conf=None, plot_config=None):
     return fig
 
 
+
+
+def plot_ortho_proj(
+    network, x, y, rescaler, axes, input_order, slices, protein_aliases=None, **plot_config
+):
+    X, Y, input_names, output_name = pc.extract_plot_data_from_network(
+        network, x, y, input_order, protein_aliases
+    )
+    xlims, ylims = plot_config.get('xlims', (0, 1)), plot_config.get('ylims', (0, 1))
+    zlims = plot_config.get('zlims', (0, 1))
+    return p3d.smooth_3d(
+        X,
+        Y,
+        input_names=input_names,
+        output_name=output_name,
+        rescaler=rescaler,
+        axes=axes,
+        zslices=slices,
+        xlims=xlims,
+        ylims=ylims,
+        zlims=zlims,
+    )
+
+
+def do_plot(network, x, y, rescaler, plot_config):
+    ax, axes = None, None
+    fig = None
+    n_inputs = network.get_nb_inputs()
+    input_order = plot_config.get('input_order', None)
+    if 'input_order' in plot_config:
+        del plot_config['input_order']
+    if n_inputs <= 2:
+        fig, ax = pu.mkfig(1, 1, size=plot_config['size'])
+        if input_order is None:
+            input_order = list(range(n_inputs))
+        pu.direct_network_plot(
+            network, x, y, rescaler, ax=ax, input_order=input_order, **plot_config
+        )
+    else:
+        if 'slices' not in plot_config:
+            raise ValueError('You must specify slices for 3D plots')
+        if plot_config['method'] == 'smooth':
+            nslices = len(plot_config['slices'])
+            if input_order is None:
+                # we plot every ordering
+                fig, axes = pu.mkfig(n_inputs, nslices, size=plot_config['size'])
+                for i in range(n_inputs):
+                    iorder = list(range(n_inputs))
+                    iorder = iorder[i:] + iorder[:i]
+                    pu.direct_network_plot(
+                        network, x, y, rescaler, axes=axes[i, :], input_order=iorder, **plot_config
+                    )
+            else:
+                fig, axes = pu.mkfig(1, nslices, size=plot_config['size'])
+                if nslices == 1:
+                    axes = np.array([axes])
+                # pu.direct_network_plot(
+                # network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
+                # )
+                plot_ortho_proj(
+                    network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
+                )
+    return fig
+
+
 def get_network_and_data_from_row(net_row, dman):
     network_id = net_row.Index
     dmanager = dman
     network = dmanager.get_networks()[network_id]
     x, y = dmanager.get_X()[network_id], dmanager.get_Y()[network_id]
-    rescaler = pu.DataRescaler.from_data_manager(dmanager)
+    rescaler = pc.DataRescaler.from_data_manager(dmanager)
     return network, x, y, rescaler
+
 
 df = plotdf
 ptuples = list(df.itertuples(index=True))
 IDX = 4
 
-# plotconf = OmegaConf.create(pu.generate_full_nested_config(local_conf))
-plotconf = cfg.plot_config
+from pathlib import Path
+outdir= Path(f'~/Desktop/2024-02-18_BPv4_BPv5__v2').expanduser()
+outdir.mkdir(exist_ok=True, parents=True)
 
-print()
-# print(pu.dump_default_config())
+for IDX in range(len(ptuples)):
+    # plotconf = OmegaConf.create(pu.generate_full_nested_config(local_conf))
+    # plotconf = cfg.plot_config
+    # print(pu.dump_default_config())
 
-# well I guess I should try switching to the new 3D plot function
+    network, x, y, rescaler = get_network_and_data_from_row(ptuples[IDX], dman)
+    n_inputs = network.get_nb_inputs()
 
-network, x, y, rescaler = get_network_and_data_from_row(ptuples[IDX], dman)
-fig = pu.network_figure(network, x, y, rescaler, **plotconf.plot_callstack_params.network_figure_params)
+    DEFAULT_3D_CONFIG = {
+        'xlims': (-0.027, 0.85),
+        'ylims': (-0.027, 0.85),
+        'vlims': (-0.027, 0.85),
+        'method': 'smooth',
+        'slices': (0.0, 0.11, 0.22, 0.33, 0.44, 0.55),
+        'radius': 0.11,
+        'knn': 500,
+        'min_points': 20,
+        'size': (10, 10),
+        'input_order': (0, 1, 2),
+    }
+
+    # fig = do_plot(network, x, y, rescaler, DEFAULT_3D_CONFIG)
+    outfile = outdir / f'{IDX:03d}_{network.name}.png'
+    # fig.savefig(outfile)
+    # print(f'Saved {outfile}')
+
+
+
+##
+
+
+pu.network_figure(
+    network,
+    x,
+    y,
+    rescaler,
+    **cfg.plot_config.plot_callstack_params.network_figure_params
+)
+
+
 
 
 

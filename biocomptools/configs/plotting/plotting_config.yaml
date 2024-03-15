@@ -88,6 +88,17 @@ plot_callstack_params:
           knn_grid_params:
             knn_avg_params: {}
 
+    smooth_2d_params:
+    draw_colorbar: true
+    heatmap_params: {}
+    knn_grid_params:
+      grid_resolution: 256
+      knn_avg_params:
+        avg_method: mean
+    vlims: [null, null]
+    xlims: [0, 1]
+    ylims: [null, null]
+
   network_figure_3d_params:
     mkfig_params: {}
     nslices: 3
@@ -102,7 +113,11 @@ plot_callstack_params:
             heatmap_params: {}
             knn_grid_params:
               knn_avg_params: {}
-
+          smooth_3d_params:
+            smooth_2d_params:
+              heatmap_params: {}
+              knn_grid_params:
+                knn_avg_params: {}
     network_figure_2d_params:
       mkfig_params: {}
       plot_network_params:
@@ -112,23 +127,44 @@ plot_callstack_params:
             heatmap_params: {}
             knn_grid_params:
               knn_avg_params: {}
-
+          smooth_3d_params:
+            smooth_2d_params:
+              heatmap_params: {}
+              knn_grid_params:
+                knn_avg_params: {}
     network_figure_3d_params:
       mkfig_params: {}
+
 
   smooth_2d_params:
     draw_colorbar: true
     heatmap_params: {}
     knn_grid_params:
-      grid_resolution: 256
-      knn_avg_params:
-        avg_method: mean
+      knn_avg_params: {}
     vlims: [null, null]
     xlims: [0, 1]
     ylims: [null, null]
+
+  smooth_3d_params:
+    draw_colorbar: false 
+    smooth_2d_params:
+      draw_colorbar: false
+      heatmap_params: {}
+      knn_grid_params:
+        knn_avg_params: {}
+    title: null
+    vlims: [null, null]
+    xlims: [0, 1]
+    ylims: [null, null]
+    zlims: [null, null]
 
   smooth_params:
     smooth_2d_params:
       heatmap_params: {}
       knn_grid_params:
         knn_avg_params: {}
+    smooth_3d_params:
+      smooth_2d_params:
+        heatmap_params: {}
+        knn_grid_params:
+          knn_avg_params: {}
