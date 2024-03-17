@@ -6,15 +6,16 @@ plot_callstack_params:
 # ┌──────────────────────────┐ 
 # │ Base function parameters │ 
 # └──────────────────────────┘ 
-# (default parameters for all "simple" functions)
-  heatmap_params:
-    bad_color: '#EEEEEE00'
-    cmap: ${plotting.colormap}
-    contours: 3
-    vlims: [null, null]
 
+  heatmap_params:
+    axtransform: null
+    bad_color: '#EEEEEE00'
+    cmap: bc_blues
+    contours: 3
+    opacities: null
+    vlims:
   histogram_params:
-    cmap: ${plotting.colormap}
+    cmap: bc_blues
     draw_colorbar: false
     nbins: [256, 256]
     noise_smooth: 0
@@ -22,64 +23,34 @@ plot_callstack_params:
     vlims: [0.001, null]
     xlims: [0, 1]
     ylims: [0, 1]
-
   knn_avg_params:
     avg_method: mean
     k: 500
     min_points: 20
-
   knn_grid_params:
     grid_resolution: 200
     is_density_plot: false
     knn_avg_params: {}
-
+    zslice: null
   mkfig_params:
-    cols: 1
     dpi: 300
-    rows: 1
     size: [4, 4]
-
-# ┌─────────────────────────┐ 
-# │ Nested calls parameters │ 
-# └─────────────────────────┘ 
-# (hierarchically override base functions parameters):
-# you can define partial specializations at any level
-# e.g:
-#
-# plot_network_params:
-#  heatmap_params:
-#   contours: 5
-#
-# means any call to heatmap that is nested inside plot_network
-# will have contours=5 (unless it is overridden at a more specific level)
- 
-  plot_network_params:
-    density_quantile_threshold: 0.05
-    histogram_params: {}
-    input_order: null
-    method: smooth
-    protein_aliases: null
-    smooth_params:
-      smooth_2d_params:
-        heatmap_params: {}
-        knn_grid_params:
-          knn_avg_params: {}
-    use_y_as_x: false
-
   network_figure_1d_params:
     mkfig_params: {}
     plot_network_params:
-      method: 'histogram'
       histogram_params: {}
       smooth_params:
         smooth_2d_params:
           heatmap_params: {}
           knn_grid_params:
             knn_avg_params: {}
-
+        smooth_3d_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
   network_figure_2d_params:
-    mkfig_params:
-      size: [5, 5]
+    mkfig_params: {}
     plot_network_params:
       histogram_params: {}
       smooth_params:
@@ -87,22 +58,26 @@ plot_callstack_params:
           heatmap_params: {}
           knn_grid_params:
             knn_avg_params: {}
-
-    smooth_2d_params:
-    draw_colorbar: true
-    heatmap_params: {}
-    knn_grid_params:
-      grid_resolution: 256
-      knn_avg_params:
-        avg_method: mean
-    vlims: [null, null]
-    xlims: [0, 1]
-    ylims: [null, null]
-
+        smooth_3d_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
   network_figure_3d_params:
+    zslices: [0.05, 0.20, 0.35, 0.5]
     mkfig_params: {}
-    nslices: 3
-
+    plot_network_params:
+      histogram_params: {}
+      smooth_params:
+        smooth_2d_params:
+          heatmap_params: {}
+          knn_grid_params:
+            knn_avg_params: {}
+        smooth_3d_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
   network_figure_params:
     network_figure_1d_params:
       mkfig_params: {}
@@ -134,30 +109,120 @@ plot_callstack_params:
                 knn_avg_params: {}
     network_figure_3d_params:
       mkfig_params: {}
-
-
+      plot_network_params:
+        histogram_params: {}
+        smooth_params:
+          smooth_2d_params:
+            heatmap_params: {}
+            knn_grid_params:
+              knn_avg_params: {}
+          smooth_3d_params:
+            smooth_2d_params:
+              heatmap_params: {}
+              knn_grid_params:
+                knn_avg_params: {}
+  plot_network_params:
+    density_quantile_threshold: 0.05
+    histogram_params: {}
+    input_order: null
+    kde: null
+    method: smooth
+    protein_aliases: null
+    smooth_params:
+      smooth_2d_params:
+        heatmap_params: {}
+        knn_grid_params:
+          knn_avg_params: {}
+      smooth_3d_params:
+        smooth_2d_params:
+          heatmap_params: {}
+          knn_grid_params:
+            knn_avg_params: {}
+    use_y_as_x: false
   smooth_2d_params:
     draw_colorbar: true
     heatmap_params: {}
     knn_grid_params:
       knn_avg_params: {}
-    vlims: [null, null]
+    title: null
     xlims: [0, 1]
-    ylims: [null, null]
-
+    zslice: null
   smooth_3d_params:
-    draw_colorbar: false 
+    vlims: [0.05, 0.7]
+    xlims: [0.01, 0.7]
+    ylims: [0.01, 0.7]
+    zlims: [0.01, 0.7]
+    draw_colorbar: null
+    colorbar_position: [1.05, 0.4]
+    colorbar_size: [0.04, 0.5]
+    projection_angle: 45.0
+    projection_diag_coef: 0.5
+    cube_edge_props:
+      bottom_left:
+        offset: [0, 0]
+        props:
+          alpha: 0.5
+          color: '#888888'
+          linestyle: ':'
+          linewidth: 0.5
+          zorder: -2147483637
+      bottom_right:
+        labels:
+          major:
+            offset: [10, 0]
+            props:
+              bbox:
+                alpha: 1
+                edgecolor: none
+                facecolor: white
+                pad: -0.25
+              fontsize: 8
+              ha: left
+              va: center
+          slice:
+            offset: [55, 0]
+            props:
+              fontsize: 7
+              ha: left
+              va: center
+        offset: [0.0, 0]
+        props:
+          color: '#888888'
+          linestyle: '-'
+          linewidth: 0.5
+          zorder: 2147483637
+        ticks:
+          major: [{direction: [1, 0, 0], length: 8, props: {color: k, linewidth: 0.4}}]
+          minor: [{direction: [1, 0, 0], length: 2, props: {color: k, linewidth: 0.2}}]
+          slice: [{direction: [1, 0, 0], length: 54, props: {alpha: 0.5, color: k, dashes: [
+                  5, 5], linewidth: 0.2}}]
+        title:
+          offset: [40, 0]
+          props:
+            fontsize: 8
+            ha: center
+            rotation: 2578.3100780887044
+            va: center
+      top_left:
+        offset: [0, 0]
+        props:
+          color: '#888888'
+          linestyle: '-'
+          linewidth: 0.5
+          zorder: 2147483637
+      top_right:
+        offset: [0, 0]
+        props:
+          color: '#888888'
+          linestyle: '-'
+          linewidth: 0.5
+          zorder: 2147483637
     smooth_2d_params:
       draw_colorbar: false
-      heatmap_params: {}
+      heatmap_params: 
+        contours: [0.1, 0.3, 0.5]
       knn_grid_params:
         knn_avg_params: {}
-    title: null
-    vlims: [null, null]
-    xlims: [0, 1]
-    ylims: [null, null]
-    zlims: [null, null]
-
   smooth_params:
     smooth_2d_params:
       heatmap_params: {}
@@ -168,3 +233,5 @@ plot_callstack_params:
         heatmap_params: {}
         knn_grid_params:
           knn_avg_params: {}
+
+

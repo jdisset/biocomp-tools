@@ -1,5 +1,3 @@
-### {{{                          --     imports     --
-
 from dataclasses import dataclass, field
 
 from biocomptools.toollib import common as cm
@@ -8,12 +6,8 @@ from biocomptools.toollib import plot as pl
 from biocomp import utils as ut
 from biocomp import datautils as du
 from biocomp import plotutils as pu
-from typing import Optional, Union, Tuple, List, Dict, Sequence, Any
+from typing import Optional, Union, Tuple, List, Dict, Sequence, Any, Callable
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                    --     search path plugin     --
 
 import hydra
 
@@ -29,15 +23,16 @@ from hydra.plugins.search_path_plugin import SearchPathPlugin
 
 hydra.core.global_hydra.GlobalHydra.instance().clear()
 initialize()
+
+
 class BiocompSearchPathPlugin(SearchPathPlugin):
     def manipulate_search_path(self, search_path: ConfigSearchPath) -> None:
         # search_path.append(provider="biocomp", path="pkg://biocomp/config")
         search_path.append(provider="biocomptools", path="pkg://biocomptools/configs")
 
+
 Plugins.instance().register(BiocompSearchPathPlugin)
 
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 """
 Utils for plotting data in various ways, from the network representation of an experiment.
@@ -49,8 +44,8 @@ Uses plotjob descriptions to define the plot to be made, and the data to be used
 ut.generate_full_nested_config(namespace='biocomp.plotutils')
 print(ut.dump_default_config('biocomp.plotutils'))
 
-
 ##
+
 
 @dataclass
 class FigureConfig:
@@ -82,10 +77,6 @@ cs.store(name="config", node=PlotJob)
 # cfg = compose(config_name="plotting/plotting_config")
 cfg = compose(config_name="config")
 
-print(OmegaConf.to_yaml(cfg))
-
-##
-
 
 ### {{{                --     load networks and data     --
 
@@ -103,6 +94,8 @@ netdf['data_file']
 
 
 load_errors = {}
+
+
 def error_handler(net_name, e):
     load_errors[net_name] = f'{e.__class__.__name__}: {e}'
     return None, None, None
@@ -133,12 +126,12 @@ dman = du.DataManager(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 import pandas as pd
 import numpy as np
 
 import biocomp.plotting.plotting_3d as p3d
 import biocomp.plotting.plotting_core as pc
-
 
 
 def network_plot(network, x, y, rescaler, mkfig_conf=None, plot_config=None):
@@ -179,8 +172,6 @@ def network_plot(network, x, y, rescaler, mkfig_conf=None, plot_config=None):
                     network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
                 )
     return fig
-
-
 
 
 def plot_ortho_proj(
@@ -237,9 +228,11 @@ def do_plot(network, x, y, rescaler, plot_config):
                 fig, axes = pu.mkfig(1, nslices, size=plot_config['size'])
                 if nslices == 1:
                     axes = np.array([axes])
+
                 # pu.direct_network_plot(
                 # network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
                 # )
+
                 plot_ortho_proj(
                     network, x, y, rescaler, axes=axes, input_order=input_order, **plot_config
                 )
@@ -260,7 +253,8 @@ ptuples = list(df.itertuples(index=True))
 IDX = 4
 
 from pathlib import Path
-outdir= Path(f'~/Desktop/2024-02-18_BPv4_BPv5__v2').expanduser()
+
+outdir = Path(f'~/Desktop/2024-02-18_BPv4_BPv5__v2').expanduser()
 outdir.mkdir(exist_ok=True, parents=True)
 
 for IDX in range(len(ptuples)):
@@ -289,20 +283,95 @@ for IDX in range(len(ptuples)):
     # fig.savefig(outfile)
     # print(f'Saved {outfile}')
 
-
-
 ##
+from rich import print as rprint
+
+cfg = compose(config_name="config")
+# resolve the config
+user_config = OmegaConf.create(cfg)
+user_config = OmegaConf.to_container(user_config, resolve=True)
+user_plot_config = user_config['plot_config']
+empty_config = OmegaConf.create(ut.generate_base_nested_config(namespace='biocomp.plotutils'))
+from functools import partial
+from copy import deepcopy
 
 
-pu.network_figure(
-    network,
-    x,
-    y,
-    rescaler,
-    **cfg.plot_config.plot_callstack_params.network_figure_params
-)
+def resolve_if_ends_with(key: str, suffix: str) -> bool:
+    return key.endswith(suffix)
 
 
+def updated_dict(d1, d2):
+    if not isinstance(d1, dict):
+        return deepcopy(d2) if d2 is not None else deepcopy(d1)
+    if not isinstance(d2, dict):
+        return deepcopy(d1) if d1 is not None else deepcopy(d2)
+    res = {}
+    for key, val in d1.items():
+        if isinstance(val, dict):
+            if key in d2 and isinstance(d2[key], dict):
+                res[key] = updated_dict(d1[key], d2[key])
+            else:
+                res[key] = deepcopy(d1[key])
+        else:
+            if key in d2 and isinstance(d2[key], dict):
+                res[key] = deepcopy(d2[key])
+            else:
+                res[key] = deepcopy(d1[key])
+    for key, val in d2.items():
+        if not key in d1:
+            res[key] = deepcopy(val)
+    return res
 
 
+def nested_resolve(
+    input_dict: Any,
+    already_seen: Dict = {},
+    resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix='_params'),
+) -> Dict:
 
+    if not isinstance(input_dict, dict):
+        return deepcopy(input_dict)
+
+    new_seen = deepcopy(already_seen)
+    for k, v in input_dict.items():
+        new_seen[k] = updated_dict(v, already_seen.get(k, None)) if resolve_key(k) else deepcopy(v)
+
+    new_dict = {
+        k: nested_resolve(deepcopy(new_seen[k]), deepcopy(new_seen), resolve_key)
+        for k in input_dict.keys()
+    }
+
+    return new_dict
+
+
+pcp_base = OmegaConf.create(user_plot_config['plot_callstack_params'])
+pcp_base
+
+pcp_new = nested_resolve(OmegaConf.to_container(pcp_base, resolve=True))
+pcp_old = ut.nested_resolve(OmegaConf.to_container(pcp_base, resolve=True))
+
+# pcp_old = OmegaConf.create(pcp_old)
+# pcp_new = OmegaConf.create(pcp_new)
+
+# rprint(
+    # OmegaConf.to_yaml(
+        # pcp_base.network_figure_params.network_figure_3d_params.plot_network_params.smooth_params.smooth_3d_params
+    # )
+# )
+
+# rprint(
+    # OmegaConf.to_yaml(
+        # pcp_new.network_figure_params.network_figure_3d_params.plot_network_params.smooth_params.smooth_3d_params
+    # )
+# )
+
+
+# rprint(
+    # OmegaConf.to_yaml(
+        # pcp_old.network_figure_params.network_figure_3d_params.plot_network_params.smooth_params.smooth_3d_params
+    # )
+# )
+
+pcp_new
+
+pu.network_figure(network, x, y, rescaler, **pcp_new['network_figure_params'])
