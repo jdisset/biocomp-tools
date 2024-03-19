@@ -29,7 +29,7 @@ import pkg_resources
 BASE_CONFIG_FILE_PATH = 'configs/default.yaml'
 BASE_CONFIG_FILE = pkg_resources.resource_filename('biocomptools', BASE_CONFIG_FILE_PATH)
 
-tlog = logging.getLogger('biocomp_tools_common')
+tlog = logging.getLogger('biocomptools.common')
 tlog.setLevel(logging.DEBUG)
 
 def load_config(*config_files):

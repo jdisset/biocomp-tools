@@ -31,7 +31,6 @@ plot_callstack_params:
     grid_resolution: 200
     is_density_plot: false
     knn_avg_params: {}
-    zslice: null
   mkfig_params:
     dpi: 300
     size: [4, 4]
@@ -64,7 +63,7 @@ plot_callstack_params:
             knn_grid_params:
               knn_avg_params: {}
   network_figure_3d_params:
-    zslices: [0.05, 0.20, 0.35, 0.5]
+    zslices: [0.05, 0.25, 0.4, 0.55]
     mkfig_params: {}
     plot_network_params:
       histogram_params: {}
@@ -146,12 +145,11 @@ plot_callstack_params:
       knn_avg_params: {}
     title: null
     xlims: [0, 1]
-    zslice: null
   smooth_3d_params:
     vlims: [0.05, 0.7]
     xlims: [0.01, 0.7]
     ylims: [0.01, 0.7]
-    zlims: [0.01, 0.7]
+    zlims: [0.05, 0.7]
     draw_colorbar: null
     colorbar_position: [1.05, 0.4]
     colorbar_size: [0.04, 0.5]
