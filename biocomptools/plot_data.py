@@ -17,22 +17,19 @@ from biocomp import plotutils as pu
 import biocomp as bc
 from typing import Optional, Union, Tuple, List, Dict, Sequence, Any, Callable
 import hydra
-from hydra import compose, initialize
+from hydra import compose, initialize, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf, MISSING
 from hydra.core.plugins import Plugins
 from hydra.plugins.plugin import Plugin
 from hydra.core.config_search_path import ConfigSearchPath
 from hydra.plugins.search_path_plugin import SearchPathPlugin
+from hydra.core.global_hydra import GlobalHydra
 
 log = logging.getLogger('biocomptools.biocomplot')
 log.setLevel(logging.INFO)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-
-hydra.core.global_hydra.GlobalHydra.instance().clear()
-initialize()
 
 
 class BiocompSearchPathPlugin(SearchPathPlugin):
@@ -42,6 +39,20 @@ class BiocompSearchPathPlugin(SearchPathPlugin):
 
 Plugins.instance().register(BiocompSearchPathPlugin)
 
+
+def reset_hydra(config_dir=None):
+    GlobalHydra.instance().clear()
+    if config_dir is not None:
+        config_dir_path = Path(config_dir).expanduser().resolve().absolute()
+        print(f'Initializing hydra with config dir {config_dir_path}')
+        # make absolute:
+        assert config_dir_path.exists()
+        assert config_dir_path.is_dir()
+        initialize_config_dir(config_dir=config_dir, version_base="1.3")
+    else:
+        initialize(version_base="1.3")
+
+
 """
 Utils for plotting data in various ways, from the network representation of an experiment.
 It can build this network from scratch given a recipe, library and data file, or it can
@@ -49,8 +60,8 @@ use a database file to load the network and plot it.
 Uses plotjob descriptions to define the plot to be made, and the data to be used.
 """
 
-ut.generate_full_nested_config(namespace='biocomp.plotutils')
-print(ut.dump_default_config('biocomp.plotutils'))
+# ut.generate_full_nested_config(namespace='biocomp.plotutils')
+# print(ut.dump_default_config('biocomp.plotutils'))
 
 # rprint(OmegaConf.to_yaml(cfg))
 # rprint(OmegaConf.to_yaml(cfg.data_location))
@@ -114,18 +125,18 @@ class PlotTask:
 class PlotJob:
     defaults: List[Any] = field(
         default_factory=lambda: [
-            "plotting/plotting_config@plot_config",
-            # "rescaler/EBFP2_compressed@rescaler",
-            "default_data_config@__hydra_hack_dataconf",
-            "_self_",
+            {'data_config/rescaler@rescaler':'EBFP2_compressed'},
+            {'plot_config':'default_plotconf'},
         ]
     )
     figure: FigureConfig = field(default_factory=FigureConfig)
     output_path: str = './output_plot/$[task_index].png'
     plot_config: Any = MISSING
     data_sources: List[Any] = MISSING
-    rescaler: Optional[Any] = '${__hydra_hack_dataconf.rescaler}'
+    rescaler: Optional[Any] = MISSING
     plot_job_file: Optional[str] = '../../playground/local_job.yaml'
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                   --     data source resolvers     --
@@ -290,54 +301,54 @@ def cleanup_private_vars(d, prefix='__hydra_hack_'):
             del d[k]
 
 
+reset_hydra()
+
 cs = ConfigStore.instance()
-cs.store(name="config", node=PlotJob)
-# cs.store(group="data_sources", name="rawdatasource", node=RawDataSource)
-cfg = compose(config_name="config")
+cs.store(group="figure", name="default_figure", node=FigureConfig)
+cs.store(name="base_plotjob", node=PlotJob)
+# base_cfg = compose(config_name="base_plotjob", overrides=["data_config/rescaler@rescaler=EBFP2_compressed"])
+base_cfg = compose(config_name="base_plotjob")
 
-local_user = compose(config_name="config")
-# cfg.rescaler
-# cfg.data_sources
+if base_cfg.plot_job_file is not None:
+    file_path = Path(base_cfg.plot_job_file).expanduser().resolve()
+    if not file_path.exists():
+        raise ValueError(f'Plot job file {file_path} does not exist')
+    file_dir = Path(base_cfg.plot_job_file).parent.resolve().absolute().as_posix()
+    file_ext = file_path.suffix
+    reset_hydra(config_dir=file_dir)
+    job_cfg = compose(config_name=file_path.stem)
 
-if cfg.plot_job_file is not None:
-    # local_job = OmegaConf.load(cfg.plot_job_file)
-    # need to load using hydra rather than omegaconf 
-    # (more flexible because we can use hydra stuff like default lists, ...)
-    # I think the way to do it is to first initialize hydra to load the local 
-    # config file, and then reinitialize after adding the search path that matches the local_job
-
-    # NO
-    # normal way to do this is simply let the user add the correct search path?
-
-        local_job = compose(config_name="local_job")
-    print(OmegaConf.to_yaml(local_job))
-
-
-##
-# print as yaml
-print(OmegaConf.to_yaml(user_config))
-
-##
-
+def substitute(input_string:str, available_variables:Dict[str, Any]) -> str:
+    for k, v in available_variables.items():
+        input_string = input_string.replace(k, str(v))
+    return input_string
 
 def make_plot_tasks(plot_job: PlotJob) -> List[PlotTask]:
-    data = [resolve_data_source(ds) for ds in plot_job.data_sources]
+    data = []
+    for ds in plot_job.data_sources:
+     data += resolve_data_source(ds)
     outpaths = []
-    for i, d in data:
+    for i, d in enumerate(data):
         available_variables = {
             f'$[{k}]': v
             for k, v in {
                 'task_index': i,
-                **d.metadata,
+                **(d.metadata if d.metadata is not None else {}),
             }.items()
         }
-        outpath = ut.substitute(plot_job.output_path, available_variables)
+        outpath = substitute(plot_job.output_path, available_variables)
         outpath = Path(outpath).expanduser().resolve()
         outpaths.append(str(outpath))
     return [
         PlotTask(data=ds, figure=plot_job.figure, plot_config=plot_job.plot_config, output_path=op)
         for ds, op in zip(plot_job.data_sources, outpaths)
     ]
+
+tasks = make_plot_tasks(job_cfg)
+
+log.info(f'Generated {len(tasks)} plot tasks')
+
+##
 
 
 # resolve the config

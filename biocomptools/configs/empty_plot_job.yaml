@@ -1,0 +1,7 @@
+defaults:
+  - base_plotjob
+  - data_config/rescaler/EBFP2_compressed@rescaler
+  #- plot_config: default_plotconf
+
+
+
