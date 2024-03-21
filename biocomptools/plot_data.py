@@ -31,6 +31,8 @@ log.setLevel(logging.INFO)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                   --     plugin for searchpath     --
+
 
 class BiocompSearchPathPlugin(SearchPathPlugin):
     def manipulate_search_path(self, search_path: ConfigSearchPath) -> None:
@@ -73,13 +75,8 @@ desired usage:
 
 """
 
-
+##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{              --     structured config declarations     --
-@dataclass
-class FigureConfig:
-    title: Optional[str] = None  # can use variables from metadata
-    size: Optional[Tuple[int, int]] = None
-    dpi: Optional[int] = 300
 
 
 @dataclass(kw_only=True)
@@ -87,6 +84,7 @@ class DataSource:
     source_type: str
     rescaler: Optional[Any] = None
     metadata: Optional[Dict[str, Any]] = None
+    overrides: Optional[Dict] = None
 
 
 @dataclass(kw_only=True)
@@ -116,7 +114,7 @@ class XPDataSource(DataSource):
 @dataclass
 class PlotTask:
     data: pu.PlotData
-    figure: FigureConfig
+    figure: pu.FigureConfig
     plot_config: Any = MISSING
     output_path: str = MISSING
 
@@ -125,11 +123,11 @@ class PlotTask:
 class PlotJob:
     defaults: List[Any] = field(
         default_factory=lambda: [
-            {'data_config/rescaler@rescaler':'EBFP2_compressed'},
-            {'plot_config':'default_plotconf'},
+            {'data_config/rescaler@rescaler': 'EBFP2_compressed'},
+            {'plot_config': 'default_plotconf'},
         ]
     )
-    figure: FigureConfig = field(default_factory=FigureConfig)
+    figure: pu.FigureConfig = field(default_factory=pu.FigureConfig)
     output_path: str = './output_plot/$[task_index].png'
     plot_config: Any = MISSING
     data_sources: List[Any] = MISSING
@@ -138,10 +136,7 @@ class PlotJob:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                   --     data source resolvers     --
-
-
 def resolve_xp_data_source(data_source: XPDataSource) -> List[pu.PlotData]:
     assert data_source.source_type == 'xp'
     assert data_source.xp_path is not None
@@ -172,8 +167,6 @@ def resolve_recipe_data_source(
     pdata = pu.extract_plot_data_from_network(
         candidate_networks[0], X, Y, rescaler=rescaler, protein_aliases=color_aliases
     )
-    if data_source.metadata is not None:
-        pdata.metadata = {**pdata.metadata, **data_source.metadata}
     return [pdata]
 
 
@@ -229,7 +222,6 @@ def resolve_raw_data_source(data_source: RawDataSource) -> List[pu.PlotData]:
                     input_names=input_names,
                     output_name=output_name,
                     rescaler=rescaler,
-                    metadata=data_source.metadata,
                 )
             ]
         else:
@@ -281,18 +273,35 @@ def get_plot_data_from_xp_in_db(
     ]
 
 
-def resolve_data_source(data_source) -> List[pu.PlotData]:
+def instantiate_data_source(data_source) -> DataSource:
     if data_source.source_type == 'xp':
-        return resolve_xp_data_source(XPDataSource(**data_source))
+        return XPDataSource(**data_source)
     elif data_source.source_type == 'recipe':
-        return resolve_recipe_data_source(RecipeDataSource(**data_source))
+        return RecipeDataSource(**data_source)
     elif data_source.source_type == 'raw':
-        return resolve_raw_data_source(RawDataSource(**data_source))
+        return RawDataSource(**data_source)
+    else:
+        raise ValueError(f'Unsupported data source type {data_source.source_type}')
+
+
+def build_data_source(data_source: DataSource) -> List[pu.PlotData]:
+    if data_source.source_type == 'xp':
+        assert isinstance(data_source, XPDataSource)
+        return resolve_xp_data_source(data_source)
+    elif data_source.source_type == 'recipe':
+        assert isinstance(data_source, RecipeDataSource)
+        return resolve_recipe_data_source(data_source)
+    elif data_source.source_type == 'raw':
+        assert isinstance(
+            data_source, RawDataSource
+        ), f'Expected RawDataSource, got {type(data_source)}'
+        return resolve_raw_data_source(data_source)
     else:
         raise ValueError(f'Unsupported data source type {data_source.source_type}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                --     plot task making functions     --
 
 
 def cleanup_private_vars(d, prefix='__hydra_hack_'):
@@ -301,10 +310,67 @@ def cleanup_private_vars(d, prefix='__hydra_hack_'):
             del d[k]
 
 
+
+def make_plot_tasks(plot_job: PlotJob) -> List[PlotTask]:
+    data_sources = [instantiate_data_source(ds) for ds in plot_job.data_sources]
+    for i in range(len(data_sources)):
+        if 'rescaler' not in plot_job.data_sources[i]:
+            data_sources[i].rescaler = plot_job.rescaler
+
+    print(f'Instantiated {len(data_sources)} data sources')
+    # print their rescalers type:
+    for ds in data_sources:
+        print(f'data source {ds.source_type} has rescaler {type(ds.rescaler)}')
+
+    plot_data = []
+    for i, d in enumerate(data_sources):
+        # add task_index to metadata
+        if d.metadata is None:
+            d.metadata = {}
+        d.metadata['task_index'] = i
+        plot_data += build_data_source(d)
+
+    plot_job_dict = OmegaConf.to_container(plot_job, resolve=False)
+    assert isinstance(plot_job_dict, dict)
+    pre_tasks = [
+        OmegaConf.create(
+            {
+                'figure': plot_job_dict['figure'],
+                'plot_config': plot_job_dict['plot_config'],
+                'output_path': plot_job_dict['output_path'],
+                'metadata': d.metadata,
+            }
+        )
+        for d in data_sources
+    ]
+
+    # we want to apply any data_source overrides to each task
+    # we need to do that on the dict version of the plot_task
+    overriden_tasks = []
+    for task, ds in zip(pre_tasks, data_sources):
+        if ds.overrides is not None:
+            for override in ds.overrides:
+                override = OmegaConf.create(override)
+                print(f'Applying override {OmegaConf.to_yaml(override)}')
+                task = OmegaConf.merge(task, override)
+        # now we need to resolve the plot_config
+        task.plot_config = OmegaConf.create(task.plot_config)
+        overriden_tasks.append(task)
+
+    tasks = [
+        PlotTask(data=d, figure=t.figure, plot_config=t.plot_config, output_path=t.output_path)
+        for d, t in zip(plot_data, overriden_tasks)
+    ]
+
+    return tasks
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
 reset_hydra()
 
 cs = ConfigStore.instance()
-cs.store(group="figure", name="default_figure", node=FigureConfig)
+cs.store(group="figure", name="default_figure", node=pu.FigureConfig)
 cs.store(name="base_plotjob", node=PlotJob)
 # base_cfg = compose(config_name="base_plotjob", overrides=["data_config/rescaler@rescaler=EBFP2_compressed"])
 base_cfg = compose(config_name="base_plotjob")
@@ -317,45 +383,57 @@ if base_cfg.plot_job_file is not None:
     file_ext = file_path.suffix
     reset_hydra(config_dir=file_dir)
     job_cfg = compose(config_name=file_path.stem)
+else:
+    job_cfg = base_cfg
 
-def substitute(input_string:str, available_variables:Dict[str, Any]) -> str:
-    for k, v in available_variables.items():
-        input_string = input_string.replace(k, str(v))
-    return input_string
-
-def make_plot_tasks(plot_job: PlotJob) -> List[PlotTask]:
-    data = []
-    for ds in plot_job.data_sources:
-     data += resolve_data_source(ds)
-    outpaths = []
-    for i, d in enumerate(data):
-        available_variables = {
-            f'$[{k}]': v
-            for k, v in {
-                'task_index': i,
-                **(d.metadata if d.metadata is not None else {}),
-            }.items()
-        }
-        outpath = substitute(plot_job.output_path, available_variables)
-        outpath = Path(outpath).expanduser().resolve()
-        outpaths.append(str(outpath))
-    return [
-        PlotTask(data=ds, figure=plot_job.figure, plot_config=plot_job.plot_config, output_path=op)
-        for ds, op in zip(plot_job.data_sources, outpaths)
-    ]
 
 tasks = make_plot_tasks(job_cfg)
 
 log.info(f'Generated {len(tasks)} plot tasks')
+task = tasks[0]
+task.figure
+task.output_path
+task.data.y
+task.data.x
+task.plot_config.default_values
+task.data.rescaler.fwd(task.data.x).max()
+task.data.rescaler.fwd(task.data.x).min()
 
-##
+# do rescaling:
 
 
-# resolve the config
-user_config = OmegaConf.to_container(user_config, resolve=True)
-user_plot_config = user_config['plot_config']
-empty_config = OmegaConf.create(ut.generate_base_nested_config(namespace='biocomp.plotutils'))
+def get_plot_config(plot_config):
+    resolved_plot_config = OmegaConf.create(plot_config)
+    OmegaConf.resolve(resolved_plot_config)
+    conf_as_dict = OmegaConf.to_container(resolved_plot_config)
+    assert isinstance(conf_as_dict, dict)
+    callstack_params = ut.generate_full_nested_config(
+        conf_as_dict['callstack_params'], namespace='biocomp.plotutils'
+    )
+    resoved_callstack = OmegaConf.create(callstack_params)
+    resolved_plot_config.callstack_params = resoved_callstack
+    return resolved_plot_config
 
-pcp_base = OmegaConf.create(user_plot_config['plot_callstack_params'])
-pcp_new = ut.nested_resolve(OmegaConf.to_container(pcp_base, resolve=True))
-pu.network_figure(network, x, y, rescaler, **pcp_new['network_figure_params'])
+
+# rprint(OmegaConf.to_yaml(callstack_params.auto_plot_params.smooth_params.smooth_3d_params))
+
+import matplotlib.pyplot as plt
+
+
+def plot_task(task: PlotTask):
+    plot_config = get_plot_config(task.plot_config)
+    task.data.y = task.data.rescaler.fwd(task.data.y)
+    task.data.x = task.data.rescaler.fwd(task.data.x)
+
+    pu.auto_plot(
+        task.data,
+        figure_config=task.figure,
+        **plot_config.callstack_params.auto_plot_params,
+        rc_context=plot_config.rc_context,
+    )
+    plt.show()
+
+
+plot_task(tasks[0])
+
+# sorted(plt.rcParams.keys())
