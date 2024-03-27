@@ -1,6 +1,5 @@
-default_values:
+general:
   base_range: [0.05, 0.7]
-
   xlims: ${.base_range}
   ylims: ${.base_range}
   zlims: ${.base_range}
@@ -10,22 +9,21 @@ default_values:
     grey: '#777777'
 
 rc_context:
-
   figure.facecolor: white
 
-  axes.labelcolor: ${default_values.colors.grey}
+  axes.labelcolor: ${general.colors.grey}
   axes.labelsize: 8
   axes.labelweight: normal
   axes.spines.bottom: true
   axes.spines.left: true
   axes.spines.right: false
   axes.spines.top: false
-  axes.titlecolor: ${default_values.colors.grey}
+  axes.titlecolor: ${general.colors.grey}
   axes.titlesize: 10
   axes.titleweight: normal
 
   # thin grey spines:
-  axes.edgecolor: ${default_values.colors.grey}
+  axes.edgecolor: ${general.colors.grey}
   axes.linewidth: 0.5
 
   # bigger margin between subplots
@@ -33,7 +31,7 @@ rc_context:
   figure.subplot.wspace: 0.75
 
 
-  xtick.color: ${default_values.colors.grey}
+  xtick.color: ${general.colors.grey}
   xtick.labelsize: 8
   xtick.bottom: true
   xtick.labelbottom: true
@@ -45,7 +43,7 @@ rc_context:
   xtick.top: false
 
 
-  ytick.color: ${default_values.colors.grey}
+  ytick.color: ${general.colors.grey}
   ytick.labelsize: 8
   ytick.labelleft: true
   ytick.labelright: false
@@ -90,17 +88,18 @@ callstack_params:
   heatmap_params:
     axtransform: null
     bad_color: '#EEEEEE00'
-    cmap: ${default_values.cmap}
+    cmap: ${general.cmap}
     contours: 3
     opacities: null
-    vlims: ${default_values.vlims}
+    vlims: ${general.vlims}
+
   histogram_params:
-    cmap: ${default_values.cmap}
+    cmap: ${general.cmap}
     draw_colorbar: false
     nbins: [256, 256]
     noise_smooth: 0
     use_log_density: true
-    vlims: ${default_values.vlims}
+    vlims: ${general.vlims}
   knn_avg_params:
     avg_method: mean
     k: 500
@@ -128,15 +127,15 @@ callstack_params:
       
   smooth_2d_params:
     draw_colorbar: true
-    xlims: ${default_values.xlims}
-    ylims: ${default_values.ylims}
-    vlims: ${default_values.vlims}
+    xlims: ${general.xlims}
+    ylims: ${general.ylims}
+    vlims: ${general.vlims}
 
   smooth_3d_params:
-    xlims: ${default_values.xlims}
-    ylims: ${default_values.ylims}
-    zlims: ${default_values.zlims}
-    vlims: ${default_values.vlims}
+    xlims: ${general.xlims}
+    ylims: ${general.ylims}
+    zlims: ${general.zlims}
+    vlims: ${general.vlims}
     zslices: [0.05, 0.25, 0.4, 0.55]
     draw_colorbar: null
     colorbar_position: [1.05, 0.4]
@@ -153,7 +152,7 @@ callstack_params:
         offset: [0, 0]
         props:
           alpha: 0.5
-          color: ${default_values.colors.grey}
+          color: ${general.colors.grey}
           linestyle: ':'
           linewidth: 0.5
           zorder: -2147483637
@@ -168,26 +167,26 @@ callstack_params:
                 facecolor: white
                 pad: -0.25
               fontsize: 8
-              color: ${default_values.colors.grey}
+              color: ${general.colors.grey}
               ha: left
               va: center
           slice:
             offset: [85, 0]
             props:
               fontsize: 7
-              color: ${default_values.colors.grey}
+              color: ${general.colors.grey}
               ha: left
               va: center
         offset: [0.0, 0]
         props:
-          color: ${default_values.colors.grey}
+          color: ${general.colors.grey}
           linestyle: '-'
           linewidth: 0.5
           zorder: 2147483637
         ticks:
-          major: [{direction: [1, 0, 0], length: 8, props: {color: "${default_values.colors.grey}", linewidth: 0.4}}]
-          minor: [{direction: [1, 0, 0], length: 2, props: {color: "${default_values.colors.grey}", linewidth: 0.2}}]
-          slice: [{direction: [1, 0, 0], length: 80, props: {color: "${default_values.colors.grey}", alpha: 0.5, dashes: [5, 5], linewidth: 0.2}}]
+          major: [{direction: [1, 0, 0], length: 8, props: {color: "${general.colors.grey}", linewidth: 0.4}}]
+          minor: [{direction: [1, 0, 0], length: 2, props: {color: "${general.colors.grey}", linewidth: 0.2}}]
+          slice: [{direction: [1, 0, 0], length: 80, props: {color: "${general.colors.grey}", alpha: 0.5, dashes: [5, 5], linewidth: 0.2}}]
         zaxis_title:
           offset: [600, 0]
           props:
@@ -195,18 +194,18 @@ callstack_params:
             rotation: 45
             ha: center
             va: center
-            color: ${default_values.colors.grey}
+            color: ${general.colors.grey}
       top_left:
         offset: [0, 0]
         props:
-          color: ${default_values.colors.grey}
+          color: ${general.colors.grey}
           linestyle: '-'
           linewidth: 0.5
           zorder: 2147483637
       top_right:
         offset: [0, 0]
         props:
-          color: ${default_values.colors.grey}
+          color: ${general.colors.grey}
           linestyle: '-'
           linewidth: 0.5
           zorder: 2147483637

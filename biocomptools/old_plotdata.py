@@ -263,3 +263,138 @@ cm.log.info(f'Total plots: {netdf["data_plot"].notna().sum()}')
 cm.update_table(
     netdf, 'network', key_column='name', columns=['data_plot', 'plot_error'], update_only=True
 )
+
+##
+import matplotlib.pyplot as plt
+
+fig1, ax = plt.subplots()
+
+def simple_plot(ax):
+    ax.plot(np.random.rand(100))
+    ax.remove()
+    return ax
+
+ax = simple_plot(ax)
+
+fig2 = plt.figure()
+ax.figure=fig2
+fig2.axes.append(ax)
+fig2.add_axes(ax)
+
+dummy = fig2.add_subplot(111)
+ax.set_position(dummy.get_position())
+dummy.remove()
+plt.close(fig1)
+
+# save
+fig2.savefig('test.png')
+
+##
+# version with multiple axes
+
+fig, axes = plt.subplots(4, 1)
+
+def simple_plot(ax, i):
+    ax.plot(np.random.rand(100))
+    if i == 0:
+        ax.set_title('Title')
+        ax.set_aspect('equal')
+    return ax
+
+axes = [simple_plot(ax, i) for i, ax in enumerate(axes)]
+
+fig2, axes2 = plt.subplots(4, 1)
+
+for i, ax in enumerate(axes):
+    # axes2[i].set_position(ax.get_position())
+    # axes2[i].remove()
+    ax.set_position(axes2[i].get_position())
+    axes2[i].remove()
+    ax.figure = fig2
+    fig2.axes.append(ax)
+    fig2.add_axes(ax)
+
+plt.close(fig)
+
+# bigger vspacing:
+fig2.subplots_adjust(hspace=0.5)
+fig2.savefig('test.png')
+
+##
+##
+
+import matplotlib.pyplot as plt
+
+def move_axes(ax, fig, subplot_spec=111):
+  """Move an Axes object from a figure to a new pyplot managed Figure in
+  the specified subplot."""
+
+  # get a reference to the old figure context so we can release it
+  old_fig = ax.figure
+
+  # remove the Axes from it's original Figure context
+  ax.remove()
+
+  # set the pointer from the Axes to the new figure
+  ax.figure = fig
+
+  # add the Axes to the registry of axes for the figure
+  fig.axes.append(ax)
+  # twice, I don't know why...
+  fig.add_axes(ax)
+
+  # then to actually show the Axes in the new figure we have to make
+  # a subplot with the positions etc for the Axes to go, so make a
+  # subplot which will have a dummy Axes
+  dummy_ax = fig.add_subplot(subplot_spec)
+
+  # then copy the relevant data from the dummy to the ax
+  ax.set_position(dummy_ax.get_position())
+
+  # then remove the dummy
+  dummy_ax.remove()
+
+  # close the figure the original axis was bound to
+  plt.close(old_fig)
+
+all_axes = []
+for thing in things:
+    axes = make_complicated_plot()
+    all_axes.append(axes)
+
+fig = figure()
+old_figs = []
+for i_row, axes in enumerate(all_axes):
+    nrows = len(all_axes)
+    ncols = len(axes[0])
+    for i_col, ax in enumerate(axes[0]):
+        old_fig = move_axes(ax, fig, (nrows, ncols, 1 + i_col + i_row * ncols))
+        if i_col == 0:
+            old_figs.append(old_fig)
+
+for old_fig in old_figs:
+    plt.close(old_fig)
+
+
+##
+
+import io
+import pickle
+# ray version
+
+# def pickle_axis(ax):
+    # buf = io.BytesIO()
+    # pickle.dump(ax, buf)
+    # return buf.getvalue()
+
+# def unpickle_axis(pickled_ax):
+    # buf = io.BytesIO(pickled_ax)
+    # return pickle.load(buf)
+
+# @ray.remote
+# def simple_plot(pickled_ax):
+    # ax = unpickle_axis(pickled_ax)
+    # ax.plot(np.random.rand(100))
+    # return pickle_axis(ax)
+
+
