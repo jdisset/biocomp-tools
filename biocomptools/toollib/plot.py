@@ -1,7 +1,11 @@
-## {{{                          --     imports     --
-from dataclasses import dataclass, field
+## {{{                          --     imports     -
+from dataclasses import dataclass, field, fields
+from omegaconf import OmegaConf, open_dict
+from omegaconf import DictConfig, ListConfig
 from biocomptools.toollib import common as cm
 from functools import partial
+from typing import get_origin
+from dataclasses import is_dataclass
 from copy import deepcopy
 import logging
 from biocomptools.toollib import plot as pl
@@ -15,7 +19,20 @@ import biocomp.plotting.plotting_core as pc
 from biocomp import datautils as du
 from biocomp import plotutils as pu
 import biocomp as bc
-from typing import Optional, Union, Tuple, List, Dict, Sequence, Any, Callable, TypeVar
+from typing import (
+    Optional,
+    Union,
+    Tuple,
+    List,
+    Dict,
+    Sequence,
+    Any,
+    Callable,
+    TypeVar,
+    Generic,
+    Iterable,
+)
+from typing import Type, Union
 import hydra
 from hydra import compose, initialize, initialize_config_dir
 from hydra.core.config_store import ConfigStore
@@ -31,11 +48,12 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 log = logging.getLogger('biocomptools.biocomplot')
-log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG)
+
+from biocomp.plotutils import FigureSpec
+from biocomp.plotting.plotting_core import PlotData
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{              --     structured config declarations     --
 
 
 # a Job declares a list of DataSources (can be nested through DataSourceGroup)
@@ -48,60 +66,548 @@ log.setLevel(logging.INFO)
 # Everything relies on successive task overrides. A Task being a self-contained unit of work,
 # that has everything it needs to be executed.
 
+# One big pain point with hydra is that the interpolation of variables happens on the final
+# config object, which means we can't use variable paths that are relative to the current file or node.
+#
+# one way around that is to use the relative paths (...path.var), but it gets messy quickly.
+# After pondering if I should roll my own config system on top of OmegaConf that treats modules as *true* modules
+# and not this weird default-list + assembly of a config object that has no knowledge of the modules composed in it,
+# I decided that there might be a simple way to augment hydras interpolation system with a few custom resolvers
+# ${this: path.to.var} -> resolves to whatever the instanciated wrapper object is
+# ${include: path/to/module, resolve=false} ->
+#   load path/to/module with hydra and generate the config object, then append it to the current config
+
 T = TypeVar('T')
 U = TypeVar('U')
 ListOrSingle = Union[List[T], T]
 Pair = Tuple[T, T]
-PlotData = pu.PlotData
-DictOrList = Union[Dict[U,T], List[T]]
+DictOrList = Union[Dict[U, T], List[T]]
+DictLike = Union[Dict, DictConfig]
+AnyConfig = Union[DictConfig, ListConfig]
+
+## {{{                     --     instantiate utils     --
+from importlib import import_module
 
 
-# ╭──────────────────────╮ 
-# │     Base Classes     │ 
-# ╰──────────────────────╯ 
+def with_str_keys(d: DictLike) -> Dict:
+    return {str(k): v for k, v in d.items()}
 
+
+def make_flat_list(l):
+    if not isinstance(l, (list, tuple)):
+        return [l]
+    return [item for sublist in l for item in sublist]
+
+
+def has_target(obj):
+    return '_target_' in obj
+
+
+def get_target_class(obj: DictLike, default_module='biocomptools.toollib.plot') -> Callable:
+    """get the class of the target object"""
+
+    assert '_target_' in obj, f'Invalid data source object: {obj=}'
+
+    # target should be a string module.path.ClassName
+    # let's check that the class exists and it is a subclass of DataSource
+    target = obj['_target_']
+    target_parts = target.split('.')
+    target_module = '.'.join(target_parts[:-1])
+    target_class = target_parts[-1]
+
+    if target_module == '':
+        target_module = import_module(default_module)
+    else:
+        target_module = import_module(target_module)
+
+    target_class = getattr(target_module, target_class)
+    return target_class
+
+
+def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'):
+    """simply create an instance of _target_ with the rest of the dict as kwargs"""
+    target_class = get_target_class(obj, default_module)
+    kwargs = {k: v for k, v in obj.items() if k != '_target_'}
+    return target_class(**with_str_keys(kwargs))
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                       --     resolve utils     --
+
+CONTEXT_AWARE_RESOLVERS = ['np', 'this', 'plot_task', 'data', 'figure_task']
+
+# hydra 1.3 doesn't support lazy instantiation, which causes issues as we want to more
+# precisely control the instantiation process...
+# A Resolvable[T] is a wrapper around a T that can be resolved by OmegaConf at the last minute
+# by providing the right context (this, plot_task, data, figure_task, etc.)
+# When not resolved, it carries its DictConfig representation
+# and a constructor to build the object from it.
+
+# Calling obj.resolve will return the resolved object, or None if it's not resolvable.
+
+
+def noop_interpolation(resolver_name, *args, **kwargs):
+    # allows to defer resolve of context-dependent interpolations until we have the right context
+    if args:
+        args = [str(a) for a in args]
+        res = f'${{{resolver_name}: {",".join(args)}}}'
+        return res
+    return '${' + resolver_name + '}'
+
+
+class omegaconf_resolvers:
+    # a context manager to temporarily register resolvers
+    def __init__(self, resolvers: Dict[str, Callable]):
+        self.resolvers = resolvers
+
+    def __enter__(self):
+        for key, value in self.resolvers.items():
+            OmegaConf.clear_resolver(key)
+            OmegaConf.register_resolver(key, value)
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        for key in self.resolvers.keys():
+            OmegaConf.clear_resolver(key)
+
+
+def short_conf(conf: DictConfig) -> str:
+    long = OmegaConf.to_yaml(conf, resolve=False)
+    return long[:100] + ' [...] \n' if len(long) > 100 else long
+
+
+@dataclass
+class Resolvable(Generic[T]):
+    constructor: Callable[..., T] = MISSING
+    config: Optional[DictConfig] = None
+    # debug info:
+    name: Optional[str] = None
+    target_type: Optional[str] = None
+    has_from_config: Optional[bool] = None
+
+    def __repr__(self):
+        if self.config is None:
+            return f'Resolvable({self.name})[->{self.target_type}] (empty)'
+        return f'''Resolvable({self.name})[->{self.target_type}]
+             config:
+            {short_conf(self.config)}'''
+
+
+ResolvableOr = Union[Resolvable[T], T, AnyConfig]
+
+
+def resolve(resolvable: ResolvableOr[T], resolvers=None) -> T:
+    """
+    Resolve a Resolvable object with the given resolvers,
+    i.e. returns the object constructed by calling the constructor with the config
+    using the provided resolvers.
+    """
+
+    if not isinstance(resolvable, Resolvable):
+        return resolvable
+
+    if resolvers is None:
+        resolvers = {}
+
+    log.debug(f'Resolving {resolvable}')
+    with omegaconf_resolvers(resolvers):
+        if resolvable.config is None:
+            log.debug(f'No config found for {resolvable}, returning default')
+            return resolvable.constructor(OmegaConf.create())
+        else:
+            return resolvable.constructor(resolvable.config)
+
+
+def make_resolvable(
+    target_type: Type[T],
+    value: Union[DictConfig, T],
+    ctor_name='from_config',
+    name=None,
+    clsname=None,
+    **kw,
+) -> ResolvableOr[T]:
+
+    typename = target_type.__name__
+
+    log.debug(f'Making {typename} {name if name else "resolvable"} in {clsname}. {value=}')
+
+    # we need to set the value of the config in the resolvable object
+    # OR, if it is already of the right type, there's no need to wrap it
+    if isinstance(value, target_type):
+        log.info(f'Attribute {name} already resolved to {target_type}, skipping')
+        return value
+
+    if value is MISSING:
+        raise ValueError(f'Missing value for {name} in {clsname}')
+
+    if not isinstance(value, AnyConfig) and (value is not None):
+        raise ValueError(f'Invalid init value for {name}: {type(value)}, {value=}')
+
+    if hasattr(target_type, '__class__') and hasattr(target_type, ctor_name):
+
+        def from_config_ctor(config) -> T:
+            log.debug(
+                f'Constructing {typename} {name if name else "resolvable"} from config {"in " + clsname if clsname else ""}'
+            )
+            log.debug(f'Using {ctor_name}. Config: {short_conf(config)}')
+            return getattr(target_type, ctor_name)(config)
+
+        attr_ctor = from_config_ctor
+    else:
+        # check that it has a default constructor
+        if not hasattr(target_type, '__init__'):
+
+            raise ValueError(f'Invalid target type {target_type}')
+
+        # if not, we assume the default constructor can handle
+        # an unpacked DictConfig or a ListConfig
+        def default_ctor(config) -> T:
+            log.debug(
+                f'Constructing {typename} {name if name else "resolvable"} with default {"in " + clsname if clsname else ""}'
+            )
+            if isinstance(config, DictConfig):
+                return target_type(**with_str_keys(config))
+            elif isinstance(config, ListConfig):
+                return target_type(*config)
+            else:
+                raise ValueError(f'Invalid config type passed to constructor {type(config)}')
+
+        attr_ctor = default_ctor
+
+    wrapped_value = Resolvable(constructor=attr_ctor, config=value, name=name, **kw)
+    return wrapped_value
+
+
+# ╭─────────────────────────────╮
+# │      @resolvable_attrs      │
+# ╰─────────────────────────────╯
+def resolvable_attrs(*attrs):
+    """
+
+    A decorator to make some attributes to a dataclass resolvable.
+
+    Args:
+        attrs (List[str]): a list of attribute names to make resolvable
+
+    A resolvable attribute keeps its DictConfig representation until it is
+    resolved, at which point it calls the constructor with the resolved config.
+    Therefore a resolved attribute needs to store 2 things:
+    - the unresolved config (i.e. with ${OmegaConf:interpolation variable} type
+      strings in it)
+    - the constructor to build the object from the config
+
+    Why resolvable attributes?
+    --------------------------
+
+    This declarative plotting system relies on modular, nested configurations.
+    In order to customize figures and plots, users will often need to access
+    the context of the plot task, the figure task, the data, etc. (e.g. to set
+    the title of a plot, ...). The desired piece of context is oftentime not
+    available until instanciation of many things down the pipeline.
+
+    For example, if you need to know the index of the figure task in the list
+    of all figure tasks to set the title, you can use the ${figure_task:index}
+    interpolation variable. Or if you want to access some metadata information
+    that will only be added after the data is loaded, you can use ${this:
+    metadata.some_key}. But you can't resolve any of that at the time the
+    configuration is parsed, because the figure task doesn't exist yet.
+
+    How this decorator works
+    ------------------------
+
+    1. Handles constructions
+    It wraps the decorated class' __init__ method with a new method (distinct
+    from __post_init__ if it exists) whose role is to turn "normal" attributes
+    into Resolvable objects.
+
+    We first need to know the desired resolved type of the attribute. We need
+    to explicitely declare the type of the attribute in the decorator using a
+    tuple (attr_name, type)
+
+    So we loop over the attributes that were declared as resolvable, detect
+    and wrap them into a Resolvable class for which the constructor is:
+
+     - a "from_config" static method of the type of the attribute if it exists
+     - the default constructor otherwise
+
+     We assume any preexisting value of the attribute is either MISSING, or
+     a ConfigLike object (DictConfig, ListConfig, etc.)
+
+    MAYBE:
+    2. Handles resolution on access with the __getattr__ method
+
+
+    """
+
+    def decorator(cls):
+        log.debug(f'Setting up {cls.__name__} with resolvable attrs')
+
+        for attr_specs in attrs:
+            if not isinstance(attr_specs, (tuple, list)):
+                raise ValueError(
+                    f'In {cls.__name__}, invalid resolvable attribute spec {attr_specs}. Need a tuple'
+                )
+
+        # get_resolvers = cls.get_resolvers if hasattr(cls, 'get_resolvers') else None
+        # # lazily resolve the attribute when accessed
+        # def resolvable_getattribute(self, name: str, get_resolvers=get_resolvers):
+        # # attr = getattr(self, name) -> can't do that, it would recurse infinitely
+        # attr = object.__getattribute__(self, name)
+        # msg = f'Getting attribute {name} from {cls.__name__} with type {type(attr)}: {attr}.'
+        # if isinstance(attr, Resolvable):
+        # resolvers = get_resolvers() if get_resolvers is not None else {}
+        # attr = resolve(attr, resolvers=resolvers)
+        # setattr(self, name, attr)
+        # log.debug(f'{msg} Attribute {name} is resolvable, resolved to {attr}')
+        # return attr
+        # log.debug(f'{msg} Attribute {name} is not resolvable, returning as is')
+        # return attr
+
+        original_init = cls.__init__
+
+        def resolvable_init(self, *args, **kwargs):
+
+            original_init(self, *args, **kwargs)
+
+            log.debug(f'Initializing {cls.__name__} with resolvable attrs')
+
+            for attr_name, target_type in attrs:
+
+                assert isinstance(attr_name, str)
+                if not hasattr(self, attr_name):
+                    raise ValueError(f'Attribute {attr_name} not found in {cls}')
+
+                attr = object.__getattribute__(self, attr_name)  # current value of the attribute
+
+                if target_type is None:
+                    target_type = type(attr)
+                    if get_origin(target_type) is not None:
+                        target_type = get_origin(target_type)
+
+                assert (
+                    target_type is not None
+                ), f'Could not determine type for {attr_name} in {cls.__name__}'
+
+                if attr is MISSING:
+                    attr = None
+
+                wrapped_value = make_resolvable(
+                    target_type=target_type,
+                    value=attr,
+                    name=attr_name,
+                    clsname=cls.__name__,
+                )
+                setattr(self, attr_name, wrapped_value)
+
+        cls.__init__ = resolvable_init
+
+        return cls
+
+    return decorator
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                       --     inherit utils     --
+
+
+def dict_like(obj) -> bool:
+    return isinstance(obj, dict) or isinstance(obj, DictConfig)
+
+
+def conf_merge(parent: DictConfig, child: DictConfig) -> DictConfig:
+    parent_dict = OmegaConf.to_container(parent, resolve=False)
+    child_dict = OmegaConf.to_container(child, resolve=False)
+    merged = ut.updated_dict(parent_dict, child_dict)
+    assert isinstance(merged, dict)
+    return OmegaConf.create(merged)
+
+
+@dataclass
+class InheritanceSpec:
+    inherited_attrs: Iterable[str]
+    child_attrs: Iterable[str]
+
+
+# ╭───────────────────────────╮
+# │      @inherit_attrs       │
+# ╰───────────────────────────╯
+def inherit_attrs(*inheritance_specs: InheritanceSpec):
+    """
+    A decorator to make some attributes to a dataclass inheritable.
+
+    Only inheritance on Resolvable attributes is supported.
+
+    Classes can declare some attributes as being inheritable by some designated
+    children objects. The idea is that you want things like metadata, context,
+    or plot_config to be resolved at the last minute, and to able to be
+    modified at any level of the hierarchy (for example PlotJob -> DataSource
+    -> FigureTask -> PlotTask).
+
+    So let's say we create a PlotJob from a config file, and in it we have a
+    little bit of metadata information (like the name of the job, the author,
+    etc.). We also have a PlotConfig object that contains the default rc_params
+    for matplotlib, and a figure_maker that uses the default FigureMaker. We
+    then have data_sources that are created and that can override all these
+    attributes.
+
+    First we initialize PlotJob with all the attributes as Resolvable objects
+    (they keep their DictConfig representation until resolved).
+
+    When accessing an attribute, let's say job.data_source, we are going to
+    trigger its resolution. Before calling resolve() and therefore losing the
+    DictConfig representation of the data_source attribute, we want to *check if
+    it's been flagged as child that should inherit some attributes from the
+    parent*.
+
+    If yes, we want - prior to resolution - to merge the parent's attribute
+    (metadata, context, etc.) with the config of the child attribute. Then we
+    can resolve it.
+
+    So this decorator needs to signal to a potential resolve() call that it
+    should merge the parent's attribute with the child's attribute before.
+
+    One way to do that is to inject the merge stuff in the constructor of the
+    Resolvable object, which is what we are going to do here.
+
+    There are 2 cases to consider:
+    - the child attribute is being resolved first:
+        we inject a function that will merge every inherited attributes into it
+
+    - the parent attribute is being resolved first
+        we inject a function that will merge this attribute with every child
+
+    """
+
+    # turn the inheritance specs into 2 dictionaries:
+    # child -> inherited attributes and inherited attribute -> children
+
+    attribute_to_children = {}
+    child_to_attributes = {}
+
+    for spec in inheritance_specs:
+        for child_attr in spec.child_attrs:
+            if child_attr not in child_to_attributes:
+                child_to_attributes[child_attr] = []
+            child_to_attributes[child_attr] += spec.inherited_attrs
+
+        for inherited_attr in spec.inherited_attrs:
+            if inherited_attr not in attribute_to_children:
+                attribute_to_children[inherited_attr] = []
+            attribute_to_children[inherited_attr] += spec.child_attrs
+
+    for k, v in attribute_to_children.items():
+        attribute_to_children[k] = list(set(v))
+
+    for k, v in child_to_attributes.items():
+        child_to_attributes[k] = list(set(v))
+
+    def decorator(cls):
+
+        log.debug(f'Setting up {cls.__name__} with inheritable attrs')
+
+        def merge_attribute_into_children(
+            parent_config: DictConfig, cls_instance, children_names: List[str], parent_name: str
+        ):
+            # for child_name in children_names:
+            # child_attr = getattr(cls_instance, child_name)
+            # if isinstance(child_attr, Resolvable):
+            # child_attr.config = child_attr.config if child_attr.config else OmegaConf.create()
+            # attr_in_child_config = child_attr.config.get(parent_name, None)
+            # merged = conf_merge(parent_config, attr_in_child_config)
+            # log.debug(f'Merging {parent_config=} into {child_name=} in {cls.__name__}: {merged}')
+            # with open_dict(child_attr.config):
+            # child_attr.config[parent_name] = merged
+            # else:
+            # log.debug(f'{child_name=} in {cls.__name__} is not Resolvable. Skipping')
+            # return parent_config
+            raise NotImplementedError('Not implemented yet')
+
+        def merge_attributes_into_child(
+            child_config: DictConfig, cls_instance, parent_names: List[str]
+        ):
+            # about to resolve a child attribute, merge all parent attributes into it
+            for parent_name in parent_names:
+                parent_attr = getattr(cls_instance, parent_name)
+                if isinstance(parent_attr, Resolvable):
+                    log.debug(f'In {cls.__name__}: merging {parent_name=} config into child')
+                    parent_config = parent_attr.config if parent_attr.config else OmegaConf.create()
+                    attr_in_child_config = child_config.get(parent_name, OmegaConf.create())
+                    merged = conf_merge(parent_config, attr_in_child_config)
+                    with open_dict(child_config):
+                        child_config[parent_name] = merged
+                    log.debug(f'child_config[{parent_name}]=\n{short_conf(merged)}')
+                else:
+                    log.debug(f'{parent_name=} in {cls.__name__} is not Resolvable. Skipping')
+            return child_config
+
+        def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable):
+
+            base_constructor = obj.constructor
+
+            def wrapped_constructor(
+                config: DictConfig, obj=obj, fn=fn, base_constructor=base_constructor
+            ):
+                log.debug(f'Wrapped constructor of {obj.name}, from {cls.__name__}')
+                merged_config = fn(config)
+                return base_constructor(merged_config)
+
+            obj.constructor = wrapped_constructor
+
+        original_init = cls.__init__
+
+        def inherit_init(self, *args, **kwargs):
+
+            original_init(self, *args, **kwargs)
+
+            log.debug(f'Initializing {cls.__name__} with inheritable attrs')
+
+            for attr_name, children in attribute_to_children.items():
+                attr = getattr(self, attr_name)
+                assert isinstance(
+                    attr, Resolvable
+                ), f'{attr_name=} in {cls.__name__} is not Resolvable'
+                log.debug(
+                    f'Wrapping {attr_name=} constructor in {cls.__name__} with children {children}'
+                )
+                wrap_resolvable_constructor(
+                    attr,
+                    partial(
+                        merge_attribute_into_children, cls_instance=self, children_names=children
+                    ),
+                )
+
+            for child_name, parents in child_to_attributes.items():
+                attr = getattr(self, child_name)
+                assert isinstance(attr, Resolvable)
+                log.debug(f'Wrapping {child_name=} from {cls.__name__}. {parents=}')
+                wrap_resolvable_constructor(
+                    attr,
+                    partial(merge_attributes_into_child, cls_instance=self, parent_names=parents),
+                )
+
+        cls.__init__ = inherit_init
+
+        return cls
+
+    return decorator
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ╭──────────────────────╮
+# │     Base Classes     │
+# ╰──────────────────────╯
+# + -> resolvable + inherited/merged from upstream
+# = -> resolved (turned from a conf wrapper to an object)
+# - -> not available
 #               metadata  plot_config  figure_spec figure_maker  context
-# PlotJob          +           +            +           +          +
-# DataSource       +           +            +           +          +
-# FigureMaker      +           +            +           -          +
-# FigureTask       +           +            +           -          +
-# PlotTask         +           +            -           -          +
+# PlotJob          +           +            +           +          =
+# DataSource       +           +            +           +          =
+# FigureMaker      +           +            +           +=         =
+# FigureTask       +           +            +=          -          =
+# PlotTask         +=          +=           -           -          =
 # PlotData         -           -            -           -          -
-
-
-@dataclass(kw_only=True)
-class BaseConfig:
-    metadata: Optional[Dict[str, Any]] = None
-    context: Optional[Dict[str, Any]] = None
-    locals: Optional[Dict[str, Any]] = None
-
-
-@dataclass(kw_only=True)
-class FigureLayout:
-    pass
-
-@dataclass(kw_only=True)
-class SimpleFigureLayout(FigureLayout):
-    cols: int = 1
-    rows: int = 1
-    axes_size: Pair[int] = (5, 5)
-    dpi: int = 300
-    def make_figure(self) -> Tuple[Figure, Axes]:
-        fig, ax = plt.subplots(
-            self.rows,
-            self.cols,
-            figsize=(self.cols * self.axes_size[0], self.rows * self.axes_size[1]),
-            dpi=self.dpi,
-        )
-        return fig, ax
-
-@dataclass(kw_only=True)
-class FigureSpec:
-    title: Optional[str] = None
-    output_dir: str = './'
-    output_file: str = 'unnamed_figure_${metadata.task_index}.png'
-    extra_info: Optional[Dict[str, Any]] = None
-    layout: FigureLayout = field(default_factory=SimpleFigureLayout)
 
 
 @dataclass
@@ -117,66 +623,121 @@ class PlotConfig:
 
 
 @dataclass
-class PlotTask(BaseConfig):
-    """A PlotTask is a self-contained unit of work that can be executed by a plotting function"""
-    data: ListOrSingle[PlotData] = MISSING # the data to be plotted
-    ax: ListOrSingle[Axes] = MISSING # the axes to plot on
+class PlotTask:
+    metadata: Dict[str, Any] = MISSING
+    context: Dict[str, Any] = MISSING
+    data: ListOrSingle[PlotData] = MISSING  # the data to be plotted
+    ax: ListOrSingle[Axes] = MISSING  # the axes to plot on
     plot_config: PlotConfig = MISSING
 
 
+def as_dict(cfg: Optional[DictConfig]) -> Dict:
+    if cfg is None:
+        return {}
+    return OmegaConf.to_container(cfg, resolve=False)
+
+
+@resolvable_attrs(('metadata', dict), ('context', dict))
 @dataclass(kw_only=True)
-class FigureMaker(BaseConfig):
-    figure_spec: Optional[FigureSpec] = None
-    plot_config: Optional[PlotConfig] = None
+class FigureTask:
+    metadata: ResolvableOr[Dict[str, Any]] = MISSING
+    context: ResolvableOr[Dict[str, Any]] = MISSING
+    figure_spec: FigureSpec = MISSING
+    plot_config: PlotConfig = MISSING
+    plot_tasks: Optional[List[PlotTask]] = None
+
+
+## {{{                       --     Figure Makers     --
+
+
+@resolvable_attrs(
+    ('figure_spec', FigureSpec), ('plot_config', PlotConfig), ('metadata', dict), ('context', dict)
+)
+@dataclass(kw_only=True)
+class FigureMaker:
+    figure_spec: ResolvableOr[FigureSpec] = MISSING
+    plot_config: ResolvableOr[PlotConfig] = MISSING
+    metadata: ResolvableOr[Dict[str, Any]] = MISSING
+    context: ResolvableOr[Dict[str, Any]] = MISSING
 
     def make_plot_tasks(self, data) -> Tuple[List[FigureSpec], List[PlotTask]]:
         raise NotImplementedError('Subclasses must implement make_plot_tasks')
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
 
-@dataclass(kw_only=True)
-class FigureTask(BaseConfig):
-    figure_spec: FigureSpec
-    plot_tasks: List[PlotTask]
-    plot_config: PlotConfig = MISSING
+## {{{                        --     Data Sources     --
 
 
-@dataclass(kw_only=True)
-class DataSource(BaseConfig):
-
-    name: Optional[str] = None
-    figure_spec: Optional[FigureSpec] = None
-    figure_maker: Optional[FigureMaker] = None
-    plot_config: Optional[PlotConfig] = None
-
-
-@dataclass(kw_only=True)
-class DataSourceGroup(DataSource):
-    data_sources: DictOrList[str, DataSource] = MISSING
-
-
-@dataclass
-class PlotJob(BaseConfig):
-    defaults: List[Any] = field(
-        default_factory=lambda: [
-            {'data_config/rescaler@rescaler': 'EBFP2_compressed'},
-            {'plot_config': 'default_plotconf'},
-        ]
+@inherit_attrs(
+    InheritanceSpec(
+        inherited_attrs=['metadata', 'context', 'plot_config', 'figure_spec'],
+        child_attrs=['figure_maker'],
     )
+)
+@resolvable_attrs(
+    ('figure_spec', FigureSpec),
+    ('figure_maker', FigureMaker),
+    ('plot_config', PlotConfig),
+    ('metadata', dict),
+    ('context', dict),
+)
+class DataSource:
 
-    figure_spec: Optional[FigureSpec] = None
-    figure_maker: Optional[FigureMaker] = None
-    plot_config: Optional[PlotConfig] = None
-    data_sources: Any = MISSING
+    def __init__(
+        self,
+        figure_spec: Optional[ResolvableOr[FigureSpec]] = None,
+        figure_maker: Optional[ResolvableOr[FigureMaker]] = None,
+        plot_config: Optional[ResolvableOr[PlotConfig]] = None,
+        metadata: Optional[ResolvableOr[Dict[str, Any]]] = None,
+        context: Optional[ResolvableOr[Dict[str, Any]]] = None,
+    ):
+        self.figure_spec = figure_spec
+        self.figure_maker = figure_maker
+        self.plot_config = plot_config
+        self.metadata = metadata
+        self.context = context
+
+    def get_data(self) -> List[PlotData]:
+        raise NotImplementedError('Subclasses must implement get_data')
+
+    @classmethod
+    def from_config(cls, ds_cfg: DictConfig) -> 'DataSource':
+        log.debug(f'DataSource from_config:\n{short_conf(ds_cfg)}')
+        return build_datasource_from_config(ds_cfg)
+
+    def __repr__(self):
+        return f'DataSource'
 
 
+## {{{                           --     Group     --
 
-def make_flat_list(l):
-    if not isinstance(l, (list, tuple)):
-        return [l]
-    return [item for sublist in l for item in sublist]
+OmConfig = Union[DictConfig, ListConfig]
 
 
+class DataSourceGroup(DataSource):
+
+    def __init__(self, data_source: Optional[List[DataSource]] = None, **kwargs):
+        super().__init__(**kwargs)
+        data_source = data_source or []
+        log.debug(f'Initializing DataSourceGroup with {len(data_source)} data sources')
+        log.debug(f'{data_source=}')
+        self.data_source = [
+            make_resolvable(DataSource, ds, name=f'group.data_source[{i}]')
+            for i, ds in enumerate(data_source)
+        ]
+
+    def get_data(self) -> List[PlotData]:
+        self.data_source = [resolve(ds) for ds in self.data_source]
+        data = [ds.get_data() for ds in self.data_source]
+        return make_flat_list(data)
+
+    def __repr__(self):
+        return f'DataSourceGroup(\n  data_source={self.data_source})'
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                          --     Recipe     --
 @dataclass(kw_only=True)
 class RecipeDataSource(DataSource):
     data_path: str
@@ -185,24 +746,28 @@ class RecipeDataSource(DataSource):
     cache_dir = cm.config.paths.cache.networks
     color_aliases = cm.config.protein_aliases
 
-    # def resolve(self) -> List[pu.PlotData]:
-        # lib = ut.load_lib()
-        # recipe_file = Path(self.recipe_path).expanduser().resolve()
-        # data_file = Path(self.data_path).expanduser().resolve()
-        # candidate_networks = bc.recipe.network_from_recipe(
-            # recipe_file, lib, inverse='shortest', use_cache=self.cache_dir
-        # )
-        # if len(candidate_networks) == 0:
-            # raise ValueError(f'No networks built for recipe {self.recipe_path}')
-        # assert len(candidate_networks) == 1
-        # X, Y = bc.recipe.get_network_XY(
-            # candidate_networks[0], data_file, color_aliases=self.color_aliases
-        # )
-        # # rescaler = hydra.utils.instantiate(self.rescaler)
-        # pdata = pu.extract_plot_data_from_network(
-            # candidate_networks[0], X, Y, rescaler=rescaler, protein_aliases=self.color_aliases
-        # )
-        # return [pdata]
+    def resolve(self) -> List[pu.PlotData]:
+        lib = ut.load_lib()
+        recipe_file = Path(self.recipe_path).expanduser().resolve()
+        data_file = Path(self.data_path).expanduser().resolve()
+        candidate_networks = bc.recipe.network_from_recipe(
+            recipe_file, lib, inverse='shortest', use_cache=self.cache_dir
+        )
+        if len(candidate_networks) == 0:
+            raise ValueError(f'No networks built for recipe {self.recipe_path}')
+        assert len(candidate_networks) == 1
+        X, Y = bc.recipe.get_network_XY(
+            candidate_networks[0], data_file, color_aliases=self.color_aliases
+        )
+        # rescaler = hydra.utils.instantiate(self.rescaler)
+        pdata = pu.extract_plot_data_from_network(
+            candidate_networks[0], X, Y, rescaler=rescaler, protein_aliases=self.color_aliases
+        )
+        return [pdata]
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                            --     Raw     --
 
 
 @dataclass(kw_only=True)
@@ -213,7 +778,7 @@ class RawDataSource(DataSource):
     input_names: Optional[List[str]] = None
     output_name: Optional[str] = None
 
-    def resolve(self) -> List[pu.PlotData]:
+    def get_data(self) -> List[PlotData]:
         SUPPORTED_EXTENSIONS = ['.csv']
 
         data_file = Path(self.data_path).expanduser().resolve()
@@ -267,6 +832,14 @@ class RawDataSource(DataSource):
             else:
                 raise NotImplementedError(f'Extension {extension} not implemented')
 
+    def __repr__(self):
+        return f'RawDataSource'
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                            --     XP     --
+
 
 @dataclass(kw_only=True)
 class XPDataSource(DataSource):
@@ -275,10 +848,109 @@ class XPDataSource(DataSource):
     source_type: str = 'xp'
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def get_public_attrs(obj):
+    return [a for a in dir(obj) if not a.startswith('__')]
+
+
+def as_datasourcegroup(ds_cfg: OmConfig) -> DictConfig:
+    DATASOURCEGROUP_ATTRS = get_public_attrs(DataSourceGroup())
+    log.debug(f'DATASOURCEGROUP_ATTRS: {DATASOURCEGROUP_ATTRS}')
+
+    new_cfg = OmegaConf.create()
+    new_cfg['_target_'] = 'biocomptools.toollib.plot.DataSourceGroup'
+    data_source = []
+    if isinstance(ds_cfg, DictConfig):
+        for k, v in ds_cfg.items():
+            if not k in DATASOURCEGROUP_ATTRS:
+                data_source.append(v)
+            else:
+                new_cfg[k] = v
+    elif isinstance(ds_cfg, ListConfig):
+        data_source = ds_cfg
+    else:
+        raise ValueError(f'Invalid DataSourceGroup config {ds_cfg}')
+    new_cfg['data_source'] = data_source
+
+    log.debug(f'Converted:\n{short_conf(ds_cfg)}\nto DataSourceGroup:\n{short_conf(new_cfg)}')
+    return new_cfg
+
+
+def build_datasource_from_config(ds_cfg: OmConfig) -> DataSource:
+    # we need to deal with a few cases here:
+    # - we have a single data source (has a _target_ key)
+    # - we have a dict of data sources: it's a DataSourceGroup (with names)
+    # - we have a list of data sources: it's a *also* a DataSourceGroup
+    if isinstance(ds_cfg, DictConfig) and has_target(ds_cfg):
+        target_class = get_target_class(ds_cfg)
+
+    elif isinstance(ds_cfg, DictConfig) or isinstance(ds_cfg, ListConfig):
+        ds_cfg = as_datasourcegroup(ds_cfg)
+        target_class = get_target_class(ds_cfg)
+        assert target_class == DataSourceGroup
+
+    else:
+        raise ValueError(f'Invalid DataSourceGroup config {ds_cfg}')
+
+    log.debug(f'Target class for datasource: {target_class}')
+    ctor_args = filter_out_non_ctor_args(target_class, with_str_keys(ds_cfg))
+    log.debug(f'Building {target_class} with args {ctor_args}')
+    return target_class(**ctor_args)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                          --     PlotJob     --
+
+
+def filter_out_non_ctor_args(cls, kwargs):
+    ctor_args = {}
+    for k, v in kwargs.items():
+        if k in get_public_attrs(cls()):
+            ctor_args[k] = v
+    return ctor_args
+
+
+@inherit_attrs(
+    InheritanceSpec(
+        inherited_attrs=['metadata', 'context', 'plot_config', 'figure_spec', 'figure_maker'],
+        child_attrs=['data_source'],
+    )
+)
+@resolvable_attrs(
+    ('figure_spec', FigureSpec),
+    ('figure_maker', FigureMaker),
+    ('plot_config', PlotConfig),
+    ('data_source', DataSource),
+    ('metadata', dict),
+    ('context', dict),
+)
+@dataclass(kw_only=True)
+class PlotJob:
+
+    figure_spec: ResolvableOr[FigureSpec] = MISSING
+    figure_maker: ResolvableOr[FigureMaker] = MISSING
+    plot_config: ResolvableOr[PlotConfig] = MISSING
+    data_source: ResolvableOr[DataSource] = MISSING
+    metadata: ResolvableOr[Dict[str, Any]] = MISSING
+    context: ResolvableOr[Dict[str, Any]] = MISSING
+
+    # TODO: could alsso set this as the default constructor for things that don't declare from_config
+    # in the resolvable_attrs decorator
+    @classmethod
+    def from_config(cls, job_cfg: DictConfig) -> 'PlotJob':
+
+        ctor_args = filter_out_non_ctor_args(cls, with_str_keys(job_cfg))
+        newjob = cls(**ctor_args)
+        # newjob.data_source = resolve(newjob.data_source)
+        return newjob
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                          --     archive     --
 ## {{{                   --     data source resolvers     --
 
 
@@ -366,6 +1038,22 @@ def build_data_source(data_source: DataSource) -> List[pu.PlotData]:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+# no! we can't do that.
+# we want to resolve things at the last minute.
+# plot_config, for example, might want to refer to its general parameters
+# that could be modified by some plottask or figuretask
+
+# the problem is that we might need the whole context to resolve things
+# inside the main configuration but if we wait, it's going to get more specialized
+# and narrow.
+
+# we could sort of "carry" the whole file?
+# -> ugly
+# or we can make sure to use mostly context-aware resolvers (i.e. this)
+# and the occasional "normal" interpolation is some risky gambit
+# with the only guarantee being that we try to resolve it at the last minute.
+
+# OmegaConf.resolve(job_cfg)
 
 ## {{{                --     plot task making functions     --
 
@@ -430,4 +1118,5 @@ def make_plot_tasks(plot_job: PlotJob) -> List[PlotTask]:
     return tasks
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
 ##────────────────────────────────────────────────────────────────────────────}}}

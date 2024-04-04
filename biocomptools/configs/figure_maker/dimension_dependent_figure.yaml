@@ -1,0 +1,61 @@
+
+# a figure maker that will produce different things depending on the data input dimensions.
+# Should be called on a single plotdata (inside a ForEachData, for example)
+_target_: SwitchFigure
+#condition: '${this: dimensions.input}' # or maybe we can avoid the 'this' and use ${data: dimensions.input}
+case:
+  1: # if input is 1D we make a density plot (i.e. a fancier scatter plot)
+    _target_: SingleFigure
+
+    plot_config:
+      plot_method:
+        _target_: biocomp.histogram
+      default_values:
+        cmap: viridis
+
+  2: # if input is 2D we make a smooth (gaussian averaged) heatmap
+    _target_: SingleFigure
+    plot_config:
+      plot_method:
+        _target_: biocomp.smooth
+
+  3: # in 3d, we produce 2 things: a sequence of frames going through the z-axis, and a single figure with 4 subplots at different z-slices
+    _target_: MultiFigure
+
+    figure_makers:
+      # video
+      - _target_: MultiFigure
+        n_repeats: 10
+        figure_makers:
+          _target_: ForEachData
+          figure_maker:
+            _target_: SingleFigure
+            figure_spec:
+              output_file: "figure_${this: metadata.task_index}_${this: metadata.repeat_index}.png"
+            plot_config:
+              plot_method:
+                _target_: biocomp.smooth
+              callstack_params:
+                smooth_3d_params:
+                  zslices:
+                    [
+                      "${np: interp, ${figure_task: context.repeat_index}, [0, ${figure_task: context.n_repeats}], ${plot_task: plot_config.general.zlims}}",
+                    ]
+      # slices
+      - _target_: MultiFigure
+        n_repeats: 4
+        figure_makers: # note that we are NOT iterating over the repeats, but instead passing everything into a single figure
+          _target_: SingleFigure
+          figure_spec:
+            output_file: "figure_${this: metadata.task_index}_${this: metadata.repeat_index}.png"
+            layout: [1, 4] # SingleFigure will check that the number of plotdata is consistent with the layout
+          plot_config:
+            plot_method:
+              _target_: biocomp.smooth
+            callstack_params:
+              smooth_3d_params:
+                zslices:
+                  [
+                    "${np: interp, ${figure_task: context.frame_index}, [0, ${figure_task: context.n_repeats}], ${plot_task: plot_config.general.zlims}}",
+                  ]
+

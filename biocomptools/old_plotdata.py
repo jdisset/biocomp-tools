@@ -127,6 +127,7 @@ netdf = netdf.drop(columns=['network_obj', 'X', 'Y'])
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                       --     plot function     --
 
 def generate_config(n_inputs, extra_args=None):
