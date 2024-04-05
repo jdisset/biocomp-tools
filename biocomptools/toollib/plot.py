@@ -2,6 +2,9 @@
 from dataclasses import dataclass, field, fields
 from omegaconf import OmegaConf, open_dict
 from omegaconf import DictConfig, ListConfig
+from io import StringIO
+import sys
+from contextlib import contextmanager
 from biocomptools.toollib import common as cm
 from functools import partial
 from typing import get_origin
@@ -54,7 +57,7 @@ from biocomp.plotutils import FigureSpec
 from biocomp.plotting.plotting_core import PlotData
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+## {{{                         --     ramblings     --
 
 # a Job declares a list of DataSources (can be nested through DataSourceGroup)
 # each DataSource declares a FigureMaker, which will produce PlotTasks from the data
@@ -77,6 +80,9 @@ from biocomp.plotting.plotting_core import PlotData
 # ${include: path/to/module, resolve=false} ->
 #   load path/to/module with hydra and generate the config object, then append it to the current config
 
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                           --     types     --
 T = TypeVar('T')
 U = TypeVar('U')
 ListOrSingle = Union[List[T], T]
@@ -84,9 +90,27 @@ Pair = Tuple[T, T]
 DictOrList = Union[Dict[U, T], List[T]]
 DictLike = Union[Dict, DictConfig]
 AnyConfig = Union[DictConfig, ListConfig]
+##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                     --     instantiate utils     --
-from importlib import import_module
+
+## {{{                        --     misc utils     --
+
+
+def get_public_attrs(obj):
+    if is_dataclass(obj):
+        return [f.name for f in fields(obj)]
+
+    # if it's a type, try to instantiate it
+    if isinstance(obj, type):
+        obj = obj()
+
+    return [a for a in dir(obj) if not a.startswith('__')]
+
+
+def as_dict(cfg: Optional[DictConfig]) -> Dict:
+    if cfg is None:
+        return {}
+    return OmegaConf.to_container(cfg, resolve=False)
 
 
 def with_str_keys(d: DictLike) -> Dict:
@@ -99,11 +123,37 @@ def make_flat_list(l):
     return [item for sublist in l for item in sublist]
 
 
+def truncated_path(path: str, max_len=50) -> str:
+    if len(path) > max_len:
+        return '...' + path[-max_len:]
+    return path
+
+
+@contextmanager
+def indent_output(indent_level):
+    old_stdout = sys.stdout
+    captured_output = StringIO()
+    sys.stdout = captured_output
+    try:
+        yield
+    finally:
+        sys.stdout = old_stdout
+        output = captured_output.getvalue()
+        indent = ' ' * indent_level
+        tabulated = indent + output.replace('\n', '\n' + indent)
+        print(tabulated, end='')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                     --     instantiate utils     --
+from importlib import import_module
+
+
 def has_target(obj):
     return '_target_' in obj
 
 
-def get_target_class(obj: DictLike, default_module='biocomptools.toollib.plot') -> Callable:
+def get_target_class(obj: DictLike, default_module='biocomptools.toollib.plot') -> Type:
     """get the class of the target object"""
 
     assert '_target_' in obj, f'Invalid data source object: {obj=}'
@@ -130,21 +180,26 @@ def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'
     kwargs = {k: v for k, v in obj.items() if k != '_target_'}
     return target_class(**with_str_keys(kwargs))
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     resolve utils     --
 
 CONTEXT_AWARE_RESOLVERS = ['np', 'this', 'plot_task', 'data', 'figure_task']
 
-# hydra 1.3 doesn't support lazy instantiation, which causes issues as we want to more
-# precisely control the instantiation process...
 # A Resolvable[T] is a wrapper around a T that can be resolved by OmegaConf at the last minute
 # by providing the right context (this, plot_task, data, figure_task, etc.)
 # When not resolved, it carries its DictConfig representation
 # and a constructor to build the object from it.
 
-# Calling obj.resolve will return the resolved object, or None if it's not resolvable.
+
+def build_from_config(cls: Type[T], cfg: DictConfig) -> T:
+    # check if it has a _target_ key
+    if has_target(cfg):
+        subclass = get_target_class(cfg)
+        assert issubclass(subclass, cls), f'Invalid target class {subclass} for {cls}'
+
+    ctor_args = filter_out_non_ctor_args(cls, with_str_keys(cfg))
+    return cls(**ctor_args)
 
 
 def noop_interpolation(resolver_name, *args, **kwargs):
@@ -182,19 +237,19 @@ class Resolvable(Generic[T]):
     config: Optional[DictConfig] = None
     # debug info:
     name: Optional[str] = None
-    target_type: Optional[str] = None
-    has_from_config: Optional[bool] = None
+    target_type: Optional[Type] = None
 
-    def __repr__(self):
+    def __repr__(self, indent=0):
+        indentstr = ' ' * indent
         if self.config is None:
-            return f'Resolvable({self.name})[->{self.target_type}] (empty)'
-        return f'''Resolvable({self.name})[->{self.target_type}]
-             config:
-            {short_conf(self.config)}'''
+            return f'{indentstr}Resolvable({self.name})[->{self.target_type}] (empty)'
+
+        confstr = short_conf(self.config)
+        indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
+        return f'{indentstr}Resolvable({self.name})->{self.target_type.__name__}\n{indentstr}config:\n{indented_conf}'
 
 
 ResolvableOr = Union[Resolvable[T], T, AnyConfig]
-
 
 def resolve(resolvable: ResolvableOr[T], resolvers=None) -> T:
     """
@@ -221,7 +276,6 @@ def resolve(resolvable: ResolvableOr[T], resolvers=None) -> T:
 def make_resolvable(
     target_type: Type[T],
     value: Union[DictConfig, T],
-    ctor_name='from_config',
     name=None,
     clsname=None,
     **kw,
@@ -243,38 +297,17 @@ def make_resolvable(
     if not isinstance(value, AnyConfig) and (value is not None):
         raise ValueError(f'Invalid init value for {name}: {type(value)}, {value=}')
 
-    if hasattr(target_type, '__class__') and hasattr(target_type, ctor_name):
 
-        def from_config_ctor(config) -> T:
-            log.debug(
-                f'Constructing {typename} {name if name else "resolvable"} from config {"in " + clsname if clsname else ""}'
-            )
-            log.debug(f'Using {ctor_name}. Config: {short_conf(config)}')
-            return getattr(target_type, ctor_name)(config)
-
-        attr_ctor = from_config_ctor
+    # if type has a from_config constructor, use it
+    if hasattr(target_type, 'from_config'):
+        constructor = getattr(target_type, 'from_config')
     else:
-        # check that it has a default constructor
-        if not hasattr(target_type, '__init__'):
+        constructor = partial(build_from_config, target_type)
 
-            raise ValueError(f'Invalid target type {target_type}')
+    wrapped_value = Resolvable(
+        constructor=constructor, config=value, name=name, target_type=target_type, **kw
+    )
 
-        # if not, we assume the default constructor can handle
-        # an unpacked DictConfig or a ListConfig
-        def default_ctor(config) -> T:
-            log.debug(
-                f'Constructing {typename} {name if name else "resolvable"} with default {"in " + clsname if clsname else ""}'
-            )
-            if isinstance(config, DictConfig):
-                return target_type(**with_str_keys(config))
-            elif isinstance(config, ListConfig):
-                return target_type(*config)
-            else:
-                raise ValueError(f'Invalid config type passed to constructor {type(config)}')
-
-        attr_ctor = default_ctor
-
-    wrapped_value = Resolvable(constructor=attr_ctor, config=value, name=name, **kw)
     return wrapped_value
 
 
@@ -325,10 +358,7 @@ def resolvable_attrs(*attrs):
     tuple (attr_name, type)
 
     So we loop over the attributes that were declared as resolvable, detect
-    and wrap them into a Resolvable class for which the constructor is:
-
-     - a "from_config" static method of the type of the attribute if it exists
-     - the default constructor otherwise
+    and wrap them into a Resolvable class.
 
      We assume any preexisting value of the attribute is either MISSING, or
      a ConfigLike object (DictConfig, ListConfig, etc.)
@@ -407,7 +437,6 @@ def resolvable_attrs(*attrs):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                       --     inherit utils     --
 
 
@@ -610,6 +639,7 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 # PlotData         -           -            -           -          -
 
 
+## {{{                        --     PlotConfig     --
 @dataclass
 class PlotConfig:
     # rc_params for matplotlib
@@ -622,6 +652,9 @@ class PlotConfig:
     data_rescaler: Optional[Any] = None
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                           --     Tasks     --
 @dataclass
 class PlotTask:
     metadata: Dict[str, Any] = MISSING
@@ -631,21 +664,17 @@ class PlotTask:
     plot_config: PlotConfig = MISSING
 
 
-def as_dict(cfg: Optional[DictConfig]) -> Dict:
-    if cfg is None:
-        return {}
-    return OmegaConf.to_container(cfg, resolve=False)
-
-
 @resolvable_attrs(('metadata', dict), ('context', dict))
 @dataclass(kw_only=True)
 class FigureTask:
     metadata: ResolvableOr[Dict[str, Any]] = MISSING
     context: ResolvableOr[Dict[str, Any]] = MISSING
     figure_spec: FigureSpec = MISSING
-    plot_config: PlotConfig = MISSING
+    plot_config: ResolvableOr[PlotConfig] = MISSING
     plot_tasks: Optional[List[PlotTask]] = None
 
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     Figure Makers     --
 
@@ -653,15 +682,45 @@ class FigureTask:
 @resolvable_attrs(
     ('figure_spec', FigureSpec), ('plot_config', PlotConfig), ('metadata', dict), ('context', dict)
 )
-@dataclass(kw_only=True)
 class FigureMaker:
-    figure_spec: ResolvableOr[FigureSpec] = MISSING
-    plot_config: ResolvableOr[PlotConfig] = MISSING
-    metadata: ResolvableOr[Dict[str, Any]] = MISSING
-    context: ResolvableOr[Dict[str, Any]] = MISSING
 
-    def make_plot_tasks(self, data) -> Tuple[List[FigureSpec], List[PlotTask]]:
+    def __init__(
+        self,
+        figure_spec: Optional[ResolvableOr[FigureSpec]] = None,
+        plot_config: Optional[ResolvableOr[PlotConfig]] = None,
+        metadata: Optional[ResolvableOr[Dict[str, Any]]] = None,
+        context: Optional[ResolvableOr[Dict[str, Any]]] = None,
+    ):
+        self.figure_spec = figure_spec
+        self.plot_config = plot_config
+        self.metadata = metadata
+        self.context = context
+
+
+    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
         raise NotImplementedError('Subclasses must implement make_plot_tasks')
+
+
+class ForEachData(FigureMaker):
+
+    def __init__(
+        self,
+        figure_maker: ResolvableOr[FigureMaker],
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.figure_maker = figure_maker
+
+    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+        if not isinstance(data, (list, tuple)):
+            data = [data]
+
+        tasks = []
+
+        # TODO
+        ...
+
+        return tasks
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -706,8 +765,8 @@ class DataSource:
         log.debug(f'DataSource from_config:\n{short_conf(ds_cfg)}')
         return build_datasource_from_config(ds_cfg)
 
-    def __repr__(self):
-        return f'DataSource'
+    def __repr__(self, indent=0):
+        return f'{" "*indent}{self.__class__.__name__}'
 
 
 ## {{{                           --     Group     --
@@ -728,12 +787,15 @@ class DataSourceGroup(DataSource):
         ]
 
     def get_data(self) -> List[PlotData]:
-        self.data_source = [resolve(ds) for ds in self.data_source]
-        data = [ds.get_data() for ds in self.data_source]
-        return make_flat_list(data)
+        return make_flat_list([resolve(src).get_data() for src in self.data_source])
 
-    def __repr__(self):
-        return f'DataSourceGroup(\n  data_source={self.data_source})'
+    def __repr__(self, indent=0):
+        # uses indentations to show the hierarchy of data sources
+        indentstr = ' ' * indent
+        res = f'{indentstr}DataSourceGroup\n'
+        for src in self.data_source:
+            res += f'{indentstr} - ' + f'{src.__repr__(indent=indent+2)}\n'[indent + 2 :]
+        return res
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -764,6 +826,10 @@ class RecipeDataSource(DataSource):
             candidate_networks[0], X, Y, rescaler=rescaler, protein_aliases=self.color_aliases
         )
         return [pdata]
+
+    def __repr__(self, indent=0):
+        indentstr = ' ' * indent
+        return f'{indentstr}RecipeDataSource({truncated_path(self.recipe_path)})'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -832,12 +898,12 @@ class RawDataSource(DataSource):
             else:
                 raise NotImplementedError(f'Extension {extension} not implemented')
 
-    def __repr__(self):
-        return f'RawDataSource'
+    def __repr__(self, indent=0):
+        indentstr = ' ' * indent
+        return f'{indentstr}RawDataSource({truncated_path(self.data_path)})'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                            --     XP     --
 
 
@@ -847,22 +913,27 @@ class XPDataSource(DataSource):
     recipe_names: Optional[List[str]] = None
     source_type: str = 'xp'
 
+    def __repr__(self, indent=0):
+        indentstr = ' ' * indent
+        return f'{indentstr}XPDataSource({truncated_path(self.xp_path)})'
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-def get_public_attrs(obj):
-    return [a for a in dir(obj) if not a.startswith('__')]
-
-
 def as_datasourcegroup(ds_cfg: OmConfig) -> DictConfig:
-    DATASOURCEGROUP_ATTRS = get_public_attrs(DataSourceGroup())
+    DATASOURCEGROUP_ATTRS = get_public_attrs(DataSourceGroup)
     log.debug(f'DATASOURCEGROUP_ATTRS: {DATASOURCEGROUP_ATTRS}')
 
+    # operate on a copy of the config
+    ds_cfg = OmegaConf.create(ds_cfg)
     new_cfg = OmegaConf.create()
     new_cfg['_target_'] = 'biocomptools.toollib.plot.DataSourceGroup'
     data_source = []
     if isinstance(ds_cfg, DictConfig):
+        if 'data_source' in ds_cfg:
+            data_source = ds_cfg['data_source']
+            del ds_cfg['data_source']
         for k, v in ds_cfg.items():
             if not k in DATASOURCEGROUP_ATTRS:
                 data_source.append(v)
@@ -904,11 +975,10 @@ def build_datasource_from_config(ds_cfg: OmConfig) -> DataSource:
 
 ## {{{                          --     PlotJob     --
 
-
 def filter_out_non_ctor_args(cls, kwargs):
     ctor_args = {}
     for k, v in kwargs.items():
-        if k in get_public_attrs(cls()):
+        if k in get_public_attrs(cls):
             ctor_args[k] = v
     return ctor_args
 
@@ -937,15 +1007,42 @@ class PlotJob:
     metadata: ResolvableOr[Dict[str, Any]] = MISSING
     context: ResolvableOr[Dict[str, Any]] = MISSING
 
-    # TODO: could alsso set this as the default constructor for things that don't declare from_config
-    # in the resolvable_attrs decorator
-    @classmethod
-    def from_config(cls, job_cfg: DictConfig) -> 'PlotJob':
+    def generate_figure_tasks(self) -> List[FigureTask]:
+        return generate_figure_tasks(self.data_source)
 
-        ctor_args = filter_out_non_ctor_args(cls, with_str_keys(job_cfg))
-        newjob = cls(**ctor_args)
-        # newjob.data_source = resolve(newjob.data_source)
-        return newjob
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                      --     task generation     --
+
+def empty_config(r: Optional[pl.ResolvableOr[pl.T]]):
+    if r is None:
+        return True
+    if not isinstance(r, Resolvable):
+        return False
+    return r.config is None or r.config == {} or r.config == MISSING
+
+
+def generate_figure_tasks(src: ResolvableOr[DataSource]):
+    if not isinstance(src, DataSource):
+        src = resolve(src)
+    assert isinstance(src, DataSource), f'Expected DataSource, got {type(src)}, {src=}'
+    tasks = []
+    log.debug(f'Generating figure tasks for {src}. Figure maker: {src.figure_maker}')
+    if not empty_config(src.figure_maker):
+        src.figure_maker = pl.resolve(src.figure_maker)
+        data = src.get_data()
+        log.debug(f'Got data: {data} and figure maker: {src.figure_maker}')
+        tasks += src.figure_maker.make_figure_tasks(data)
+    else:
+        log.debug('No figure maker')
+    if hasattr(src, 'data_source'):
+        log.debug('Going down the hierarchy')
+        next_src = getattr(src, 'data_source')
+        if not isinstance(next_src, list):
+            next_src = [next_src]
+        for s in next_src:
+            tasks += generate_figure_tasks(s)
+    return tasks
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

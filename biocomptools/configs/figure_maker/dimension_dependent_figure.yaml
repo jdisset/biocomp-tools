@@ -39,7 +39,7 @@ case:
                 smooth_3d_params:
                   zslices:
                     [
-                      "${np: interp, ${figure_task: context.repeat_index}, [0, ${figure_task: context.n_repeats}], ${plot_task: plot_config.general.zlims}}",
+                      "${np: interp, ${this: context.repeat_index}, [0, ${this: context.n_repeats}], ${this: plot_config.general.zlims}}",
                     ]
       # slices
       - _target_: MultiFigure
@@ -56,6 +56,6 @@ case:
               smooth_3d_params:
                 zslices:
                   [
-                    "${np: interp, ${figure_task: context.frame_index}, [0, ${figure_task: context.n_repeats}], ${plot_task: plot_config.general.zlims}}",
+                    "${np: interp, ${this: context.frame_index}, [0, ${this: context.n_repeats}], ${this: plot_config.general.zlims}}",
                   ]
 

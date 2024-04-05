@@ -109,41 +109,7 @@ job_cfg.extra.base_figure_maker
 ##
 
 job = pl.PlotJob.from_config(job_cfg)
-job.data_source = pl.resolve(job.data_source)
-type(job.data_source)
-
-
-job.data_source.data_source
-
-job.data_source.figure_spec
-
-resolved0 = pl.resolve(job.data_source.data_source[0])
-resolved0.data_source
-
-first_group.figure_maker
-subgroup_A = pl.DataSource.from_config(first_group.data_source[0].config)
-subgroup_A.figure_maker
-subgroup_A.figure_maker
-subsubgroup = pl.DataSource.from_config(subgroup_A.data_source[0].config)
-subsubgroup.figure_maker
-subsubgroup.data_source
-
-job.data_source.data_source[0].figure_maker.config
-
-# wtf it seems the data_sources are not being resolved?
-
-# TODO: get_data seems to work BUT not if a data_source group is given other
-# arguments than data_sources. 
-
-# - Check that the nesting is actually correct, I'm not sure if there are not
-# too many DataSourceGroup being vreated here
-# - Why doesn't it work when adding figure_maker to the DataSourceGroup? It looks 
-# like we are trying to initialize a the FigureMaker (but we shouldnt, at this stage)
-# - Implement the override thingy where a daugter class merges the parent class' overridable attrs
-
-
-
-# rprint(OmegaConf.to_yaml(data_sources))
+tasks = job.generate_figure_tasks()
 
 
 ## {{{                          --     archive     --
@@ -157,12 +123,18 @@ job.data_source.data_source[0].figure_maker.config
 
 OmegaConf.clear_resolver('np')
 OmegaConf.clear_resolver('numpy')
+
+
 def numpy_resolver(key, fname, *args, **kwargs):
     import numpy
+
     f = getattr(numpy, fname)
     return f(*args, **kwargs)
+
+
 OmegaConf.register_new_resolver('np', numpy_resolver)
 OmegaConf.register_new_resolver('numpy', numpy_resolver)
+
 
 def get_plot_config(plot_config):
     resolved_plot_config = OmegaConf.create(plot_config)
@@ -223,9 +195,12 @@ oc.nested.B[3]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                           --     tests     --
+
 from toollib.plot import resolvable_attrs, inherit_attrs
 
 # test cases
+
 
 @resolvable_attrs(('attr_0', dict))
 class B:
@@ -239,8 +214,6 @@ class A:
     attr_1: str
 
 
-
-
 ##
 
 ds = pl.DataSource()
@@ -249,41 +222,50 @@ dir(pl.DataSourceGroup)
 
 pl.DataSourceGroup.__init__()
 
-## 
+##
+
 
 def printer(thing_to_say):
     def decorator(cls):
         original_init = cls.__init__
+
         def new_init(self, *args, **kwargs):
             original_init(self, *args, **kwargs)
             print(thing_to_say)
+
         cls.__init__ = new_init
         return cls
+
     return decorator
+
 
 @printer('hello from decorator')
 class Base:
     def __init__(self, **kwargs):
         print('Base init')
 
+
 b = Base()
+
 
 @dataclass
 class Derived(Base):
     pass
 
+
 d = Derived()
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+
+from contextlib import contextmanager
+from io import StringIO
+import sys
 
 
-
-
-
-
-
-
-
-
-
-
+# Example of usage
+with indent_output(2):
+    print('This will be indented')
+    print('This will also be indented')
+    with indent_output(2):
+        print('This will be indented even more')
