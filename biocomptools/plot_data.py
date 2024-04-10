@@ -103,13 +103,14 @@ file_ext = plot_file_path.suffix
 reset_hydra(config_dir=file_dir)
 # job_cfg = compose(config_name=plot_file_path.stem, return_hydra_config=True)
 job_cfg = compose(config_name=plot_file_path.stem)
-
 job_cfg.extra.base_figure_maker
 
 ##
 
 job = pl.PlotJob.from_config(job_cfg)
 tasks = job.generate_figure_tasks()
+
+tasks
 
 
 ## {{{                          --     archive     --
@@ -258,14 +259,17 @@ d = Derived()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-from contextlib import contextmanager
-from io import StringIO
-import sys
 
 
-# Example of usage
-with indent_output(2):
-    print('This will be indented')
-    print('This will also be indented')
-    with indent_output(2):
-        print('This will be indented even more')
+
+test_conf = """
+a: 10
+b: "${obj: extra.base_figure_maker}"
+"""
+
+oc = OmegaConf.create(test_conf)
+
+with pl.omegaconf_resolvers({'obj': partial(obj_resolver, job)}):
+    print(oc.b)
+
+

@@ -2,8 +2,8 @@
 # a figure maker that will produce different things depending on the data input dimensions.
 # Should be called on a single plotdata (inside a ForEachData, for example)
 _target_: SwitchFigure
-#condition: '${this: dimensions.input}' # or maybe we can avoid the 'this' and use ${data: dimensions.input}
-case:
+condition: '${data: dimensions.input}' # or maybe we can avoid the 'this' and use ${data: dimensions.input}
+cases:
   1: # if input is 1D we make a density plot (i.e. a fancier scatter plot)
     _target_: SingleFigure
 
