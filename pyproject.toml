@@ -10,6 +10,9 @@ authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
 dependencies = [
 	"biocomp",
+	"hydra-core",
+	"psycopg2-binary",
+
 ]
 
 
@@ -30,8 +33,8 @@ venv = "py311"
 
 [tool.setuptools]
 packages = ["biocomptools"]
-package_dir = {"" = "."}
-include_package_data = true
+#package_dir = {"" = "."}
+#include_package_data = true
 
-[tool.setuptools.package_data]
-biocomptools = ["configs/*.yaml"]
+#[tool.setuptools.package_data]
+#biocomptools = ["configs/*.yaml"]

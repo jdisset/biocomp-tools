@@ -1,4 +1,4 @@
-## {{{                         --     imports     --
+## {{{                        --     imports     --
 from dataclasses import dataclass, field
 from biocomptools.toollib import common as cm
 from functools import partial
@@ -109,8 +109,6 @@ job_cfg.extra.base_figure_maker
 
 job = pl.PlotJob.from_config(job_cfg)
 tasks = job.generate_figure_tasks()
-
-tasks
 
 
 ## {{{                          --     archive     --
@@ -260,16 +258,23 @@ d = Derived()
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+class A:
+
+    def __init__(self):
+        self.a = 1
+
+    def __getattr__(self, item):
+        return self.__dict__[item]
 
 
-test_conf = """
-a: 10
-b: "${obj: extra.base_figure_maker}"
-"""
+d = {'a': 1, 'b': 2, 'c': 3}
 
-oc = OmegaConf.create(test_conf)
+d['a']
+d.get('a')
 
-with pl.omegaconf_resolvers({'obj': partial(obj_resolver, job)}):
-    print(oc.b)
-
-
+a = A()
+a.a
+aa = getattr(a, 'a')
+aa = 3
+a.a
+getattr(d, 'a')

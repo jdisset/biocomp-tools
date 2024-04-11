@@ -17,7 +17,6 @@ import psycopg2
 from psycopg2.extras import execute_values
 import logging
 from tqdm import tqdm
-from result import Ok, Err, Result, is_ok, is_err
 
 from typing import Union, List, Tuple, Dict, Any, Callable, Collection
 

@@ -50,6 +50,14 @@ from matplotlib.axes import Axes
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
+from rich.logging import RichHandler
+
+FORMAT = "[%(filename)s:%(lineno)s - %(funcName)s() ] %(message)s"
+# clear all handlers
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+logging.basicConfig(level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
 log = logging.getLogger('biocomptools.biocomplot')
 log.setLevel(logging.DEBUG)
 
@@ -83,6 +91,9 @@ from biocomp.plotting.plotting_core import PlotData
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
+
+from typing import TypeVar, Generic, Protocol
+
 T = TypeVar('T')
 U = TypeVar('U')
 ListOrSingle = Union[List[T], T]
@@ -90,6 +101,16 @@ Pair = Tuple[T, T]
 DictOrList = Union[Dict[U, T], List[T]]
 DictLike = Union[Dict, DictConfig]
 AnyConfig = Union[DictConfig, ListConfig]
+
+D = TypeVar('D', Dict, DictConfig)
+
+
+class ConfigHolder(Protocol):
+    config: Optional[DictLike]
+
+
+Mergeable = Union[DictLike, ConfigHolder]
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -107,20 +128,29 @@ def get_public_attrs(obj):
     return [a for a in dir(obj) if not a.startswith('__')]
 
 
-def as_dict(cfg: Optional[DictConfig]) -> Dict:
-    if cfg is None:
-        return {}
-    return OmegaConf.to_container(cfg, resolve=False)
-
-
 def with_str_keys(d: DictLike) -> Dict:
     return {str(k): v for k, v in d.items()}
 
 
-def make_flat_list(l):
-    if not isinstance(l, (list, tuple, ListConfig)):
+def list_like(obj):
+    return isinstance(obj, (list, tuple, ListConfig))
+
+
+def make_flat_list(l) -> List:
+    """
+    if l is a list of lists, flatten it. If it's a single element, return it as a list
+    """
+    if not list_like(l):
         return [l]
-    return [item for sublist in l for item in sublist]
+    else:
+        # only unpack an item if it's a list. should be recursive.
+        res = []
+        for item in l:
+            if list_like(item):
+                res += make_flat_list(item)
+            else:
+                res.append(item)
+        return res
 
 
 def truncated_path(path: str, max_len=50) -> str:
@@ -199,6 +229,16 @@ CONTEXT_AWARE_RESOLVERS = ['np', 'this', 'plot_task', 'data', 'figure_task']
 # and a constructor to build the object from it.
 
 
+def dict_like(obj) -> bool:
+    return (
+        hasattr(obj, 'keys')
+        and hasattr(obj, 'get')
+        and hasattr(obj, '__getitem__')
+        and hasattr(obj, '__contains__')
+        and hasattr(obj, '__iter__')
+    )
+
+
 def build_from_config(cls: Type[T], cfg: DictConfig, filter_out_non_ctor_args=False) -> T:
     log.debug(f'Building {cls.__name__} from config:\n{short_conf(cfg)}')
     # check if it has a _target_ key
@@ -247,8 +287,13 @@ class omegaconf_resolvers:
 
 
 def short_conf(conf: DictConfig) -> str:
-    long = OmegaConf.to_yaml(conf, resolve=False)
-    return long[:100] + ' [...] \n' if len(long) > 100 else long
+    if conf is None:
+        return 'None'
+    try:
+        long = OmegaConf.to_yaml(conf, resolve=False)
+        return long[:100] + ' [...] \n' if len(long) > 100 else long
+    except ValueError as e:
+        raise ValueError(f'Invalid config: {conf}') from e
 
 
 @dataclass
@@ -268,11 +313,53 @@ class Resolvable(Generic[T]):
         indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
         return f'{indentstr}Resolvable({self.name})->{self.target_type.__name__}\n{indentstr}config:\n{indented_conf}'
 
+    # a Resolvable is dict_like (it transparently forwards dict-like operations to its config)
+
+    def __getitem__(self, key):
+        if self.config is None:
+            raise ValueError(f'Cannot access key {key} in empty Resolvable')
+        with open_dict(self.config):
+            return self.config[key]
+
+    def __setitem__(self, key, value):
+        if self.config is None:
+            self.config = OmegaConf.create({})
+        with open_dict(self.config):
+            self.config[key] = value
+
+    def __contains__(self, key):
+        return self.config is not None and key in self.config
+
+    def __iter__(self):
+        if self.config is None:
+            return iter([])
+        return iter(self.config)
+
+    def keys(self):
+        if self.config is None:
+            return []
+        return self.config.keys()
+
+    def values(self):
+        if self.config is None:
+            return []
+        return self.config.values()
+
+    def items(self):
+        if self.config is None:
+            return []
+        return self.config.items()
+
+    def get(self, key, default=None):
+        if self.config is None:
+            return default
+        return self.config.get(key, default)
+
 
 ResolvableOr = Union[Resolvable[T], T, AnyConfig]
 
 
-def resolve(resolvable: ResolvableOr[T], resolvers=None) -> T:
+def resolve(resolvable: Any, resolvers=None):
     """
     Resolve a Resolvable object with the given resolvers,
     i.e. returns the object constructed by calling the constructor with the config
@@ -459,45 +546,99 @@ def resolvable_attrs(*attrs):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     inherit utils     --
 
-
-def dict_like(obj) -> bool:
-    return isinstance(obj, dict) or isinstance(obj, DictConfig)
+# a set of utils to transparently treat dict-like objects and resolvables as mergeable objects
 
 
-def conf_merge(parent: DictConfig, child: DictConfig) -> DictConfig:
-    parent_dict = OmegaConf.to_container(parent, resolve=False)
-    child_dict = OmegaConf.to_container(child, resolve=False)
-    merged = ut.updated_dict(parent_dict, child_dict)
-    assert isinstance(merged, dict)
-    return OmegaConf.create(merged)
+def config_holder(obj) -> bool:
+    return hasattr(obj, 'config') and (dict_like(obj.config) or obj.config is None)
 
 
-def merge_attributes(parent_attr, child_instance, attr_name):
-    # should work for any combination of Resolvable, DictConfig, and Dict
-    # TODO
-    ...
+def as_dict(obj) -> Dict:
+    if obj is None:
+        return {}
+    if isinstance(obj, DictConfig):
+        d = OmegaConf.to_container(obj, resolve=False)
+        assert isinstance(d, dict), f'Invalid dict-like object {d}'
+        return d
+    if config_holder(obj):
+        return as_dict(obj.config)
+    return obj
 
 
-def merge_attributes_into_child(
-    child_config: DictConfig, parent_cls_instance: Any, parent_attr_names: List[str]
-):
-    # about to resolve a child attribute, merge all parent attributes into it
-    for parent_name in parent_attr_names:
-        parent_attr = getattr(parent_cls_instance, parent_name)
+def merged(parent: DictLike, child: D) -> D:
+    """Merge parent DictLike structure into child,
+    return the result without modifying child,
+    and in the same type as child."""
 
-        raise NotImplementedError('Not implemented yet')
-        # TODO: use merge_attributes instead of this:
-        if isinstance(parent_attr, Resolvable):
-            parent_config = parent_attr.config if parent_attr.config else OmegaConf.create()
-            attr_in_child_config = child_config.get(parent_name, OmegaConf.create())
-            merged = conf_merge(parent_config, attr_in_child_config)
-            with open_dict(child_config):
-                child_config[parent_name] = merged
-            log.debug(f'child_config[{parent_name}]=\n{short_conf(merged)}')
-        else:
-            log.debug(f'{parent_name=} is not Resolvable. Skipping')
+    merged = ut.updated_dict(as_dict(parent), as_dict(child))
+    assert isinstance(merged, dict), f'Invalid merged object {merged}'
 
-    return child_config
+    if isinstance(child, DictConfig):
+        return OmegaConf.create(merged)
+
+    return merged
+
+
+def get_dict_attr(obj: DictLike, attr_name: str) -> Any:
+    try:
+        return obj[attr_name]
+    except TypeError:
+        return getattr(obj, attr_name)
+
+
+def set_dict_attr(obj: DictLike, attr_name: str, value: Any):
+    try:
+        obj[attr_name] = value
+    except TypeError:
+        setattr(obj, attr_name, value)
+
+
+@contextmanager
+def open_dictlike(obj: Any):
+    if isinstance(obj, DictConfig):
+        with open_dict(obj):
+            yield
+    else:
+        yield
+
+
+def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str]):
+    """merge parent[attr_name] into target[attr_name]"""
+
+    if isinstance(attr_names, str):
+        attr_names = [attr_names]
+
+    for attr_name in attr_names:
+        try:
+            parent_attr = get_dict_attr(parent, attr_name)
+        except KeyError:
+            log.debug(f'No parent attribute {attr_name} found in {parent}')
+            continue
+
+        try:
+            target_attr = get_dict_attr(target, attr_name)
+        except KeyError:
+            target_attr = {}
+
+        log.debug(f'Merging {attr_name} from {parent_attr} into {target_attr} of {target}')
+        merged_attr = merged(parent_attr, target_attr)
+        log.debug(f'Merged {attr_name} -> {merged_attr}')
+        with open_dictlike(target):
+            set_dict_attr(target, attr_name, merged_attr)
+
+
+def merged_into(target: DictLike, parent: DictLike, attr_names: ListOrSingle[str]) -> DictLike:
+    target_copy = deepcopy(target)
+    inplace_merge_into(target_copy, parent, attr_names)
+    return target_copy
+
+
+def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable):
+
+    def wrapped_constructor(config: DictConfig, fn=fn, base_constructor=obj.constructor):
+        return base_constructor(fn(config))
+
+    obj.constructor = wrapped_constructor
 
 
 @dataclass
@@ -554,12 +695,15 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
     - the parent attribute is being resolved first
         we inject a function that will merge this attribute with every child
 
+    Here we only consider the first case, because the second case should not
+    happen in the current setup.
+
+
     """
 
     # turn the inheritance specs into 2 dictionaries:
     # child -> inherited attributes and inherited attribute -> children
 
-    attribute_to_children = {}
     child_to_attributes = {}
 
     for spec in inheritance_specs:
@@ -568,14 +712,6 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
                 child_to_attributes[child_attr] = []
             child_to_attributes[child_attr] += spec.inherited_attrs
 
-        for inherited_attr in spec.inherited_attrs:
-            if inherited_attr not in attribute_to_children:
-                attribute_to_children[inherited_attr] = []
-            attribute_to_children[inherited_attr] += spec.child_attrs
-
-    for k, v in attribute_to_children.items():
-        attribute_to_children[k] = list(set(v))
-
     for k, v in child_to_attributes.items():
         child_to_attributes[k] = list(set(v))
 
@@ -583,35 +719,8 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 
         log.debug(f'Setting up {cls.__name__} with inheritable attrs')
 
-        def merge_attribute_into_children(
-            parent_config: DictConfig, cls_instance, children_names: List[str], parent_name: str
-        ):
-            # for child_name in children_names:
-            # child_attr = getattr(cls_instance, child_name)
-            # if isinstance(child_attr, Resolvable):
-            # child_attr.config = child_attr.config if child_attr.config else OmegaConf.create()
-            # attr_in_child_config = child_attr.config.get(parent_name, None)
-            # merged = conf_merge(parent_config, attr_in_child_config)
-            # log.debug(f'Merging {parent_config=} into {child_name=} in {cls.__name__}: {merged}')
-            # with open_dict(child_attr.config):
-            # child_attr.config[parent_name] = merged
-            # else:
-            # log.debug(f'{child_name=} in {cls.__name__} is not Resolvable. Skipping')
-            # return parent_config
-            raise NotImplementedError('Not implemented yet')
-
-        def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable):
-
-            base_constructor = obj.constructor
-
-            def wrapped_constructor(
-                config: DictConfig, obj=obj, fn=fn, base_constructor=base_constructor
-            ):
-                log.debug(f'Wrapped constructor of {obj.name}, from {cls.__name__}')
-                merged_config = fn(config)
-                return base_constructor(merged_config)
-
-            obj.constructor = wrapped_constructor
+        def merge_attribute_into_children(**_):
+            raise NotImplementedError()
 
         original_init = cls.__init__
 
@@ -621,31 +730,18 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 
             log.debug(f'Initializing {cls.__name__} with inheritable attrs')
 
-            for attr_name, children in attribute_to_children.items():
-                attr = getattr(self, attr_name)
-                assert isinstance(
-                    attr, Resolvable
-                ), f'{attr_name=} in {cls.__name__} is not Resolvable'
-                log.debug(
-                    f'Wrapping {attr_name=} constructor in {cls.__name__} with children {children}'
-                )
-                wrap_resolvable_constructor(
-                    attr,
-                    partial(
-                        merge_attribute_into_children, cls_instance=self, children_names=children
-                    ),
-                )
-
             for child_name, parents in child_to_attributes.items():
-                attr = getattr(self, child_name)
-                assert isinstance(attr, Resolvable)
-                log.debug(f'Wrapping {child_name=} from {cls.__name__}. {parents=}')
+                child_attr = getattr(self, child_name)
+                assert isinstance(child_attr, Resolvable)
+
+                # we wrap child_attr's ctor so that, just before resolving it,
+                # we merge the inherited attributes into it
                 wrap_resolvable_constructor(
-                    attr,
+                    child_attr,
                     partial(
-                        merge_attributes_into_child,
-                        parent_cls_instance=self,
-                        parent_attr_names=parents,
+                        merged_into,
+                        parent=self,
+                        attr_names=parents,
                     ),
                 )
 
@@ -706,7 +802,7 @@ class PlotTask:
     plot_config: PlotConfig = MISSING
 
 
-@resolvable_attrs(('metadata', dict), ('context', dict))
+@resolvable_attrs(('metadata', dict), ('context', dict), ('plot_config', PlotConfig))
 @dataclass(kw_only=True)
 class FigureTask:
     metadata: ResolvableOr[Dict[str, Any]] = MISSING
@@ -714,6 +810,10 @@ class FigureTask:
     figure_spec: FigureSpec = MISSING
     plot_config: ResolvableOr[PlotConfig] = MISSING
     plot_tasks: Optional[List[PlotTask]] = None
+
+    def run(self):
+        ...
+        print(f'running figure task.\n{self=}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -740,6 +840,43 @@ class FigureMaker:
     def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
         raise NotImplementedError('Subclasses must implement make_plot_tasks')
 
+    def resolve(self, resolver_context=None):
+
+        ...
+
+        # self.plot_config = resolve(self.plot_config, resolvers=resolvers)
+        # self.metadata = resolve(self.metadata, resolvers=resolvers)
+        # self.context = resolve(self.context, resolvers=resolvers)
+
+
+class SingleFigure(FigureMaker):
+    """a figure maker that will create a single figure for each data"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+
+        if not isinstance(data, (list, tuple)):
+            data = [data]
+
+        tasks = []
+        for pdata in data:
+           ... 
+
+            # TODO: generate the plot task. It should handle using a plot_method in the plot_config,
+            # as well as find the correct callstack_params
+
+            # ftask = FigureTask()
+            # inplace_merge_into(
+            # target=ftask,
+            # parent=self,
+            # attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
+            # )
+            # tasks.append(ftask)
+
+        return tasks
+
 
 @resolvable_attrs(('figure_maker', FigureMaker))
 class ForEachData(FigureMaker):
@@ -761,10 +898,12 @@ class ForEachData(FigureMaker):
         log.debug(f'ForEachData: making {len(data)} tasks')
         log.debug(f'{self.figure_maker=}')
 
-        merge_attributes_into_child(
-            child_config=getattr(self.figure_maker, 'config'),
-            parent_cls_instance=self,
-            parent_attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
+        # first, we need to manually merge the attributes of this FigureMaker into the downstream ones
+
+        inplace_merge_into(
+            target=self.figure_maker,
+            parent=self,
+            attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
         )
 
         for pdata in data:
@@ -807,10 +946,10 @@ class SwitchFigure(FigureMaker):
         figmaker = self.cases[cond]
         assert isinstance(figmaker, Resolvable)
 
-        merge_attributes_into_child(
-            child_config=getattr(figmaker, 'config'),
-            parent_cls_instance=self,
-            parent_attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
+        inplace_merge_into(
+            target=figmaker,
+            parent=self,
+            attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
         )
 
         figmaker = resolve(figmaker, resolvers=make_resolvers({'this': self, 'data': data}))
@@ -832,39 +971,31 @@ class MultiFigure(FigureMaker):
     ):
         super().__init__(**kwargs)
         self.n_repeats = n_repeats
-        self.figure_makers = [
-            make_resolvable(FigureMaker, fm) for fm in make_flat_list(figure_makers)
-        ]
-        self.figure_makers = self.figure_makers * n_repeats
+        figmakers = make_flat_list(figure_makers)
 
-        for i, figmaker in enumerate(self.figure_makers):
-            if not isinstance(figmaker, Resolvable):
-                raise ValueError(
-                    f'Figure maker {i} in MultiFigure could not be wrapped as Resolvable'
-                )
+        log.debug(f'Initializing MultiFigure with {n_repeats} repeats: {figmakers=}')
 
-            merge_attributes_into_child(
-                child_config=getattr(figmaker, 'config'),
-                parent_cls_instance=self,
-                parent_attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
-            )
-
-            # add a context.multifigure_index attribute to each figure maker
-            merge_single_attr(
-                child=figmaker,
-                attr_name='context',
-                parent_attr={'multifigure_index': i},
-                on_conflict='make_list',
-            )
-
-
+        self.figure_makers = [make_resolvable(FigureMaker, fm) for fm in figmakers] * n_repeats
 
     def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
         tasks = []
         for i, figmaker in enumerate(self.figure_makers):
-            figmaker = resolve(
-                figmaker, resolvers=make_resolvers({'this': self, 'data': data})
+
+            inplace_merge_into(
+                target=figmaker,
+                parent=self,
+                attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
             )
+            # add a context.multifigure_index attribute to each figure maker
+            inplace_merge_into(
+                target=figmaker,
+                parent={'context': {'multifigure_index': i}},
+                attr_names='context',
+            )
+
+            figmaker = resolve(figmaker, resolvers=make_resolvers({'this': self, 'data': data}))
+
+            assert isinstance(figmaker, FigureMaker)
             tasks += figmaker.make_figure_tasks(data)
         return tasks
 
@@ -1167,7 +1298,7 @@ class PlotJob:
     data_source: ResolvableOr[DataSource] = MISSING
     metadata: ResolvableOr[Dict[str, Any]] = MISSING
     context: ResolvableOr[Dict[str, Any]] = MISSING
-    extra: Optional[Dict[str, Any]] = MISSING
+    extra: Dict[str, Any] = MISSING
 
     def generate_figure_tasks(self) -> List[FigureTask]:
         return generate_figure_tasks(self.data_source, resolver_context={'job': self, 'this': self})
