@@ -1,4 +1,5 @@
 ## {{{                        --     imports     --
+
 from dataclasses import dataclass, field
 from biocomptools.toollib import common as cm
 from functools import partial
@@ -32,14 +33,12 @@ from omegaconf import OmegaConf
 from toollib.plot import DataSource, DataSourceGroup, Resolvable
 from omegaconf import DictConfig, ListConfig
 
-
 log = logging.getLogger('biocomptools.biocomplot')
 log.setLevel(logging.INFO)
 
 from biocomptools.toollib import plot as pl
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                   --     plugin for searchpath     --
 
 
@@ -79,14 +78,13 @@ Uses plotjob descriptions to define the plot to be made, and the data to be used
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+## {{{                         --     load cfg     --
 log = logging.getLogger('biocomptools.biocomplot')
 log.setLevel(logging.DEBUG)
 from biocomptools.toollib.plot import PlotTask, PlotConfig, FigureMaker, DataSource
 
 
 reset_hydra()
-
 
 # cs = ConfigStore.instance()
 # cs.store(group="figure", name="default_figure", node=pu.FigureSpec)
@@ -104,11 +102,43 @@ reset_hydra(config_dir=file_dir)
 # job_cfg = compose(config_name=plot_file_path.stem, return_hydra_config=True)
 job_cfg = compose(config_name=plot_file_path.stem)
 job_cfg.extra.base_figure_maker
-
-##
-
 job = pl.PlotJob.from_config(job_cfg)
+
+##────────────────────────────────────────────────────────────────────────────}}}##
+
+from time import time
+
+time0 = time()
 tasks = job.generate_figure_tasks()
+time1 = time()
+
+for task in tasks:
+    print()
+    print(f'{task=}')
+    print()
+
+log.info(f'Generated {len(tasks)} plot tasks in {time1 - time0:.2f} seconds')
+
+# TODO: make Resolvable and inheritable work for dictlike objects, not just omegaconf
+
+# FIX: it seems spawn_figure_task, when spawning its task, is using an already resolved plot_config, which is why l:479 fails
+# is it normal? Maybe. maybe it should let that pass 
+# it seems spawn is tring go resolve an already resolved PlotConfig obj
+
+# the constructor of the figure_task has some inheritable attrs, that are calling resolvable_init
+
+# - FigureMaker spawns figure a FigureTask by first make_resolvable(FigureTask) [plot.py:1001]
+# - spawn merges thi
+# -
+
+
+# I think since PlotConfig is a pydantic BaseModel, it gets perfectly initialized - as a PlotConfig - first from the dictlike thing that is passed to the parent figuretask. That means my wrapped constructor, which would usually expect PlotConfig to be a DictConfig and then would wrap it into a Resolvable, is trying to wrap an actual PlotConfig into the resolvable, which fails.
+# I think if I declare it as being a ResolvableOr, the problem is that pydantic choses to construct a PlotConfig instead of either - doing nothing, or making it into a Resolvable (which should be possible since I declare the type as being ResolvableOr[PlotConfig]. 
+# Forcing it to be a Resolvable in all case is annoying becase then we lose the "normal" way of initializing things (which would be passing an actual obj) 
+# I should change the init wrapper approach. Using pydantic, there's prob a way to have Resolvable be the priority, and then I can ask make_resolvable, or directly the wrapper to tolerate fully constructed target_type. Actually no if I can ask pydantic to handle the priority construction of a resolvable object I don;t even need the decorator anymore, I can just use ResolvableOr, and let pydantic decide to make either a resolvable or the type, and that's it!
+# so, pydantic should: try: make_resolvable. if it fails, it should build the correct obj.
+# I guess I still need the decorator. I just need to execute it before pydantic does its shit
+
 
 
 ## {{{                          --     archive     --
@@ -223,7 +253,6 @@ pl.DataSourceGroup.__init__()
 
 ##
 
-
 def printer(thing_to_say):
     def decorator(cls):
         original_init = cls.__init__
@@ -257,24 +286,58 @@ d = Derived()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+from pydantic import BaseModel, ValidationError, validator, Field, field_validator
 
-class A:
+class A(BaseModel):
+    a: int
 
-    def __init__(self):
-        self.a = 1
+class B(BaseModel):
+    b: int
+    a: pl.ResolvableOr[A]
 
-    def __getattr__(self, item):
-        return self.__dict__[item]
+    class Config:
+        arbitrary_types_allowed = True
 
 
-d = {'a': 1, 'b': 2, 'c': 3}
+ra = pl.make_resolvable(A, {'a': 3})
+# ra.resolve()
 
-d['a']
-d.get('a')
+rb = pl.make_resolvable(B, {'b': 1, 'a': {'a': 42}})
+rb.resolve()
 
-a = A()
-a.a
-aa = getattr(a, 'a')
-aa = 3
-a.a
-getattr(d, 'a')
+rb = pl.make_resolvable(B, {'b': 1, 'a': ra})
+rb.resolve()
+
+
+##
+
+from typing import Any, List, Callable
+
+from typing_extensions import Annotated
+
+from pydantic import (
+    BaseModel,
+    ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+)
+from pydantic.functional_validators import WrapValidator
+from pydantic.functional_validators import AfterValidator, BeforeValidator
+
+def make_validator(label: str) -> Callable[[str, ValidationInfo], str]:
+    def validator(v: Any, info: ValidationInfo) -> Any:
+        print('VALIDATOOOOOOOR')
+        print(f'{info=}')
+        return v
+
+    return validator
+
+
+class A(BaseModel):
+    x: Annotated[ str, BeforeValidator(make_validator('before-1'))]
+
+A(x='hi')
+
+
+
+

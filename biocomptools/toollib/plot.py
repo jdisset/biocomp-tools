@@ -23,6 +23,7 @@ from biocomp import datautils as du
 from biocomp import plotutils as pu
 import biocomp as bc
 from typing import (
+    Annotated,
     Optional,
     Union,
     Tuple,
@@ -50,19 +51,38 @@ from matplotlib.axes import Axes
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
+from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
 from rich.logging import RichHandler
 
-FORMAT = "[%(filename)s:%(lineno)s - %(funcName)s() ] %(message)s"
-# clear all handlers
+LOGFORMAT = "in %(funcName)s: %(message)s"
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
-logging.basicConfig(level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
-log = logging.getLogger('biocomptools.biocomplot')
-log.setLevel(logging.DEBUG)
+logging.basicConfig(level="NOTSET", format=LOGFORMAT, datefmt="[%X]", handlers=[RichHandler()])
 
-from biocomp.plotutils import FigureSpec
-from biocomp.plotting.plotting_core import PlotData
+baselog = logging.getLogger('biocomptools.biocomplot')
+utlog = logging.getLogger('biocomptools.biocomplot.utils')
+inhlog = logging.getLogger('biocomptools.biocomplot.utils.inheritance')
+reslog = logging.getLogger('biocomptools.biocomplot.utils.resolvable')
+figlog = logging.getLogger('biocomptools.biocomplot.figure')
+datalog = logging.getLogger('biocomptools.biocomplot.data')
+
+
+baselog.setLevel(logging.INFO)
+utlog.setLevel(logging.INFO)
+inhlog.setLevel(logging.INFO)
+reslog.setLevel(logging.INFO)
+figlog.setLevel(logging.INFO)
+datalog.setLevel(logging.INFO)
+
+# baselog.setLevel(logging.DEBUG)
+# utlog.setLevel(logging.DEBUG)
+# inhlog.setLevel(logging.DEBUG)
+reslog.setLevel(logging.DEBUG)
+figlog.setLevel(logging.DEBUG)
+# datalog.setLevel(logging.DEBUG)
+
+from biocomp.plotutils import FigureSpec, PlotData
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                         --     ramblings     --
@@ -88,11 +108,17 @@ from biocomp.plotting.plotting_core import PlotData
 # ${include: path/to/module, resolve=false} ->
 #   load path/to/module with hydra and generate the config object, then append it to the current config
 
+# TODO:
+# for now I'm switching most classes to regular ones (instead of dataclasses) because
+# the dataclasses constructor behavior (even with kw_only) is too finick to make
+# play nice with the resolvable_attrs and inherit_attrs decorators.
+# I think it's possible to make it work (kw for child classes only?),
+# but let's just get the thing working first.
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 
-from typing import TypeVar, Generic, Protocol
+from typing import TypeVar, Generic, Protocol, Self
 
 T = TypeVar('T')
 U = TypeVar('U')
@@ -113,8 +139,14 @@ Mergeable = Union[DictLike, ConfigHolder]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ## {{{                        --     misc utils     --
+
+
+def obj_resolver(obj: Any, attr_path: str):
+    attrs = attr_path.split('.')
+    for attr in attrs:
+        obj = getattr(obj, attr)
+    return obj
 
 
 def get_public_attrs(obj):
@@ -208,7 +240,7 @@ def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'
     """simply create an instance of _target_ with the rest of the dict as kwargs"""
     target_class = get_target_class(obj, default_module)
     kwargs = {k: v for k, v in obj.items() if k != '_target_'}
-    log.debug(f'Instantiating {target_class} with {kwargs=}')
+    utlog.debug('Instantiating %s with %s', target_class, kwargs)
     return target_class(**kwargs)
 
 
@@ -239,18 +271,39 @@ def dict_like(obj) -> bool:
     )
 
 
-def build_from_config(cls: Type[T], cfg: DictConfig, filter_out_non_ctor_args=False) -> T:
-    log.debug(f'Building {cls.__name__} from config:\n{short_conf(cfg)}')
+def remove_non_ctor_args(cls, kwargs):
+    """remove any keys that are not in the class' constructor signature"""
+    # WARN: this is a very bad implementation, but it's a start
+    ctor_args = {}
+    for k, v in kwargs.items():
+        if k in get_public_attrs(cls):
+            ctor_args[k] = v
+    return ctor_args
+
+
+def build_from_config(cls: Optional[Type[T]], cfg: DictLike, filter_out_non_ctor_args=False) -> T:
+    """
+    Build an object of type cls from a DictLike cfg (by essentially calling cls(**cfg)).
+    If the config has a _target_ key, build the target object instead.
+    """
+
     # check if it has a _target_ key
     if has_target(cfg):
-        log.debug(f'{cls.__name__} has target class: {cfg["_target_"]}')
         subclass = get_target_class(cfg)
-        assert issubclass(subclass, cls), f'Invalid target class {subclass} for {cls}'
+        print(f'{type(subclass)=}')
+        # if (cls is not None) and (not issubclass(subclass, cls)):
+        # raise ValueError(f'Invalid target class {subclass}. Expected base class {cls}')
         return target_instantiate(cfg)
 
+    assert cls is not None, f'Invalid config {cfg=}, {cls=}'
+
+    reslog.debug('Building %s from config:\n%s', cls.__name__, short_conf(cfg))
+
     ctor_args = with_str_keys(cfg)
+
     if filter_out_non_ctor_args:
         ctor_args = remove_non_ctor_args(cls, ctor_args)
+
     return cls(**ctor_args)
 
 
@@ -286,20 +339,30 @@ class omegaconf_resolvers:
             OmegaConf.clear_resolver(key)
 
 
-def short_conf(conf: DictConfig) -> str:
+def short_conf(conf: DictLike) -> str:
     if conf is None:
         return 'None'
     try:
         long = OmegaConf.to_yaml(conf, resolve=False)
         return long[:100] + ' [...] \n' if len(long) > 100 else long
-    except ValueError as e:
-        raise ValueError(f'Invalid config: {conf}') from e
+    except Exception as e:
+        return conf.__repr__()
 
 
 @dataclass
 class Resolvable(Generic[T]):
-    constructor: Callable[..., T] = MISSING
-    config: Optional[DictConfig] = None
+    """
+    A Resolvable object is a wrapper around an object that can be constructed at the last minute.
+    Useful for things like variable interpolation that depends on the right context
+    (this, plot_task, data, figure_task, etc.)
+    When not resolved, it carries its DictLike representation
+    and a constructor to build the object from it.
+
+    """
+
+    constructor: Callable[..., T]
+    config: Optional[DictLike] = None
+
     # debug info:
     name: Optional[str] = None
     target_type: Optional[Type] = None
@@ -311,20 +374,23 @@ class Resolvable(Generic[T]):
 
         confstr = short_conf(self.config)
         indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
-        return f'{indentstr}Resolvable({self.name})->{self.target_type.__name__}\n{indentstr}config:\n{indented_conf}'
+        typename = self.target_type.__name__ if self.target_type is not None else 'unknown'
+        return (
+            f'{indentstr}Resolvable({self.name})->{typename}\n{indentstr}config:\n{indented_conf}'
+        )
 
     # a Resolvable is dict_like (it transparently forwards dict-like operations to its config)
 
     def __getitem__(self, key):
         if self.config is None:
-            raise ValueError(f'Cannot access key {key} in empty Resolvable')
-        with open_dict(self.config):
+            raise KeyError(f'No config found for {self}')
+        with open_dictlike(self.config):
             return self.config[key]
 
     def __setitem__(self, key, value):
         if self.config is None:
             self.config = OmegaConf.create({})
-        with open_dict(self.config):
+        with open_dictlike(self.config):
             self.config[key] = value
 
     def __contains__(self, key):
@@ -355,60 +421,78 @@ class Resolvable(Generic[T]):
             return default
         return self.config.get(key, default)
 
+    def resolve(self):
+        if self.config is None:
+            return self.constructor()
+        return self.constructor(self.config)
+
 
 ResolvableOr = Union[Resolvable[T], T, AnyConfig]
 
 
 def resolve(resolvable: Any, resolvers=None):
     """
-    Resolve a Resolvable object with the given resolvers,
+    Resolve a Resolvable object with the given resolvers in context.
     i.e. returns the object constructed by calling the constructor with the config
     using the provided resolvers.
     """
 
     if not isinstance(resolvable, Resolvable):
-        return resolvable
+        return resolvable  # not a resolvable, return as is
 
-    if resolvers is None:
-        resolvers = {}
+    resolvers = resolvers or {}
 
-    log.debug(f'Resolving {resolvable}')
+    reslog.debug('Resolving %s', resolvable)
+
     with omegaconf_resolvers(resolvers):
-        if resolvable.config is None:
-            log.debug(f'No config found for {resolvable}, returning default')
-            return resolvable.constructor(OmegaConf.create())
-        else:
-            return resolvable.constructor(resolvable.config)
+        return resolvable.resolve()
 
 
 def make_resolvable(
     target_type: Type[T],
-    value: Union[DictConfig, T],
-    name=None,
-    clsname=None,
+    value: Optional[Union[Resolvable, DictLike]] = None,
+    name: Optional[str] = None,  # for debug purposes
+    clsname: Optional[str] = None,  # for debug purposes
     **kw,
-) -> ResolvableOr[T]:
+) -> Resolvable[T]:
+    """
+    Return a Resolvable object from a value and a target type.
+    If the value is a Resolvable, check that it has the right target type and return it.
+    If the value is a DictLike, wrap it in a Resolvable object with the target type.
+    """
 
     typename = target_type.__name__
+    if value is None:
+        value = {}
 
-    log.debug(f'Making {typename} {name if name else "resolvable"} in {clsname}. {value=}')
-
-    # we need to set the value of the config in the resolvable object
-    # OR, if it is already of the right type, there's no need to wrap it
-    if isinstance(value, target_type):
-        log.info(f'Attribute {name} already resolved to {target_type}, skipping')
+    if isinstance(value, Resolvable):
+        if value.target_type is None:
+            value.target_type = target_type
+        assert (
+            value.target_type == target_type
+        ), f'Invalid target type {value.target_type} for {typename}'
         return value
 
     if value is MISSING:
         raise ValueError(f'Missing value for {name} in {clsname}')
 
-    if not isinstance(value, AnyConfig) and (value is not None):
-        raise ValueError(f'Invalid init value for {name}: {type(value)}, {value=}')
+    assert isinstance(
+        value, (DictLike, type(None))
+    ), f'Invalid config {short_conf(value)} for {typename}, type {type(value)}'
+
+    reslog.debug(
+        'Making %s %s in %s. %s',
+        typename,
+        name if name else 'resolvable',
+        clsname,
+        f'{value=}',
+    )
 
     # if type has a from_config constructor, use it
     if hasattr(target_type, 'from_config'):
         constructor = getattr(target_type, 'from_config')
     else:
+        # otherwise, use the default constructor
         constructor = partial(build_from_config, target_type)
 
     wrapped_value = Resolvable(
@@ -416,6 +500,23 @@ def make_resolvable(
     )
 
     return wrapped_value
+
+
+from pydantic.functional_validators import AfterValidator, BeforeValidator
+
+
+def make_resolvable_validator(target_type) -> Callable:
+    def validator(v: Any) -> Any:
+        return make_resolvable(target_type, v)
+
+    return validator
+
+
+MadeResolvable = Annotated[
+    ResolvableOr[T], BeforeValidator(make_resolvable_validator(T)), Field(validate_default=True)
+]
+
+# MadeInheritable = Annotated[T, Wrap] # can't be that simple, has to be a model_validator
 
 
 # ╭─────────────────────────────╮
@@ -477,7 +578,8 @@ def resolvable_attrs(*attrs):
     """
 
     def decorator(cls):
-        log.debug(f'Setting up {cls.__name__} with resolvable attrs')
+
+        reslog.debug('Setting up %s with resolvable attrs', cls.__name__)
 
         for attr_specs in attrs:
             if not isinstance(attr_specs, (tuple, list)):
@@ -485,28 +587,18 @@ def resolvable_attrs(*attrs):
                     f'In {cls.__name__}, invalid resolvable attribute spec {attr_specs}. Need a tuple'
                 )
 
-        # get_resolvers = cls.get_resolvers if hasattr(cls, 'get_resolvers') else None
-        # # lazily resolve the attribute when accessed
-        # def resolvable_getattribute(self, name: str, get_resolvers=get_resolvers):
-        # # attr = getattr(self, name) -> can't do that, it would recurse infinitely
-        # attr = object.__getattribute__(self, name)
-        # msg = f'Getting attribute {name} from {cls.__name__} with type {type(attr)}: {attr}.'
-        # if isinstance(attr, Resolvable):
-        # resolvers = get_resolvers() if get_resolvers is not None else {}
-        # attr = resolve(attr, resolvers=resolvers)
-        # setattr(self, name, attr)
-        # log.debug(f'{msg} Attribute {name} is resolvable, resolved to {attr}')
-        # return attr
-        # log.debug(f'{msg} Attribute {name} is not resolvable, returning as is')
-        # return attr
-
         original_init = cls.__init__
 
         def resolvable_init(self, *args, **kwargs):
+            """
+            The new constructor, that wraps the original.
+            1. calls the original ctor
+            2. wraps all the attrs marked as resolvable by the decorator in a resolvable instance
+            """
 
             original_init(self, *args, **kwargs)
 
-            log.debug(f'Initializing {cls.__name__} with resolvable attrs')
+            reslog.debug('Initializing %s with resolvable attrs', cls.__name__)
 
             for attr_name, target_type in attrs:
 
@@ -534,6 +626,7 @@ def resolvable_attrs(*attrs):
                     name=attr_name,
                     clsname=cls.__name__,
                 )
+
                 setattr(self, attr_name, wrapped_value)
 
         cls.__init__ = resolvable_init
@@ -543,8 +636,68 @@ def resolvable_attrs(*attrs):
     return decorator
 
 
+def make_resolvable_attrs(attrs: List[Tuple], kwargs: Dict, clsname: Optional[str] = None) -> Dict:
+
+    for attr_name, target_type in attrs:
+
+        assert isinstance(attr_name, str)
+
+        attr = kwargs.get(attr_name, MISSING)
+
+        if target_type is None:
+            target_type = type(attr)
+            if get_origin(target_type) is not None:
+                target_type = get_origin(target_type)
+
+        assert target_type is not None, f'Could not determine type for {attr_name} in {clsname}'
+
+        if attr is MISSING:
+            attr = None
+
+        wrapped_value = make_resolvable(
+            target_type=target_type, value=attr, name=attr_name, clsname=None
+        )
+
+        kwargs[attr_name] = wrapped_value
+
+    return kwargs
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                       --     inherit utils     --
+
+# ╭──────────────────────╮
+# │     Base Classes     │
+# ╰──────────────────────╯
+# + -> resolvable + inherited/merged from upstream
+# = -> resolved (turned from a conf wrapper to an object)
+# - -> not available
+#               metadata  plot_config  figure_spec figure_maker  context
+# PlotJob          +           +            +           +          =
+# DataSource       +           +            +           +          =
+# FigureMaker      +           +            +           +=         =
+# FigureTask       +           +            +=          -          =
+# PlotTask         +=          +=           -           -          =
+# PlotData         -           -            -           -          -
+
+
+INHERITED_ATTRIBUTES = {
+    'PlotJob': {
+        'DataSource': ['metadata', 'plot_config', 'figure_spec', 'figure_maker', 'context']
+    },
+    'DataSource': {
+        # NOTE: figure_maker itself is NOT inherited! (would duplicate for each subsource):
+        'DataSource': ['metadata', 'plot_config', 'figure_spec', 'context'],
+        'FigureMaker': ['metadata', 'plot_config', 'figure_spec', 'context'],
+    },
+    'FigureMaker': {
+        'FigureMaker': ['metadata', 'plot_config', 'figure_spec', 'context'],
+        'FigureTask': ['metadata', 'plot_config', 'figure_spec', 'context'],
+    },
+    'FigureTask': {'PlotTask': ['metadata', 'plot_config']},
+}
+
 
 # a set of utils to transparently treat dict-like objects and resolvables as mergeable objects
 
@@ -565,12 +718,12 @@ def as_dict(obj) -> Dict:
     return obj
 
 
-def merged(parent: DictLike, child: D) -> D:
+def merged(parent: DictLike, child: D, **kw) -> D:
     """Merge parent DictLike structure into child,
     return the result without modifying child,
     and in the same type as child."""
 
-    merged = ut.updated_dict(as_dict(parent), as_dict(child))
+    merged = ut.updated_dict(as_dict(parent), as_dict(child), **kw)
     assert isinstance(merged, dict), f'Invalid merged object {merged}'
 
     if isinstance(child, DictConfig):
@@ -602,7 +755,7 @@ def open_dictlike(obj: Any):
         yield
 
 
-def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str]):
+def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str], **kw):
     """merge parent[attr_name] into target[attr_name]"""
 
     if isinstance(attr_names, str):
@@ -612,7 +765,7 @@ def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str]):
         try:
             parent_attr = get_dict_attr(parent, attr_name)
         except KeyError:
-            log.debug(f'No parent attribute {attr_name} found in {parent}')
+            inhlog.debug('No parent attribute %s found in %s', attr_name, parent)
             continue
 
         try:
@@ -620,31 +773,55 @@ def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str]):
         except KeyError:
             target_attr = {}
 
-        log.debug(f'Merging {attr_name} from {parent_attr} into {target_attr} of {target}')
-        merged_attr = merged(parent_attr, target_attr)
-        log.debug(f'Merged {attr_name} -> {merged_attr}')
+        inhlog.debug(
+            'Merging %s from %s into %s of %s', attr_name, parent_attr, target_attr, target
+        )
+        merged_attr = merged(parent_attr, target_attr, **kw)
+        inhlog.debug('Merged %s -> %s', attr_name, merged_attr)
         with open_dictlike(target):
             set_dict_attr(target, attr_name, merged_attr)
 
 
-def merged_into(target: DictLike, parent: DictLike, attr_names: ListOrSingle[str]) -> DictLike:
+def merged_into(target: Any, parent: Any, attr_names: ListOrSingle[str], **kw):
     target_copy = deepcopy(target)
-    inplace_merge_into(target_copy, parent, attr_names)
+    inplace_merge_into(target_copy, parent, attr_names, **kw)
     return target_copy
 
 
-def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable):
+def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable) -> Resolvable[T]:
+
+    assert isinstance(obj, Resolvable)
 
     def wrapped_constructor(config: DictConfig, fn=fn, base_constructor=obj.constructor):
         return base_constructor(fn(config))
 
-    obj.constructor = wrapped_constructor
+    return Resolvable(
+        constructor=wrapped_constructor,
+        config=obj.config,
+        name=obj.name,
+        target_type=obj.target_type,
+    )
 
 
-@dataclass
-class InheritanceSpec:
+class InheritanceSpec(BaseModel):
     inherited_attrs: Iterable[str]
     child_attrs: Iterable[str]
+
+
+def make_inheritable(
+    target: Resolvable[T], parent: Any, attr_names: ListOrSingle[str]
+) -> Resolvable[T]:
+
+    # we wrap the target's constructor so that, just before resolving it,
+    # we merge the inherited parent attributes into it
+    return wrap_resolvable_constructor(
+        target,
+        partial(
+            merged_into,
+            parent=parent,
+            attr_names=attr_names,
+        ),
+    )
 
 
 # ╭───────────────────────────╮
@@ -652,7 +829,7 @@ class InheritanceSpec:
 # ╰───────────────────────────╯
 def inherit_attrs(*inheritance_specs: InheritanceSpec):
     """
-    A decorator to make some attributes to a dataclass inheritable.
+    A decorator to make some attributes to a class inheritable.
 
     Only inheritance on Resolvable attributes is supported.
 
@@ -717,10 +894,7 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 
     def decorator(cls):
 
-        log.debug(f'Setting up {cls.__name__} with inheritable attrs')
-
-        def merge_attribute_into_children(**_):
-            raise NotImplementedError()
+        inhlog.debug('Setting up %s with inheritable attrs', cls.__name__)
 
         original_init = cls.__init__
 
@@ -728,22 +902,11 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 
             original_init(self, *args, **kwargs)
 
-            log.debug(f'Initializing {cls.__name__} with inheritable attrs')
+            inhlog.debug('Initializing %s with inheritable attrs', cls.__name__)
 
-            for child_name, parents in child_to_attributes.items():
-                child_attr = getattr(self, child_name)
-                assert isinstance(child_attr, Resolvable)
-
-                # we wrap child_attr's ctor so that, just before resolving it,
-                # we merge the inherited attributes into it
-                wrap_resolvable_constructor(
-                    child_attr,
-                    partial(
-                        merged_into,
-                        parent=self,
-                        attr_names=parents,
-                    ),
-                )
+            for child_name, attrs in child_to_attributes.items():
+                wrapped_child = make_inheritable(getattr(self, child_name), self, attrs)
+                setattr(self, child_name, wrapped_child)
 
         cls.__init__ = inherit_init
 
@@ -753,100 +916,150 @@ def inherit_attrs(*inheritance_specs: InheritanceSpec):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     spawn utils     --
+def spawn(
+    parent,
+    unresolved_obj: Resolvable[T],
+    inherit_attr: Optional[ListOrSingle[str]] = None,
+    inherit_extra: Optional[Dict[str, Any]] = None,
+    resolver_context: Optional[Dict[str, Any]] = None,
+    inherit_extra_args: Optional[Dict[str, Any]] = None,
+) -> T:
+    """
+    Spawn a new object from a parent object and an unresolved object.
+    The unresolved object is resolved with the parent's context, and then
+    merged with the parent's attributes.
+    """
 
-# TODO:
-# for now I'm switching most classes to regular ones (instead of dataclasses) because
-# the dataclasses constructor behavior (even with kw_only) is too finick to make
-# play nice with the resolvable_attrs and inherit_attrs decorators.
-# I think it's possible to make it work (kw for child classes only?),
-# but let's just get the thing working first.
+    resolver_context = resolver_context or {}
+    resolver_context['this'] = resolver_context.get('this', parent)
 
-# ╭──────────────────────╮
-# │     Base Classes     │
-# ╰──────────────────────╯
-# + -> resolvable + inherited/merged from upstream
-# = -> resolved (turned from a conf wrapper to an object)
-# - -> not available
-#               metadata  plot_config  figure_spec figure_maker  context
-# PlotJob          +           +            +           +          =
-# DataSource       +           +            +           +          =
-# FigureMaker      +           +            +           +=         =
-# FigureTask       +           +            +=          -          =
-# PlotTask         +=          +=           -           -          =
-# PlotData         -           -            -           -          -
+    assert isinstance(unresolved_obj, Resolvable)
+
+    figlog.debug(f'spawning from unresolved: {unresolved_obj}')
+
+    if inherit_attr is not None:
+        # merge parent.attr into unresolved_obj
+        unresolved_obj = merged_into(unresolved_obj, parent, inherit_attr)
+
+    if inherit_extra is not None:
+        if inherit_extra_args is None:
+            inherit_extra_args = {}
+
+        unresolved_obj = merged_into(
+            unresolved_obj,
+            inherit_extra,
+            list(inherit_extra.keys()),
+            **inherit_extra_args,
+        )
+
+    figlog.debug(f'after merging, unresolved: {unresolved_obj}')
+
+    # problem is we have a resolved PlotConfig there when coming
+    # from a FigureMaker.spawn(... (figureTask) )
+
+    obj = resolve(unresolved_obj, make_resolvers(resolver_context))
+
+    return obj
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                        --     PlotConfig     --
-@dataclass
-class PlotConfig:
+class PlotConfig(BaseModel):
     # rc_params for matplotlib
     rc_context: Dict[str, Any] = field(default_factory=dict)
     # nested parameters for the plotting function
     callstack_params: Dict[str, Any] = field(default_factory=dict)
     # for general purpose storage of parameters
     general: Dict[str, Any] = field(default_factory=dict)
-    plot_method: Callable = pu.auto_plot
-    data_rescaler: Optional[Any] = None
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                           --     Tasks     --
-@dataclass
-class PlotTask:
-    metadata: Dict[str, Any] = MISSING
-    context: Dict[str, Any] = MISSING
-    data: ListOrSingle[PlotData] = MISSING  # the data to be plotted
+
+
+# all plot_methods (called from PlotTask) should have the following signature:
+# def plot_method(ax: Axes, data: PlotData, plot_config: PlotConfig, **kwargs)
+# NOTE : rescalers should probably be renamed to DataTransform? Or maybe not
+# rescalers could be either specified in data or in the plotconfig
+# advantage of having it in the PlotData instance:
+# ...
+# if it was not in the PlotData obj then we can use the same data with different rescaler
+# later on (for example on different slices.
+# Arguably this could also be done by loading the same source several times wiht a different
+# rescaler everytime, and any extra loading cost can be solved with caching
+# yeah I think that's the easiest for now,
+#
+
+
+class PlotTask(BaseModel):
+
+    context: Dict[str, Any] = MISSING  # inherited from parent FigureTask
+
     ax: ListOrSingle[Axes] = MISSING  # the axes to plot on
+    data: ListOrSingle[PlotData] = MISSING  # the data to be plotted
+
     plot_config: PlotConfig = MISSING
+    plot_method: Callable = pu.auto_plot
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
-@resolvable_attrs(('metadata', dict), ('context', dict), ('plot_config', PlotConfig))
-@dataclass(kw_only=True)
-class FigureTask:
-    metadata: ResolvableOr[Dict[str, Any]] = MISSING
-    context: ResolvableOr[Dict[str, Any]] = MISSING
-    figure_spec: FigureSpec = MISSING
-    plot_config: ResolvableOr[PlotConfig] = MISSING
+class FigureTask(BaseModel):
+
+    # FigureTasks can be executed in parallel, and as such need to be self-contained
+    # units of work.
+
+    metadata: MadeResolvable[dict] = MISSING
+    context: MadeResolvable[dict] = MISSING
+    figure_spec: MadeResolvable[FigureSpec] = MISSING
+    plot_config: MadeResolvable[PlotConfig] = MISSING
     plot_tasks: Optional[List[PlotTask]] = None
 
     def run(self):
-        ...
         print(f'running figure task.\n{self=}')
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                       --     Figure Makers     --
-@resolvable_attrs(
-    ('figure_spec', FigureSpec), ('plot_config', PlotConfig), ('metadata', dict), ('context', dict)
-)
-class FigureMaker:
 
-    def __init__(
-        self,
-        figure_spec: Optional[ResolvableOr[FigureSpec]] = None,
-        plot_config: Optional[ResolvableOr[PlotConfig]] = None,
-        metadata: Optional[ResolvableOr[Dict[str, Any]]] = None,
-        context: Optional[ResolvableOr[Dict[str, Any]]] = None,
-    ):
-        self.figure_spec = figure_spec
-        self.plot_config = plot_config
-        self.metadata = metadata
-        self.context = context
+FMaker = TypeVar("FMaker", bound="FigureMaker")
 
-    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
-        raise NotImplementedError('Subclasses must implement make_plot_tasks')
 
-    def resolve(self, resolver_context=None):
+class FigureMaker(BaseModel):
 
-        ...
+    figure_spec: Optional[MadeResolvable[FigureSpec]] = None
+    plot_config: Optional[MadeResolvable[PlotConfig]] = None
+    metadata: Optional[MadeResolvable[Dict[str, Any]]] = None
+    context: Optional[MadeResolvable[Dict[str, Any]]] = None
 
-        # self.plot_config = resolve(self.plot_config, resolvers=resolvers)
-        # self.metadata = resolve(self.metadata, resolvers=resolvers)
-        # self.context = resolve(self.context, resolvers=resolvers)
+    def __repr__(self):
+        return f'FigureMaker({self.figure_spec=}, {self.plot_config=}, {self.metadata=}, {self.context=})'
+
+    def spawn_figure_task(self, **kw) -> FigureTask:
+        figlog.debug(f'Plotconfig is {type(self.plot_config)}')
+        return spawn(
+            self,
+            make_resolvable(FigureTask),
+            inherit_attr=INHERITED_ATTRIBUTES['FigureMaker']['FigureTask'],
+            **kw,
+        )
+
+    def can_make_tasks(self) -> bool:
+        return hasattr(self, 'make_tasks')
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class SingleFigure(FigureMaker):
@@ -855,148 +1068,163 @@ class SingleFigure(FigureMaker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
 
         if not isinstance(data, (list, tuple)):
             data = [data]
 
-        tasks = []
-        for pdata in data:
-           ... 
-
-            # TODO: generate the plot task. It should handle using a plot_method in the plot_config,
-            # as well as find the correct callstack_params
-
-            # ftask = FigureTask()
-            # inplace_merge_into(
-            # target=ftask,
-            # parent=self,
-            # attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
-            # )
-            # tasks.append(ftask)
-
-        return tasks
-
-
-@resolvable_attrs(('figure_maker', FigureMaker))
-class ForEachData(FigureMaker):
-
-    def __init__(
-        self,
-        figure_maker: ResolvableOr[FigureMaker],
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.figure_maker = figure_maker
-
-    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
-        if not isinstance(data, (list, tuple)):
-            data = [data]
-
-        tasks = []
-
-        log.debug(f'ForEachData: making {len(data)} tasks')
-        log.debug(f'{self.figure_maker=}')
-
-        # first, we need to manually merge the attributes of this FigureMaker into the downstream ones
-
-        inplace_merge_into(
-            target=self.figure_maker,
-            parent=self,
-            attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
-        )
+        ftasks = []
 
         for pdata in data:
-
-            figmaker = resolve(
-                self.figure_maker, resolvers=make_resolvers({'this': self, 'data': pdata})
+            ftask = self.spawn_figure_task(
+                inherit_extra={
+                    'context': {
+                        'figure_makers': ['single'],
+                    }
+                },
+                inherit_extra_args=MERGE_EXTEND_LISTS,
             )
 
-            tasks += figmaker.make_figure_tasks(pdata)
+            # we only plot on one ax
+            ptask = PlotTask(data=pdata)
 
-        return tasks
+            ftasks.append(ftask)
+
+        return ftasks
+
+
+def as_list(obj):
+    return [obj] if not isinstance(obj, (list, tuple)) else obj
+
+
+MERGE_EXTEND_LISTS = {
+    'merge_mode': {
+        'list': 'extend',
+        'tuple': 'extend',
+        'set': 'extend',
+        ListConfig: 'extend',
+    },
+}
+
+
+class ForEachData(FigureMaker):
+
+    figure_maker: MadeResolvable[FigureMaker]
+
+    # self.figure_maker = make_inheritable(
+    # make_resolvable(FigureMaker, figure_maker),
+    # self,
+    # INHERITED_ATTRIBUTES['FigureMaker']['FigureMaker'],
+    # )
+
+    def model_post_init(self, *_):
+        self.figure_maker = make_inheritable(
+            self.figure_maker, self, INHERITED_ATTRIBUTES['FigureMaker']['FigureMaker']
+        )
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+        tasks = []
+
+        print(f'type of figure_maker={type(self.figure_maker)}')
+
+        for d in as_list(data):
+            fmaker = spawn(
+                self,
+                self.figure_maker,
+                INHERITED_ATTRIBUTES['FigureMaker']['FigureMaker'],
+                {
+                    'context': {
+                        'figure_makers': ['foreach'],
+                    }
+                },
+                {'data': d},
+                inherit_extra_args=MERGE_EXTEND_LISTS,
+            )
+            assert isinstance(fmaker, FigureMaker)
+            assert fmaker.can_make_tasks(), f'FigureMaker {fmaker} cannot make tasks'
+            tasks += fmaker.make_tasks(d)  # type: ignore
+
+        return make_flat_list(tasks)
 
 
 class SwitchFigure(FigureMaker):
     # a figure maker that will switch between different figure makers based on some condition
 
-    def __init__(
-        self,
-        condition: Any,
-        cases: Dict[str, ResolvableOr[FigureMaker]],
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.condition = condition
-        self.cases = {k: make_resolvable(FigureMaker, v) for k, v in cases.items()}
-        for k, v in self.cases.items():
-            if not isinstance(v, Resolvable):
-                raise ValueError(f'Case {k} in SwitchFigure could not be wrapped as Resolvable')
+    condition: Any
+    cases: Dict[Any, MadeResolvable[FigureMaker]]
 
-    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+    def model_post_init(self, *_):
+        self.cases = {
+            k: make_inheritable(v, self, INHERITED_ATTRIBUTES['FigureMaker']['FigureMaker'])
+            for k, v in self.cases.items()
+        }
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
 
         cond = self.condition
-        log.debug(f'SwitchFigure: condition is {cond}')
+        figlog.debug('SwitchFigure: condition is %s', cond)
         if callable(cond):
             cond = cond()
 
         if cond not in self.cases:
-            raise ValueError(f'Invalid condition {cond} for SwitchFigure')
+            if 'default' in self.cases:
+                cond = 'default'
+            else:
+                raise ValueError(f'No case for condition {cond} or default for SwitchFigure')
 
-        figmaker = self.cases[cond]
-        assert isinstance(figmaker, Resolvable)
-
-        inplace_merge_into(
-            target=figmaker,
-            parent=self,
-            attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
+        figmaker = spawn(
+            self,
+            self.cases[cond],
+            None,
+            {
+                'context': {
+                    'figure_makers': ['switch'],
+                }
+            },
+            {'data': data},
+            inherit_extra_args=MERGE_EXTEND_LISTS,
         )
 
-        figmaker = resolve(figmaker, resolvers=make_resolvers({'this': self, 'data': data}))
+        if not figmaker.can_make_tasks():
+            # with %s instead of f
+            figlog.debug('Case %s in SwitchFigure (%s) can\'t make tasks', cond, figmaker)
+            return []
 
-        assert isinstance(figmaker, FigureMaker)
-
-        return figmaker.make_figure_tasks(data)
+        return figmaker.make_tasks(data)  # type: ignore
 
 
 class MultiFigure(FigureMaker):
     """A figure maker that will create multiple figures from the same data. Either by repeating
     the same figure maker n times, or by using different figure makers for each figure."""
 
-    def __init__(
-        self,
-        figure_makers: ListOrSingle[ResolvableOr[FigureMaker]],
-        n_repeats: int = 1,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.n_repeats = n_repeats
-        figmakers = make_flat_list(figure_makers)
+    figure_makers: ListOrSingle[MadeResolvable[FigureMaker]] = []
+    n_repeats: int = 1
 
-        log.debug(f'Initializing MultiFigure with {n_repeats} repeats: {figmakers=}')
+    def model_post_init(self, *_):
+        self.figure_makers = make_flat_list(self.figure_makers) * self.n_repeats
 
-        self.figure_makers = [make_resolvable(FigureMaker, fm) for fm in figmakers] * n_repeats
-
-    def make_figure_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
         tasks = []
+
         for i, figmaker in enumerate(self.figure_makers):
 
-            inplace_merge_into(
-                target=figmaker,
-                parent=self,
-                attr_names=['metadata', 'context', 'plot_config', 'figure_spec'],
-            )
-            # add a context.multifigure_index attribute to each figure maker
-            inplace_merge_into(
-                target=figmaker,
-                parent={'context': {'multifigure_index': i}},
-                attr_names='context',
+            fmaker = spawn(
+                self,
+                deepcopy(figmaker),
+                INHERITED_ATTRIBUTES['FigureMaker']['FigureMaker'],
+                {
+                    'context': {
+                        'multifigure_index': i,
+                        'figure_makers': ['multi'],
+                    }
+                },
+                {'data': data},
+                inherit_extra_args=MERGE_EXTEND_LISTS,
             )
 
-            figmaker = resolve(figmaker, resolvers=make_resolvers({'this': self, 'data': data}))
+            if fmaker.can_make_tasks():
+                tasks += fmaker.make_tasks(data)  # type: ignore
 
-            assert isinstance(figmaker, FigureMaker)
-            tasks += figmaker.make_figure_tasks(data)
         return tasks
 
 
@@ -1007,43 +1235,43 @@ class MultiFigure(FigureMaker):
 
 @inherit_attrs(
     InheritanceSpec(
-        inherited_attrs=['metadata', 'context', 'plot_config', 'figure_spec'],
+        inherited_attrs=INHERITED_ATTRIBUTES['DataSource']['FigureMaker'],
         child_attrs=['figure_maker'],
     )
 )
-@resolvable_attrs(
-    ('figure_spec', FigureSpec),
-    ('figure_maker', FigureMaker),
-    ('plot_config', PlotConfig),
-    ('metadata', dict),
-    ('context', dict),
-)
-class DataSource:
+class DataSource(BaseModel):
 
-    def __init__(
-        self,
-        figure_spec: Optional[ResolvableOr[FigureSpec]] = None,
-        figure_maker: Optional[ResolvableOr[FigureMaker]] = None,
-        plot_config: Optional[ResolvableOr[PlotConfig]] = None,
-        metadata: Optional[ResolvableOr[Dict[str, Any]]] = None,
-        context: Optional[ResolvableOr[Dict[str, Any]]] = None,
-    ):
-        self.figure_spec = figure_spec
-        self.figure_maker = figure_maker
-        self.plot_config = plot_config
-        self.metadata = metadata
-        self.context = context
+    figure_spec: MadeResolvable[FigureSpec] = {}
+    metadata: MadeResolvable[Dict[str, Any]] = {}
+    context: MadeResolvable[Dict[str, Any]] = {}
+    figure_maker: MadeResolvable[FigureMaker] = {}
+    plot_config: MadeResolvable[PlotConfig] = {}
 
     def get_data(self) -> List[PlotData]:
         raise NotImplementedError('Subclasses must implement get_data')
 
     @classmethod
     def from_config(cls, ds_cfg: DictConfig) -> 'DataSource':
-        log.debug(f'DataSource from_config:\n{short_conf(ds_cfg)}')
+        # with %s instead of f
+        datalog.debug('DataSource from_config:\n%s', short_conf(ds_cfg))
         return build_datasource_from_config(ds_cfg)
 
     def __repr__(self, indent=0):
         return f'{" "*indent}{self.__class__.__name__}'
+
+    def make_figure_tasks(self) -> List[FigureTask]:
+        """Instantiate the FigureMaker associated with this data source
+        and call its make_tasks method to get the list of figure tasks to run."""
+
+        figmaker = resolve(self.figure_maker, make_resolvers({'this': self}))
+
+        if figmaker.can_make_tasks():
+            return figmaker.make_tasks(self.get_data())
+
+        return []
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 ## {{{                           --     Group     --
@@ -1053,21 +1281,31 @@ OmConfig = Union[DictConfig, ListConfig]
 
 class DataSourceGroup(DataSource):
 
-    def __init__(self, data_source: Optional[List[DataSource]] = None, **kwargs):
-        super().__init__(**kwargs)
-        data_source = data_source or []
-        log.debug(f'Initializing DataSourceGroup with {len(data_source)} data sources')
-        log.debug(f'{data_source=}')
+    data_source: List[MadeResolvable[DataSource]] = []
+
+    def model_post_init(self, *_):
+        datalog.debug('Initializing DataSourceGroup with %s data sources', len(self.data_source))
         self.data_source = [
-            make_resolvable(DataSource, ds, name=f'group.data_source[{i}]')
-            for i, ds in enumerate(data_source)
+            make_inheritable(ds, self, INHERITED_ATTRIBUTES['DataSource']['DataSource'])
+            for ds in self.data_source
         ]
 
+    def get_resolved_sources(self) -> List[DataSource]:
+        resolvers = make_resolvers({'this': self})
+        return [resolve(src, resolvers) for src in self.data_source]
+
     def get_data(self) -> List[PlotData]:
-        return make_flat_list([resolve(src).get_data() for src in self.data_source])
+        # recursively get the data from each sub data source
+        return make_flat_list([src.get_data() for src in self.get_resolved_sources()])
+
+    def make_figure_tasks(self) -> List[FigureTask]:
+        # make tasks with the FigureMaker defined for this data source
+        tasks = super().make_figure_tasks()
+        # we also need to make figure tasks for each sub data source
+        tasks += [src.make_figure_tasks() for src in self.get_resolved_sources()]
+        return make_flat_list(tasks)
 
     def __repr__(self, indent=0):
-        # uses indentations to show the hierarchy of data sources
         indentstr = ' ' * indent
         res = f'{indentstr}DataSourceGroup\n'
         for src in self.data_source:
@@ -1077,6 +1315,8 @@ class DataSourceGroup(DataSource):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     Recipe     --
+
+
 class RecipeDataSource(DataSource):
 
     def __init__(
@@ -1190,6 +1430,7 @@ class RawDataSource(DataSource):
                         output_name=output_name,
                     )
                 ]
+
             else:
                 raise NotImplementedError(f'Extension {extension} not implemented')
 
@@ -1202,7 +1443,6 @@ class RawDataSource(DataSource):
 ## {{{                            --     XP     --
 
 
-@dataclass(kw_only=True)
 class XPDataSource(DataSource):
     xp_path: str
     recipe_names: Optional[List[str]] = None
@@ -1218,7 +1458,7 @@ class XPDataSource(DataSource):
 
 def as_datasourcegroup(ds_cfg: OmConfig) -> DictConfig:
     DATASOURCEGROUP_ATTRS = get_public_attrs(DataSourceGroup)
-    log.debug(f'DATASOURCEGROUP_ATTRS: {DATASOURCEGROUP_ATTRS}')
+    datalog.debug('Converting %s to DataSourceGroup', ds_cfg)
 
     # operate on a copy of the config
     ds_cfg = OmegaConf.create(ds_cfg)
@@ -1240,7 +1480,9 @@ def as_datasourcegroup(ds_cfg: OmConfig) -> DictConfig:
         raise ValueError(f'Invalid DataSourceGroup config {ds_cfg}')
     new_cfg['data_source'] = data_source
 
-    log.debug(f'Converted:\n{short_conf(ds_cfg)}\nto DataSourceGroup:\n{short_conf(new_cfg)}')
+    datalog.debug(
+        'Converted:\n%s\nto DataSourceGroup:\n%s', short_conf(ds_cfg), short_conf(new_cfg)
+    )
     return new_cfg
 
 
@@ -1268,17 +1510,14 @@ def build_datasource_from_config(ds_cfg: OmConfig) -> DataSource:
 ## {{{                          --     PlotJob     --
 
 
-def remove_non_ctor_args(cls, kwargs):
-    ctor_args = {}
-    for k, v in kwargs.items():
-        if k in get_public_attrs(cls):
-            ctor_args[k] = v
-    return ctor_args
+# TODO: we need to carry over the resolvers so that spawning/resolving
+# objects inside a resolved object overrides/keep the parents resolvers
+# explicitly using a context manager might be enough?
 
 
 @inherit_attrs(
     InheritanceSpec(
-        inherited_attrs=['metadata', 'context', 'plot_config', 'figure_spec', 'figure_maker'],
+        inherited_attrs=INHERITED_ATTRIBUTES['PlotJob']['DataSource'],
         child_attrs=['data_source'],
     )
 )
@@ -1301,65 +1540,14 @@ class PlotJob:
     extra: Dict[str, Any] = MISSING
 
     def generate_figure_tasks(self) -> List[FigureTask]:
-        return generate_figure_tasks(self.data_source, resolver_context={'job': self, 'this': self})
+        """resolve the data source and ask it to generate the corresponding figure tasks"""
+        with omegaconf_resolvers(make_resolvers({'job': self, 'this': self})):
+            return resolve(self.data_source).make_figure_tasks()
 
     @classmethod
     def from_config(cls, job_cfg: DictConfig) -> 'PlotJob':
         args = remove_non_ctor_args(cls, with_str_keys(job_cfg))
         return cls(**args)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                      --     task generation     --
-
-
-def empty_config(r: Optional[pl.ResolvableOr[pl.T]]):
-    if r is None:
-        return True
-    if not isinstance(r, Resolvable):
-        return False
-    return r.config is None or r.config == {} or r.config == MISSING
-
-
-def obj_resolver(obj: Any, attr_path: str):
-    attrs = attr_path.split('.')
-    for attr in attrs:
-        obj = getattr(obj, attr)
-    return obj
-
-
-def generate_figure_tasks(
-    src: ResolvableOr[DataSource], resolver_context: Optional[Dict[str, Any]] = None
-) -> List[FigureTask]:
-
-    if resolver_context is None:
-        resolver_context = {}
-
-    if not isinstance(src, DataSource):
-        src = resolve(src, resolvers=make_resolvers(resolver_context))
-    assert isinstance(src, DataSource), f'Expected DataSource, got {type(src)}, {src=}'
-    tasks = []
-    log.debug(f'Generating figure tasks for {src}. Figure maker: {src.figure_maker}')
-    if not empty_config(src.figure_maker):
-        assert src.figure_maker is not None
-        new_context = resolver_context.copy()
-        new_context['this'] = src
-        log.debug(f'Resolving figure maker: {src.figure_maker}')
-        src.figure_maker = pl.resolve(src.figure_maker, resolvers=make_resolvers(new_context))
-        data = src.get_data()
-        log.debug(f'Got data: {data} and figure maker: {src.figure_maker}')
-        tasks += src.figure_maker.make_figure_tasks(data)
-    else:
-        log.debug('No figure maker')
-    if hasattr(src, 'data_source'):
-        log.debug('Going down the hierarchy')
-        next_src = getattr(src, 'data_source')
-        if not isinstance(next_src, list):
-            next_src = [next_src]
-        for s in next_src:
-            tasks += generate_figure_tasks(s, resolver_context=resolver_context)
-    return tasks
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1393,7 +1581,7 @@ def get_plot_data_from_xp_in_db(
 
     netdf = netdf[netdf['xp'] == xpname]
     nets_with_data = netdf[netdf['data_file'] != 'None']
-    log.debug(f'Found {len(netdf)} networks for xp {xpname}, {len(nets_with_data)} with data')
+    datalog.debug(f'Found {len(netdf)} networks for xp {xpname}, {len(nets_with_data)} with data')
     netdf = nets_with_data
 
     load_errors = {}
