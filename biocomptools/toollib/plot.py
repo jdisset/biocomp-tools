@@ -16,12 +16,14 @@ from rich import print as rprint
 import pandas as pd
 from pathlib import Path
 import numpy as np
+
 from biocomp import utils as ut
 import biocomp.plotting.plotting_3d as p3d
 import biocomp.plotting.plotting_core as pc
 from biocomp import datautils as du
 from biocomp import plotutils as pu
 import biocomp as bc
+
 from typing import (
     Annotated,
     Optional,
@@ -36,6 +38,7 @@ from typing import (
     Generic,
     Iterable,
 )
+
 from typing import Type, Union
 import hydra
 from hydra import compose, initialize, initialize_config_dir
@@ -52,6 +55,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
+
 from rich.logging import RichHandler
 
 LOGFORMAT = "in %(funcName)s: %(message)s"
@@ -85,37 +89,6 @@ figlog.setLevel(logging.DEBUG)
 from biocomp.plotutils import FigureSpec, PlotData
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-## {{{                         --     ramblings     --
-
-# a Job declares a list of DataSources (can be nested through DataSourceGroup)
-# each DataSource declares a FigureMaker, which will produce PlotTasks from the data
-# A PlotTask contains some PlotData, an Axes, a PlotConfig to be used by the plotting function,
-# and an entry_point, aka which plotting function to use (by default, it's auto_plot, or maybe
-# I should switch to directly defining something like "smooth" or "histogram" or "scatter" etc.)
-
-
-# Everything relies on successive task overrides. A Task being a self-contained unit of work,
-# that has everything it needs to be executed.
-
-# One big pain point with hydra is that the interpolation of variables happens on the final
-# config object, which means we can't use variable paths that are relative to the current file or node.
-#
-# one way around that is to use the relative paths (...path.var), but it gets messy quickly.
-# After pondering if I should roll my own config system on top of OmegaConf that treats modules as *true* modules
-# and not this weird default-list + assembly of a config object that has no knowledge of the modules composed in it,
-# I decided that there might be a simple way to augment hydras interpolation system with a few custom resolvers
-# ${this: path.to.var} -> resolves to whatever the instanciated wrapper object is
-# ${include: path/to/module, resolve=false} ->
-#   load path/to/module with hydra and generate the config object, then append it to the current config
-
-# TODO:
-# for now I'm switching most classes to regular ones (instead of dataclasses) because
-# the dataclasses constructor behavior (even with kw_only) is too finick to make
-# play nice with the resolvable_attrs and inherit_attrs decorators.
-# I think it's possible to make it work (kw for child classes only?),
-# but let's just get the thing working first.
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 
 from typing import TypeVar, Generic, Protocol, Self
@@ -141,7 +114,6 @@ Mergeable = Union[DictLike, ConfigHolder]
 
 ## {{{                        --     misc utils     --
 
-
 def obj_resolver(obj: Any, attr_path: str):
     attrs = attr_path.split('.')
     for attr in attrs:
@@ -152,11 +124,9 @@ def obj_resolver(obj: Any, attr_path: str):
 def get_public_attrs(obj):
     if is_dataclass(obj):
         return [f.name for f in fields(obj)]
-
     # if it's a type, try to instantiate it
     if isinstance(obj, type):
         obj = obj()
-
     return [a for a in dir(obj) if not a.startswith('__')]
 
 
@@ -247,420 +217,6 @@ def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'
 def generic_instanciation_ctor(cfg: DictLike) -> Any:
     assert has_target(cfg), f'instanciation ctor called on non-target object {cfg}'
     return target_instantiate(cfg)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                       --     resolve utils     --
-
-CONTEXT_AWARE_RESOLVERS = ['np', 'this', 'plot_task', 'data', 'figure_task']
-
-# A Resolvable[T] is a wrapper around a T that can be resolved by OmegaConf at the last minute
-# by providing the right context (this, plot_task, data, figure_task, etc.)
-# When not resolved, it carries its DictConfig representation
-# and a constructor to build the object from it.
-
-
-def dict_like(obj) -> bool:
-    return (
-        hasattr(obj, 'keys')
-        and hasattr(obj, 'get')
-        and hasattr(obj, '__getitem__')
-        and hasattr(obj, '__contains__')
-        and hasattr(obj, '__iter__')
-    )
-
-
-def remove_non_ctor_args(cls, kwargs):
-    """remove any keys that are not in the class' constructor signature"""
-    # WARN: this is a very bad implementation, but it's a start
-    ctor_args = {}
-    for k, v in kwargs.items():
-        if k in get_public_attrs(cls):
-            ctor_args[k] = v
-    return ctor_args
-
-
-def build_from_config(cls: Optional[Type[T]], cfg: DictLike, filter_out_non_ctor_args=False) -> T:
-    """
-    Build an object of type cls from a DictLike cfg (by essentially calling cls(**cfg)).
-    If the config has a _target_ key, build the target object instead.
-    """
-
-    # check if it has a _target_ key
-    if has_target(cfg):
-        subclass = get_target_class(cfg)
-        print(f'{type(subclass)=}')
-        # if (cls is not None) and (not issubclass(subclass, cls)):
-        # raise ValueError(f'Invalid target class {subclass}. Expected base class {cls}')
-        return target_instantiate(cfg)
-
-    assert cls is not None, f'Invalid config {cfg=}, {cls=}'
-
-    reslog.debug('Building %s from config:\n%s', cls.__name__, short_conf(cfg))
-
-    ctor_args = with_str_keys(cfg)
-
-    if filter_out_non_ctor_args:
-        ctor_args = remove_non_ctor_args(cls, ctor_args)
-
-    return cls(**ctor_args)
-
-
-def noop_interpolation(resolver_name, *args, **kwargs):
-    # allows to defer resolve of context-dependent interpolations until we have the right context
-    if args:
-        args = [str(a) for a in args]
-        res = f'${{{resolver_name}: {",".join(args)}}}'
-        return res
-    return '${' + resolver_name + '}'
-
-
-def make_resolvers(resolver_context: Optional[Dict[str, Any]] = None) -> Dict[str, Callable]:
-    resolvers = {}
-    if resolver_context is not None:
-        for k, v in resolver_context.items():
-            resolvers[k] = partial(obj_resolver, v)
-    return resolvers
-
-
-class omegaconf_resolvers:
-    # a context manager to temporarily register resolvers
-    def __init__(self, resolvers: Dict[str, Callable]):
-        self.resolvers = resolvers
-
-    def __enter__(self):
-        for key, value in self.resolvers.items():
-            OmegaConf.clear_resolver(key)
-            OmegaConf.register_resolver(key, value)
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        for key in self.resolvers.keys():
-            OmegaConf.clear_resolver(key)
-
-
-def short_conf(conf: DictLike) -> str:
-    if conf is None:
-        return 'None'
-    try:
-        long = OmegaConf.to_yaml(conf, resolve=False)
-        return long[:100] + ' [...] \n' if len(long) > 100 else long
-    except Exception as e:
-        return conf.__repr__()
-
-
-@dataclass
-class Resolvable(Generic[T]):
-    """
-    A Resolvable object is a wrapper around an object that can be constructed at the last minute.
-    Useful for things like variable interpolation that depends on the right context
-    (this, plot_task, data, figure_task, etc.)
-    When not resolved, it carries its DictLike representation
-    and a constructor to build the object from it.
-
-    """
-
-    constructor: Callable[..., T]
-    config: Optional[DictLike] = None
-
-    # debug info:
-    name: Optional[str] = None
-    target_type: Optional[Type] = None
-
-    def __repr__(self, indent=0):
-        indentstr = ' ' * indent
-        if self.config is None:
-            return f'{indentstr}Resolvable({self.name})[->{self.target_type}] (empty)'
-
-        confstr = short_conf(self.config)
-        indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
-        typename = self.target_type.__name__ if self.target_type is not None else 'unknown'
-        return (
-            f'{indentstr}Resolvable({self.name})->{typename}\n{indentstr}config:\n{indented_conf}'
-        )
-
-    # a Resolvable is dict_like (it transparently forwards dict-like operations to its config)
-
-    def __getitem__(self, key):
-        if self.config is None:
-            raise KeyError(f'No config found for {self}')
-        with open_dictlike(self.config):
-            return self.config[key]
-
-    def __setitem__(self, key, value):
-        if self.config is None:
-            self.config = OmegaConf.create({})
-        with open_dictlike(self.config):
-            self.config[key] = value
-
-    def __contains__(self, key):
-        return self.config is not None and key in self.config
-
-    def __iter__(self):
-        if self.config is None:
-            return iter([])
-        return iter(self.config)
-
-    def keys(self):
-        if self.config is None:
-            return []
-        return self.config.keys()
-
-    def values(self):
-        if self.config is None:
-            return []
-        return self.config.values()
-
-    def items(self):
-        if self.config is None:
-            return []
-        return self.config.items()
-
-    def get(self, key, default=None):
-        if self.config is None:
-            return default
-        return self.config.get(key, default)
-
-    def resolve(self):
-        if self.config is None:
-            return self.constructor()
-        return self.constructor(self.config)
-
-
-ResolvableOr = Union[Resolvable[T], T, AnyConfig]
-
-
-def resolve(resolvable: Any, resolvers=None):
-    """
-    Resolve a Resolvable object with the given resolvers in context.
-    i.e. returns the object constructed by calling the constructor with the config
-    using the provided resolvers.
-    """
-
-    if not isinstance(resolvable, Resolvable):
-        return resolvable  # not a resolvable, return as is
-
-    resolvers = resolvers or {}
-
-    reslog.debug('Resolving %s', resolvable)
-
-    with omegaconf_resolvers(resolvers):
-        return resolvable.resolve()
-
-
-def make_resolvable(
-    target_type: Type[T],
-    value: Optional[Union[Resolvable, DictLike]] = None,
-    name: Optional[str] = None,  # for debug purposes
-    clsname: Optional[str] = None,  # for debug purposes
-    **kw,
-) -> Resolvable[T]:
-    """
-    Return a Resolvable object from a value and a target type.
-    If the value is a Resolvable, check that it has the right target type and return it.
-    If the value is a DictLike, wrap it in a Resolvable object with the target type.
-    """
-
-    typename = target_type.__name__
-    if value is None:
-        value = {}
-
-    if isinstance(value, Resolvable):
-        if value.target_type is None:
-            value.target_type = target_type
-        assert (
-            value.target_type == target_type
-        ), f'Invalid target type {value.target_type} for {typename}'
-        return value
-
-    if value is MISSING:
-        raise ValueError(f'Missing value for {name} in {clsname}')
-
-    assert isinstance(
-        value, (DictLike, type(None))
-    ), f'Invalid config {short_conf(value)} for {typename}, type {type(value)}'
-
-    reslog.debug(
-        'Making %s %s in %s. %s',
-        typename,
-        name if name else 'resolvable',
-        clsname,
-        f'{value=}',
-    )
-
-    # if type has a from_config constructor, use it
-    if hasattr(target_type, 'from_config'):
-        constructor = getattr(target_type, 'from_config')
-    else:
-        # otherwise, use the default constructor
-        constructor = partial(build_from_config, target_type)
-
-    wrapped_value = Resolvable(
-        constructor=constructor, config=value, name=name, target_type=target_type, **kw
-    )
-
-    return wrapped_value
-
-
-from pydantic.functional_validators import AfterValidator, BeforeValidator
-
-
-def make_resolvable_validator(target_type) -> Callable:
-    def validator(v: Any) -> Any:
-        return make_resolvable(target_type, v)
-
-    return validator
-
-
-MadeResolvable = Annotated[
-    ResolvableOr[T], BeforeValidator(make_resolvable_validator(T)), Field(validate_default=True)
-]
-
-# MadeInheritable = Annotated[T, Wrap] # can't be that simple, has to be a model_validator
-
-
-# ╭─────────────────────────────╮
-# │      @resolvable_attrs      │
-# ╰─────────────────────────────╯
-def resolvable_attrs(*attrs):
-    """
-
-    A decorator to make some attributes to a dataclass resolvable.
-
-    Args:
-        attrs (List[str]): a list of attribute names to make resolvable
-
-    A resolvable attribute keeps its DictConfig representation until it is
-    resolved, at which point it calls the constructor with the resolved config.
-    Therefore a resolved attribute needs to store 2 things:
-    - the unresolved config (i.e. with ${OmegaConf:interpolation variable} type
-      strings in it)
-    - the constructor to build the object from the config
-
-    Why resolvable attributes?
-    --------------------------
-
-    This declarative plotting system relies on modular, nested configurations.
-    In order to customize figures and plots, users will often need to access
-    the context of the plot task, the figure task, the data, etc. (e.g. to set
-    the title of a plot, ...). The desired piece of context is oftentime not
-    available until instanciation of many things down the pipeline.
-
-    For example, if you need to know the index of the figure task in the list
-    of all figure tasks to set the title, you can use the ${figure_task:index}
-    interpolation variable. Or if you want to access some metadata information
-    that will only be added after the data is loaded, you can use ${this:
-    metadata.some_key}. But you can't resolve any of that at the time the
-    configuration is parsed, because the figure task doesn't exist yet.
-
-    How this decorator works
-    ------------------------
-
-    1. Handles constructions
-    It wraps the decorated class' __init__ method with a new method (distinct
-    from __post_init__ if it exists) whose role is to turn "normal" attributes
-    into Resolvable objects.
-
-    We first need to know the desired resolved type of the attribute. We need
-    to explicitely declare the type of the attribute in the decorator using a
-    tuple (attr_name, type)
-
-    So we loop over the attributes that were declared as resolvable, detect
-    and wrap them into a Resolvable class.
-
-     We assume any preexisting value of the attribute is either MISSING, or
-     a ConfigLike object (DictConfig, ListConfig, etc.)
-
-    MAYBE:
-    2. Handles resolution on access with the __getattr__ method
-
-
-    """
-
-    def decorator(cls):
-
-        reslog.debug('Setting up %s with resolvable attrs', cls.__name__)
-
-        for attr_specs in attrs:
-            if not isinstance(attr_specs, (tuple, list)):
-                raise ValueError(
-                    f'In {cls.__name__}, invalid resolvable attribute spec {attr_specs}. Need a tuple'
-                )
-
-        original_init = cls.__init__
-
-        def resolvable_init(self, *args, **kwargs):
-            """
-            The new constructor, that wraps the original.
-            1. calls the original ctor
-            2. wraps all the attrs marked as resolvable by the decorator in a resolvable instance
-            """
-
-            original_init(self, *args, **kwargs)
-
-            reslog.debug('Initializing %s with resolvable attrs', cls.__name__)
-
-            for attr_name, target_type in attrs:
-
-                assert isinstance(attr_name, str)
-                if not hasattr(self, attr_name):
-                    raise ValueError(f'Attribute {attr_name} not found in {cls}')
-
-                attr = object.__getattribute__(self, attr_name)  # current value of the attribute
-
-                if target_type is None:
-                    target_type = type(attr)
-                    if get_origin(target_type) is not None:
-                        target_type = get_origin(target_type)
-
-                assert (
-                    target_type is not None
-                ), f'Could not determine type for {attr_name} in {cls.__name__}'
-
-                if attr is MISSING:
-                    attr = None
-
-                wrapped_value = make_resolvable(
-                    target_type=target_type,
-                    value=attr,
-                    name=attr_name,
-                    clsname=cls.__name__,
-                )
-
-                setattr(self, attr_name, wrapped_value)
-
-        cls.__init__ = resolvable_init
-
-        return cls
-
-    return decorator
-
-
-def make_resolvable_attrs(attrs: List[Tuple], kwargs: Dict, clsname: Optional[str] = None) -> Dict:
-
-    for attr_name, target_type in attrs:
-
-        assert isinstance(attr_name, str)
-
-        attr = kwargs.get(attr_name, MISSING)
-
-        if target_type is None:
-            target_type = type(attr)
-            if get_origin(target_type) is not None:
-                target_type = get_origin(target_type)
-
-        assert target_type is not None, f'Could not determine type for {attr_name} in {clsname}'
-
-        if attr is MISSING:
-            attr = None
-
-        wrapped_value = make_resolvable(
-            target_type=target_type, value=attr, name=attr_name, clsname=None
-        )
-
-        kwargs[attr_name] = wrapped_value
-
-    return kwargs
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1264,6 +820,8 @@ class DataSource(BaseModel):
         and call its make_tasks method to get the list of figure tasks to run."""
 
         figmaker = resolve(self.figure_maker, make_resolvers({'this': self}))
+        # FIX: figmaker is still TypeVar(T)?:
+        # -> it's the chaining of MadeResolvable?
 
         if figmaker.can_make_tasks():
             return figmaker.make_tasks(self.get_data())
@@ -1552,173 +1110,3 @@ class PlotJob:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                          --     archive     --
-## {{{                   --     data source resolvers     --
-
-
-def resolve_xp_data_source(data_source: XPDataSource) -> List[pu.PlotData]:
-    assert data_source.source_type == 'xp'
-    assert data_source.xp_path is not None
-    if data_source.xp_path.startswith('db:'):
-        return get_plot_data_from_xp_in_db(data_source.xp_path[5:])
-    else:
-        raise NotImplementedError(
-            'Only supports plotting xp that are in the database (xp_path starts with "db:")'
-        )
-
-
-def get_plot_data_from_xp_in_db(
-    xpname: str,
-    input_order: Optional[Sequence[int]] = None,
-    protein_aliases: Optional[Dict[str, str]] = None,
-) -> List[pu.PlotData]:
-
-    lib = ut.load_lib()
-    netdf = cm.table_to_df('network')
-    assert isinstance(netdf, pd.DataFrame)
-    if xpname not in netdf['xp'].values:
-        raise ValueError(f'No networks found for xp {xpname}')
-
-    netdf = netdf[netdf['xp'] == xpname]
-    nets_with_data = netdf[netdf['data_file'] != 'None']
-    datalog.debug(f'Found {len(netdf)} networks for xp {xpname}, {len(nets_with_data)} with data')
-    netdf = nets_with_data
-
-    load_errors = {}
-
-    def error_handler(net_name, e):
-        load_errors[net_name] = f'{e.__class__.__name__}: {e}'
-        return None, None, None
-
-    netdf['network_obj'], netdf['X'], netdf['Y'] = cm.load_networks_and_data(
-        netdf, lib, error_handler=error_handler
-    )
-
-    rescaler = hydra.utils.instantiate(cfg.data_config.rescaler)
-    xlist = netdf['X'].tolist()
-    ylist = netdf['Y'].tolist()
-    netlist = netdf['network_obj'].tolist()
-
-    return [
-        pc.extract_plot_data_from_network(
-            network=n,
-            x=x,
-            y=y,
-            rescaler=rescaler,
-            input_order=input_order,
-            protein_aliases=protein_aliases,
-        )
-        for n, x, y in zip(netlist, xlist, ylist)
-    ]
-
-
-def instantiate_data_source(data_source) -> DataSource:
-    if data_source.source_type == 'xp':
-        return XPDataSource(**data_source)
-    elif data_source.source_type == 'recipe':
-        return RecipeDataSource(**data_source)
-    elif data_source.source_type == 'raw':
-        return RawDataSource(**data_source)
-    else:
-        raise ValueError(f'Unsupported data source type {data_source.source_type}')
-
-
-def build_data_source(data_source: DataSource) -> List[pu.PlotData]:
-    if data_source.source_type == 'xp':
-        assert isinstance(data_source, XPDataSource)
-        return resolve_xp_data_source(data_source)
-    elif data_source.source_type == 'recipe':
-        assert isinstance(data_source, RecipeDataSource)
-        return resolve_recipe_data_source(data_source)
-    elif data_source.source_type == 'raw':
-        assert isinstance(
-            data_source, RawDataSource
-        ), f'Expected RawDataSource, got {type(data_source)}'
-        return resolve_raw_data_source(data_source)
-    else:
-        raise ValueError(f'Unsupported data source type {data_source.source_type}')
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-# no! we can't do that.
-# we want to resolve things at the last minute.
-# plot_config, for example, might want to refer to its general parameters
-# that could be modified by some plottask or figuretask
-
-# the problem is that we might need the whole context to resolve things
-# inside the main configuration but if we wait, it's going to get more specialized
-# and narrow.
-
-# we could sort of "carry" the whole file?
-# -> ugly
-# or we can make sure to use mostly context-aware resolvers (i.e. this)
-# and the occasional "normal" interpolation is some risky gambit
-# with the only guarantee being that we try to resolve it at the last minute.
-
-# OmegaConf.resolve(job_cfg)
-
-## {{{                --     plot task making functions     --
-
-
-def cleanup_private_vars(d, prefix='__hydra_hack_'):
-    for k in list(d.keys()):
-        if k.startswith(prefix):
-            del d[k]
-
-
-def make_plot_tasks(plot_job: PlotJob) -> List[PlotTask]:
-    data_sources = [instantiate_data_source(ds) for ds in plot_job.data_sources]
-    for i in range(len(data_sources)):
-        if 'rescaler' not in plot_job.data_sources[i]:
-            data_sources[i].rescaler = plot_job.rescaler
-
-    print(f'Instantiated {len(data_sources)} data sources')
-    # print their rescalers type:
-    for ds in data_sources:
-        print(f'data source {ds.source_type} has rescaler {type(ds.rescaler)}')
-
-    plot_data = []
-    for i, d in enumerate(data_sources):
-        # add task_index to metadata
-        if d.metadata is None:
-            d.metadata = {}
-        d.metadata['task_index'] = i
-        plot_data += build_data_source(d)
-
-    plot_job_dict = OmegaConf.to_container(plot_job, resolve=False)
-    assert isinstance(plot_job_dict, dict)
-    pre_tasks = [
-        OmegaConf.create(
-            {
-                'figure': plot_job_dict['figure'],
-                'plot_config': plot_job_dict['plot_config'],
-                'output_path': plot_job_dict['output_path'],
-                'metadata': d.metadata,
-            }
-        )
-        for d in data_sources
-    ]
-
-    # we want to apply any data_source overrides to each task
-    # we need to do that on the dict version of the plot_task
-    overriden_tasks = []
-    for task, ds in zip(pre_tasks, data_sources):
-        if ds.overrides is not None:
-            for override in ds.overrides:
-                override = OmegaConf.create(override)
-                print(f'Applying override {OmegaConf.to_yaml(override)}')
-                task = OmegaConf.merge(task, override)
-        # now we need to resolve the plot_config
-        task.plot_config = OmegaConf.create(task.plot_config)
-        overriden_tasks.append(task)
-
-    tasks = [
-        PlotTask(data=d, figure=t.figure, plot_config=t.plot_config, output_path=t.output_path)
-        for d, t in zip(plot_data, overriden_tasks)
-    ]
-
-    return tasks
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-##────────────────────────────────────────────────────────────────────────────}}}

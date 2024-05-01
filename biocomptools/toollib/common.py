@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 import xxhash
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 
 # using base58 instead of base64 because it's url-safe
 import base58
@@ -18,7 +19,19 @@ from psycopg2.extras import execute_values
 import logging
 from tqdm import tqdm
 
-from typing import Union, List, Tuple, Dict, Any, Callable, Collection
+from typing import (
+    Union,
+    List,
+    Tuple,
+    Dict,
+    Any,
+    Callable,
+    Collection,
+    TypeVar,
+    Optional,
+    Collection,
+)
+
 
 PathLike = Union[str, Path]
 
@@ -30,6 +43,7 @@ BASE_CONFIG_FILE = pkg_resources.resource_filename('biocomptools', BASE_CONFIG_F
 
 tlog = logging.getLogger('biocomptools.common')
 tlog.setLevel(logging.DEBUG)
+
 
 def load_config(*config_files):
     config = OmegaConf.load(BASE_CONFIG_FILE)
@@ -48,7 +62,30 @@ def load_config(*config_files):
         tlog.debug(f'Loaded extra config file {extra_config_file}')
     return config
 
+
 config = load_config()
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                           --     types     --
+T = TypeVar('T')
+U = TypeVar('U')
+ListOrSingle = Union[List[T], T]
+Pair = Tuple[T, T]
+DictOrList = Union[Dict[U, T], List[T]]
+DictLike = Union[Dict, DictConfig]
+AnyConfig = Union[DictConfig, ListConfig]
+
+
+def dict_like(obj) -> bool:
+    return (
+        hasattr(obj, 'keys')
+        and hasattr(obj, 'get')
+        and hasattr(obj, '__getitem__')
+        and hasattr(obj, '__contains__')
+        and hasattr(obj, '__iter__')
+    )
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -93,8 +130,6 @@ def filter_df(df, **filters):
 
 ### {{{                     --     db utils     --
 
-from typing import Optional, Collection
-
 
 def connect_to_db():
     try:
@@ -109,6 +144,7 @@ def connect_to_db():
         tlog.error(f'Error connecting to database: {e}')
         raise e
     return conn
+
 
 # list or tuple type:
 ListOrTuple = Union[List, Tuple]
@@ -243,6 +279,7 @@ def update_table(
 
     tlog.info(f'Updated {len(df)} rows in table {table_name}')
 
+
 def insert_row_if_not_exists(table_name, row, key_column, conn=None):
     existing_row = get_row_by_id(table_name, key_column, row[key_column], conn)
     if existing_row is None:
@@ -250,9 +287,11 @@ def insert_row_if_not_exists(table_name, row, key_column, conn=None):
     else:
         update_row(table_name, row, key_column, conn)
 
+
 def insert_if_not_exists(table_name, df, key_column, conn=None):
     for _, row in df.iterrows():
         insert_row_if_not_exists(table_name, row, key_column, conn)
+
 
 def insert_row(table_name, row, conn=None):
     columns = ', '.join(row.keys())
@@ -262,6 +301,7 @@ def insert_row(table_name, row, conn=None):
     row = convert_types_to_sql(pd.DataFrame([row])).iloc[0].to_dict()
     execute_query(query, list(row.values()), conn)
 
+
 def update_row(table_name, row, key_column, conn=None):
     columns = ', '.join(row.keys())
     values = ', '.join(['%s'] * len(row))
@@ -270,9 +310,11 @@ def update_row(table_name, row, key_column, conn=None):
     row = convert_types_to_sql(pd.DataFrame([row])).iloc[0].to_dict()
     execute_query(query, list(row.values()) + [row[key_column]], conn)
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     collection utils     --
+
 
 def get_networks_in_collections(collections):
     if not isinstance(collections, list):
@@ -321,6 +363,7 @@ def add_networks_to_collection(collection_name, network_names):
 
 # TODO MAYBE:
 # parallel load_network_and_data with ray
+
 
 def resolve_path(filepath, path_prefix):
     if isnull(filepath):
@@ -415,6 +458,7 @@ def load_networks_and_data(netdf, lib, **kwargs):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ### {{{                        --     CLIProgram     --
 class CLIProgram:
