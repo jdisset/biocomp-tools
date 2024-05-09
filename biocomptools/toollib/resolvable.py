@@ -1,6 +1,6 @@
 ## {{{                         --     docstring     --
 """
-A resolvable attribute keeps its DictConfig representation until it is
+A resolvable attribute keeps its DictLike representation until it is
 resolved, at which point it calls the constructor with the resolved config.
 Therefore a resolved attribute needs to store 2 things:
 - the unresolved config (i.e. with ${OmegaConf:interpolation variable} type
@@ -26,18 +26,15 @@ configuration is parsed, because the figure task doesn't exist yet.
 """
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     imports     --
-from dataclasses import is_dataclass, fields, MISSING
-from contextlib import contextmanager
+from dataclasses import is_dataclass, fields
 from copy import deepcopy
 from importlib import import_module
 from functools import partial
-from pydantic.functional_validators import AfterValidator, BeforeValidator
+from pydantic.functional_validators import BeforeValidator
 from typing import (
     Annotated,
     Optional,
     Union,
-    Tuple,
-    List,
     Dict,
     Type,
     Union,
@@ -45,33 +42,19 @@ from typing import (
     Callable,
     Generic,
     TypeVar,
-    get_args,
 )
 import logging
 from rich.logging import RichHandler
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
-from biocomptools.toollib.common import DictLike, DictOrList, AnyConfig, Pair, ListOrSingle
-from biocomptools.toollib.common import dict_like
+from omegaconf import OmegaConf
+from pydantic import BaseModel, Field
+
 from biocomptools.toollib import common as cm
+from biocomptools.toollib.common import DictLike, open_dictlike, ArbitraryModel
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 T = TypeVar('T')
 U = TypeVar('U')
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-## {{{                      --     omegaconf utils     --
-@contextmanager
-def open_dictlike(obj: Any):
-    if isinstance(obj, DictConfig):
-        with open_dict(obj):
-            yield
-    else:
-        yield
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     logger utils --
 LOGFORMAT = "in %(funcName)s: %(message)s"
@@ -109,41 +92,59 @@ def get_public_attrs(obj):
         obj = obj()
     return [a for a in dir(obj) if not a.startswith('__')]
 
-
-def has_target(obj):
-    return '_target_' in obj
-
-
-def get_target_class(obj: DictLike, default_module='biocomptools.toollib.plot') -> Type:
-    """get the class of the target object"""
-
-    assert '_target_' in obj, f'Invalid data source object: {obj=}'
-
-    # target should be a string module.path.ClassName
-    # let's check that the class exists and it is a subclass of DataSource
-    target = obj['_target_']
-    target_parts = target.split('.')
-    target_module = '.'.join(target_parts[:-1])
-    target_class = target_parts[-1]
-
-    if target_module == '':
-        target_module = import_module(default_module)
+def get_type(target_type: Union[str, Type[T]], default_target_module='') -> Type[T]:
+    if isinstance(target_type, str):
+        target_parts = target_type.split('.')
+        target_module = '.'.join(target_parts[:-1])
+        try:
+            target_module = import_module(target_module)
+            target_class = getattr(target_module, target_parts[-1])
+        except:
+            target_module = import_module(default_target_module)
+            target_class = getattr(target_module, target_parts[-1])
+        return target_class
     else:
-        target_module = import_module(target_module)
+        return target_type
 
-    target_class = getattr(target_module, target_class)
-    return target_class
+
+def get_explicit_target_type(obj, default_module='biocomptools.toollib.plot'):
+    # a _target_ key in the dict indicates the target type
+
+    def isnull(x):
+        return x is None or x == '' or x == 'None'
+
+    target = None
+
+    if '_target_' in obj and obj['_target_'] != '' and obj['_target_'] != 'None':
+        target = obj['_target_']
+
+    if isnull(target):
+        return None
+
+    # check if it's a type directly
+    if isinstance(target, type):
+        return target
+
+    assert isinstance(target, str), f'Invalid target type {target}'
+
+    return get_type(target, default_module)
+
+def remove_target_key(obj: DictLike):
+    return {k: v for k, v in obj.items() if k != '_target_'}
 
 
 def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'):
     """simply create an instance of _target_ with the rest of the dict as kwargs"""
-    target_class = get_target_class(obj, default_module)
-    kwargs = {k: v for k, v in obj.items() if k != '_target_'}
+    target_class = get_explicit_target_type(obj, default_module)
+    assert target_class is not None, f'No target class found in {obj}'
+    kwargs = remove_target_key(obj)
     return target_class(**with_str_keys(kwargs))
 
 
 def generic_instanciation_ctor(cfg: DictLike) -> Any:
-    assert has_target(cfg), f'instanciation ctor called on non-target object {cfg}'
+    assert (
+        get_explicit_target_type(cfg) is not None
+    ), f'instanciation ctor called on non-target object {cfg}'
     return target_instantiate(cfg)
 
 
@@ -157,25 +158,25 @@ def remove_non_ctor_args(cls, kwargs):
     return ctor_args
 
 
-def build_from_config(cls: Optional[Type[T]], cfg: DictLike, filter_out_non_ctor_args=False) -> T:
+def build_from_config(
+    cls: Optional[Type[T]], cfg: DictLike, filter_out_non_ctor_args=False, ignore_target=False
+) -> T:
     """
     Build an object of type cls from a DictLike cfg (by essentially calling cls(**cfg)).
     If the config has a _target_ key, build the target object instead.
     """
 
-    # check if it has a _target_ key
-    if has_target(cfg):
-        subclass = get_target_class(cfg)
-        print(f'{type(subclass)=}')
-        # if (cls is not None) and (not issubclass(subclass, cls)):
-        # raise ValueError(f'Invalid target class {subclass}. Expected base class {cls}')
+    if hasattr(cls, 'from_config'):
+        return cls.from_config(cfg)  # type: ignore
+
+    if get_explicit_target_type(cfg) is not None and not ignore_target:
         return target_instantiate(cfg)
 
     assert cls is not None, f'Invalid config {cfg=}, {cls=}'
 
     log.debug('Building %s from config:\n%s', cls.__name__, short_conf(cfg))
 
-    ctor_args = with_str_keys(cfg)
+    ctor_args = with_str_keys(remove_target_key(cfg))
 
     if filter_out_non_ctor_args:
         ctor_args = remove_non_ctor_args(cls, ctor_args)
@@ -187,33 +188,41 @@ def build_from_config(cls: Optional[Type[T]], cfg: DictLike, filter_out_non_ctor
 ## {{{                        --     Resolvable     --
 
 
-class Resolvable(BaseModel, Generic[T]):
+class Resolvable(ArbitraryModel, Generic[T]):
     """
-    A Resolvable object is a wrapper around an object that can be constructed at the last minute.
+    A Resolvable is a wrapper around an object that can be constructed at the last minute.
     Useful for things like variable interpolation that depends on the right context
     (this, plot_task, data, figure_task, etc.)
-    When not resolved, it carries its DictLike representation
-    and a constructor to build the object from it.
-
+    When not resolved, it carries its DictLike representation from which it can be constructed.
     """
 
-    constructor: Callable[..., T]
-    config: Optional[DictLike] = None
+    is_resolvable: bool = Field(True, alias="__resolvable__")
+
+    target_type: Type[T]
+    config: DictLike = {}
 
     # debug info:
     name: Optional[str] = None
     clsname: Optional[str] = None
-    typename: Optional[str] = None
+
+    def model_post_init(self, *_):
+        log.debug('Resolvable post-init: %s', self)
+
+    def resolve(self):
+        return build_from_config(self.target_type, self.config)
 
     def __repr__(self, indent=0):
+        try:
+            typename = self.target_type.__name__  # type: ignore
+        except:
+            typename = str(self.target_type)
         indentstr = ' ' * indent
         confstr = '\n ' + short_conf(self.config) if self.config is not None else 'Empty'
         indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
-        typename = self.typename if self.typename is not None else 'UnknownType'
-        name = f' "{self.name}" ' if self.name is not None else 'Unknownname'
-        return f'Resolvable{name}->[{typename}]:{indented_conf}'
+        name = f' "{self.name}" ' if self.name is not None else ''
+        return f'Resolvable{name}<{typename}>:{indented_conf}'
 
-    # a Resolvable is dict_like (it transparently forwards dict-like operations to its config)
+    # a Resolvable is dict-like (it transparently forwards dict-like operations to its config)
 
     def __getitem__(self, key):
         if self.config is None:
@@ -255,81 +264,135 @@ class Resolvable(BaseModel, Generic[T]):
             return default
         return self.config.get(key, default)
 
-    def resolve(self):
-        if self.config is None:
-            return self.constructor()
-        return self.constructor(self.config)
-
-    class Config:
-        arbitrary_types_allowed = True
+    # eq test:
+    def __eq__(self, other):
+        if not isinstance(other, Resolvable):
+            return False
+        return self.config == other.config and self.target_type == other.target_type
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                     --     Resolvable utils     --
 
+ResolvableOr = Union[Resolvable[T], T, DictLike]
+
+
+def is_dictlike(obj):
+    return isinstance(obj, DictLike) or is_dataclass(obj)
+
 
 def make_resolvable(
-    target_type: Type[T],
-    value: Optional[Union[Resolvable, DictLike]] = None,
+    target_type: Optional[Type[T]] = None,
+    value: Optional[Union[T, Resolvable, DictLike]] = None,
     name: Optional[str] = None,
     clsname: Optional[str] = None,
+    force_resolvable=True,  # if True, will attempt to wrap any value in a Resolvable
 ) -> Resolvable[T]:
     """
     Return a Resolvable object from a value and a target type.
-    If the value is a Resolvable, check that it has the right target type and return it.
-    If the value is a DictLike, wrap it in a Resolvable object with the target type.
     """
 
-    try:
-        typename = target_type.__name__  # type: ignore
-    except:
-        typename = str(target_type)
+    log.debug('Making resolvable %s with target_type=%s, value=%s', name, target_type, value)
+    log.debug(f'{type(value)=}')
 
-    if value is None:
-        value = {}
+    original_target_type = target_type
+
+    value = value or {}
 
     if isinstance(value, Resolvable):
+        target_type = value.target_type
         value = deepcopy(value.config)
+        log.debug('value is already a Resolvable, using target_type=%s', target_type)
+    else:
+        if not is_dictlike(value):
+            log.debug('Value is not dict-like, trying to dump and wrap in Resolvable')
+            if force_resolvable:
+                try:
+                    target_type = type(value)  # type: ignore
+                    value = value.model_dump(by_alias=True)  # type: ignore
+                    log.debug('Dumped value=%s, target_type=%s', value, target_type)
+                except AttributeError:
+                    raise ValueError(f'Can\'t dump {value=} with {target_type=}')
+            else:
+                raise ValueError(f'Invalid {value=} for {target_type=}')
 
-    constructor = partial(build_from_config, target_type)
+    assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}'
+
+    # now there is the case where this dictlike actually codes for a Resolvable
+    if '__resolvable__' in value:
+        log.debug('Value is a Resolvable in dictlike form, extracting target_type and config')
+        target_type = get_type(value['target_type'])
+        value = value['config']
+
+    if not isinstance(target_type, type):
+        raise ValueError(f'Invalid target type {target_type}')
+
+    original_target_type = original_target_type or target_type
+
+    if not issubclass(target_type, original_target_type):
+        raise ValueError(f'Invalid {target_type=} is unrelated to {original_target_type=}')
+
+    assert is_dictlike(value), f'Invalid {value=} for {target_type}'
 
     return Resolvable[T](
-        constructor=constructor, config=value, typename=typename, name=name, clsname=clsname
+        target_type=target_type,
+        config=value,  # type: ignore
+        name=name,
+        clsname=clsname,
     )
 
 
-def make_resolvable_validator(target_type) -> Callable:
+def make_resolvable_validator(target_type, **kw) -> Callable:
 
     def validator(v: Any, info) -> Any:
         clsname = info.config['title']
         name = info.field_name
-        if isinstance(v, target_type):
-            return v
-        return make_resolvable(target_type, value=v, name=name, clsname=clsname)
+        return make_resolvable(target_type, value=v, name=name, clsname=clsname, **kw)
 
     return validator
 
 
-ResolvableOr = Union[Resolvable[T], T, AnyConfig]
+from typing import TypeAlias
+
+WRes: TypeAlias = Annotated[
+    Union[
+        Annotated[
+            T,
+            BeforeValidator(make_resolvable_validator(T)),
+            Field(validate_default=True),
+        ],
+        T,
+        Resolvable[T],
+    ],
+    Field(union_mode='left_to_right'),
+]
 
 
-def wrapped_resolvable(t):
-    return Annotated[
-        ResolvableOr[t],
-        BeforeValidator(make_resolvable_validator(t)),
+class WrappedResolvable(Generic[T]):
+    def __class_getitem__(cls, target_type):
+        return Annotated[
+            Resolvable[T],
+            BeforeValidator(make_resolvable_validator(target_type)),
+            Field(validate_default=True),
+        ]
+
+
+def resolvable(t, **kw):
+    return (
+        BeforeValidator(make_resolvable_validator(t, **kw)),
         Field(validate_default=True),
-    ]
+    )
 
 
-def resolve(resolvable: Any, resolvers=None):
+def resolved(resolvable: Any, resolvers=None):
     """
     Resolve a Resolvable object with the given resolvers in context.
-    i.e. returns the object constructed by calling the constructor with the config
+    i.e. returns A COPY of the object constructed by calling the constructor with the config
     using the provided resolvers.
     """
 
     if not isinstance(resolvable, Resolvable):
-        return resolvable  # not a resolvable, return as is
+        return deepcopy(resolvable)
 
     resolvers = resolvers or {}
 

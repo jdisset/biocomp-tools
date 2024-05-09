@@ -3,6 +3,7 @@ from biocomp import utils as ut
 import argparse
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 import pandas as pd
 import xxhash
@@ -12,6 +13,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 import base58
 
 import biocomp.utils as ut
+from biocomp.utils import ArbitraryModel
 import biocomp as bc
 
 import psycopg2
@@ -32,6 +34,7 @@ from typing import (
     Collection,
 )
 
+from pydantic import BaseModel
 
 PathLike = Union[str, Path]
 
@@ -70,6 +73,7 @@ config = load_config()
 ## {{{                           --     types     --
 T = TypeVar('T')
 U = TypeVar('U')
+
 ListOrSingle = Union[List[T], T]
 Pair = Tuple[T, T]
 DictOrList = Union[Dict[U, T], List[T]]
@@ -85,6 +89,10 @@ def dict_like(obj) -> bool:
         and hasattr(obj, '__contains__')
         and hasattr(obj, '__iter__')
     )
+
+
+class ArbitraryTargetModel(ArbitraryModel):
+    _target_: Any = None
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -124,6 +132,19 @@ def filter_df(df, **filters):
         else:
             df = df[df[key] == value]
     return df
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+## {{{                      --     omegaconf utils     --
+@contextmanager
+def open_dictlike(obj: Any):
+    if isinstance(obj, DictConfig):
+        with open_dict(obj):
+            yield
+    else:
+        yield
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
