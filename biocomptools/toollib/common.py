@@ -34,7 +34,7 @@ from typing import (
     Collection,
 )
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PathLike = Union[str, Path]
 
@@ -92,7 +92,7 @@ def dict_like(obj) -> bool:
 
 
 class ArbitraryTargetModel(ArbitraryModel):
-    _target_: Any = None
+    target_ : Any = Field(None, alias='_target_')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

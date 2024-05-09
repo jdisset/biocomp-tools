@@ -13,9 +13,6 @@
     then have data_sources that are created and that can override all these
     attributes.
 
-    First we initialize PlotJob with all the attributes as Resolvable objects
-    (they keep their DictConfig representation until resolved).
-
     When accessing an attribute, let's say job.data_source, we are going to
     trigger its resolution. Before calling resolve() and therefore losing the
     DictConfig representation of the data_source attribute, we want to *check if
@@ -47,8 +44,12 @@ from biocomptools.toollib.common import DictLike, ListOrSingle
 from biocomptools.toollib.common import dict_like, open_dictlike
 from biocomptools.toollib import common as cm
 
-from biocomptools.toollib.resolvable import open_dictlike
-from biocomptools.toollib.resolvable import Resolvable
+from biocomptools.toollib.resolvable import (
+    Resolvable,
+    open_dictlike,
+    get_explicit_target_type,
+    dump_type,
+)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
@@ -86,20 +87,34 @@ def as_dict(obj) -> Dict:
         assert isinstance(d, dict), f'Invalid dict-like object {d}'
         return d
     if config_holder(obj):
-        return as_dict(obj.config)
+        # return as_dict(obj.config)
+        return obj.model_dump()
     return obj
 
 
-def merged(parent: DictLike, child: D, **kw) -> D:
+def merged(parent: DictLike, child, **kw):
     """Merge parent DictLike structure into child,
     return the result without modifying child,
     and in the same type as child.
     """
+    print(f'{type(parent)=}, {type(child)=}')
 
-    # TODO: handle lists?
+    pdict, cdict = as_dict(parent), as_dict(child)
 
-    merged = ut.updated_dict(as_dict(parent), as_dict(child), **kw)
+    assert isinstance(pdict, dict), f'Invalid parent object {pdict}'
+    assert isinstance(cdict, dict), f'Invalid child object {cdict}'
+
+    merged = ut.updated_dict(pdict, cdict, **kw)
     assert isinstance(merged, dict), f'Invalid merged object {merged}'
+
+    # handle _target_ attribute as a special case:
+    # we want to override the child's _target_ attribute
+    # if parent has a more specialized type
+    ptype = get_explicit_target_type(pdict)
+    ctype = get_explicit_target_type(cdict)
+    if ptype is not None:
+        if ctype is None or issubclass(ptype, ctype):
+            merged['_target_'] = dump_type(ptype)
 
     if isinstance(child, DictConfig):
         return OmegaConf.create(merged)
@@ -170,35 +185,6 @@ def merged_into_container(target: T, parent: Any, attr_names: ListOrSingle[str],
     if isinstance(target, dict):
         return {k: merged_into(v, parent, attr_names, **kw) for k, v in target.items()}  # type: ignore
     raise ValueError(f'Invalid target type {type(target)}')
-
-
-def wrap_resolvable_constructor(obj: Resolvable[T], fn: Callable) -> Resolvable[T]:
-
-    assert isinstance(obj, Resolvable)
-
-    def wrapped_constructor(config: DictConfig, fn=fn, base_constructor=obj.constructor):
-        return base_constructor(fn(config))
-
-    return Resolvable(
-        constructor=wrapped_constructor,
-        config=obj.config,
-        name=obj.name,
-    )
-
-
-def make_inheritable_on_resolve(
-    target: Resolvable[T], parent: Any, attr_names: ListOrSingle[str]
-) -> Resolvable[T]:
-    # we wrap the target's constructor so that, just before resolving it,
-    # we merge the inherited parent attributes into it
-    return wrap_resolvable_constructor(
-        target,
-        partial(
-            merged_into,
-            parent=parent,
-            attr_names=attr_names,
-        ),
-    )
 
 
 class InheritableAttrsModel(cm.ArbitraryModel):

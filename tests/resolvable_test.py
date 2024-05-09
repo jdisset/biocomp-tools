@@ -1,5 +1,7 @@
 ## {{{                    --     import and types     --
 from pydantic import BaseModel, ValidationError, validator, Field, field_validator
+from biocomp.utils import PartialFunction
+import biocomptools.toollib.plot as pl
 from rich import print
 from typing import (
     Annotated,
@@ -45,6 +47,7 @@ U = TypeVar("U")
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 ## {{{                          --     classes     --
 class Araw:
     def __init__(self, a: int):
@@ -60,6 +63,7 @@ class A(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
 class Asub(A):
     asub: int
 
@@ -69,10 +73,11 @@ ResolvableA = Annotated[ResolvableOr[A], *resolvable(A)]
 
 class B(BaseModel):
     a: ResolvableA
-    b: int
+    b: int = 0
 
     class Config:
         arbitrary_types_allowed = True
+
 
 ResolvableB = Annotated[ResolvableOr[B], *resolvable(B)]
 
@@ -124,15 +129,17 @@ assert resolved(b4.a) == sa
 a = A(a=3)
 ra = make_resolvable(value=a)
 assert isinstance(ra, Resolvable)
-rra = ra.resolve() # fails
+rra = ra.resolve()  # fails
 issubclass(A, BaseModel)
-assert ra.resolve() == a # fails
+assert ra.resolve() == a  # fails
 
 
 class C(BaseModel):
     b: ResolvableB
+
     class Config:
         arbitrary_types_allowed = True
+
 
 c = C(b=rb)
 assert isinstance(c.b, Resolvable)
@@ -140,54 +147,43 @@ assert resolved(c) == c
 assert resolved(c.b) == b
 
 
-# when dumping, since b.a is a resolvable, it dumps a dict that will then be interpreted as a config
-# we need to see that it is the dump of a resolvable (thanks to the __resolvable__ key)!!
-
 c2 = C(b=b)
 assert isinstance(c2.b, Resolvable)
 rc2 = resolved(c2)
-rc2.b
 assert rc2 == c2
-rc2b = resolved(rc2.b)
+rc2b = resolved(c2.b)
+assert resolved(rc2b.a) == resolved(b.a)
 
-assert rc2b == b
+
 b = B(a=make_resolvable(A, {'a': 4}), b=3)
 rb = make_resolvable(value=b)
-assert resolved(rb) == b
+assert resolved(resolved(rb).a).a == 4
 
+HELLO = 'Hello world, it works!'
 
-from biocomp.utils import PartialFunction
-import biocomptools.toollib.plot as pl
-
-
-pcfg = pl.PlotConfig(rc_context={'hey': 120000})
-
-pf = PartialFunction(func=lambda: print('hello world'))
+pf = PartialFunction(func=lambda: HELLO)
 pfr = make_resolvable(value=pf)
 rpf = resolved(pfr)  # -> ok
 rpf()
 
-
-pt = pl.PlotTask(plot_method=pf) # pt is just a PlotTask. its plot_method is supposed to be a resolvable[PartialFunction]
+pt = pl.PlotTask(plot_method=pf)
 assert isinstance(pt, pl.PlotTask)
 assert isinstance(pt.plot_method, Resolvable)
 print(pt.plot_method)
 
 # when we resolve its plot_method, we should get a PartialFunction
 rpm = resolved(pt.plot_method)
-assert isinstance(rpm, PartialFunction) # indeed, we do
-rpm()  # -> ok
+assert isinstance(rpm, PartialFunction)  # indeed, we do
+assert rpm() == HELLO
 
 # now we rewrap the PlotTask in a resolvable, which should dump it into a dict first and then wrap that dict in a config field of a dictionnary
-dmp = pt.model_dump()
-ptr = make_resolvable(value=pt)  # this adds some bullshit...
+assert isinstance(pt, pl.PlotTask)
+ptr = make_resolvable(value=pt)
 assert isinstance(ptr, Resolvable)
 rptr = resolved(ptr)
 assert isinstance(rptr, pl.PlotTask)
 assert isinstance(rptr.plot_method, Resolvable)
-assert rptr.plot_method == pt.plot_method
-assert rptr.plot_config == pt.plot_config
 
-resolved(rptr.plot_method)()
+assert resolved(rptr.plot_method)() == HELLO
 
-
+print(resolved(rptr.plot_method)())

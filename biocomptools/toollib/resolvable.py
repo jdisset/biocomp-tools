@@ -45,8 +45,8 @@ from typing import (
 )
 import logging
 from rich.logging import RichHandler
-from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from omegaconf import DictConfig, OmegaConf, open_dict
+from pydantic import BaseModel, Field, model_serializer
 
 from biocomptools.toollib import common as cm
 from biocomptools.toollib.common import DictLike, open_dictlike, ArbitraryModel
@@ -92,6 +92,7 @@ def get_public_attrs(obj):
         obj = obj()
     return [a for a in dir(obj) if not a.startswith('__')]
 
+
 def get_type(target_type: Union[str, Type[T]], default_target_module='') -> Type[T]:
     if isinstance(target_type, str):
         target_parts = target_type.split('.')
@@ -128,6 +129,7 @@ def get_explicit_target_type(obj, default_module='biocomptools.toollib.plot'):
     assert isinstance(target, str), f'Invalid target type {target}'
 
     return get_type(target, default_module)
+
 
 def remove_target_key(obj: DictLike):
     return {k: v for k, v in obj.items() if k != '_target_'}
@@ -193,10 +195,10 @@ class Resolvable(ArbitraryModel, Generic[T]):
     A Resolvable is a wrapper around an object that can be constructed at the last minute.
     Useful for things like variable interpolation that depends on the right context
     (this, plot_task, data, figure_task, etc.)
-    When not resolved, it carries its DictLike representation from which it can be constructed.
+    When not resolved, it carries its DictLike representation from which it can be constrArbitrar
     """
 
-    is_resolvable: bool = Field(True, alias="__resolvable__")
+    # is_resolvable: bool = Field(True, alias="__resolvable__")
 
     target_type: Type[T]
     config: DictLike = {}
@@ -204,6 +206,8 @@ class Resolvable(ArbitraryModel, Generic[T]):
     # debug info:
     name: Optional[str] = None
     clsname: Optional[str] = None
+
+    dump_target: bool = True # add a _target_ key to the dumped config
 
     def model_post_init(self, *_):
         log.debug('Resolvable post-init: %s', self)
@@ -236,49 +240,41 @@ class Resolvable(ArbitraryModel, Generic[T]):
         with open_dictlike(self.config):
             self.config[key] = value
 
-    def __contains__(self, key):
-        return self.config is not None and key in self.config
-
-    def __iter__(self):
-        if self.config is None:
-            return iter([])
-        return iter(self.config)
-
-    def keys(self):
-        if self.config is None:
-            return []
-        return self.config.keys()
-
-    def values(self):
-        if self.config is None:
-            return []
-        return self.config.values()
-
-    def items(self):
-        if self.config is None:
-            return []
-        return self.config.items()
-
-    def get(self, key, default=None):
-        if self.config is None:
-            return default
-        return self.config.get(key, default)
-
     # eq test:
     def __eq__(self, other):
         if not isinstance(other, Resolvable):
             return False
         return self.config == other.config and self.target_type == other.target_type
 
+    @model_serializer()
+    def model_dump(self):
+        cfg = self.config
+        if isinstance(cfg, DictConfig):
+            cfg = OmegaConf.to_container(cfg, resolve=False)
+        assert isinstance(cfg, dict), f'Invalid config {cfg=}'
+        if self.dump_target:
+            cfg = {'_target_': dump_type(self.target_type), **cfg}
+        return cfg
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                     --     Resolvable utils     --
 
 ResolvableOr = Union[Resolvable[T], T, DictLike]
 
 
+def dump_type(t: Type[T]) -> str:
+    return t.__module__ + '.' + t.__name__
+
 def is_dictlike(obj):
     return isinstance(obj, DictLike) or is_dataclass(obj)
+
+
+def resolve_unwrap(d: Any) -> Any:
+    if is_dictlike(d) and '__resolvable__' in d:
+        return d['config']
+    return d
 
 
 def make_resolvable(
@@ -319,10 +315,16 @@ def make_resolvable(
     assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}'
 
     # now there is the case where this dictlike actually codes for a Resolvable
-    if '__resolvable__' in value:
-        log.debug('Value is a Resolvable in dictlike form, extracting target_type and config')
-        target_type = get_type(value['target_type'])
-        value = value['config']
+    # This happens when the object we're dumping has some attributes that are themselves resolvables
+    # Calling model_dump on the object will recursively call model_dump on the children attributes
+    # since these children are Resolvable objects, the resolvable model_dump is going to be called.
+    # One thing  could do instead of this is to override Resolvable's model_dump to only dump the
+    # inner config, to which it can maybe add its information by overriding the _target_ field?
+
+    # if '__resolvable__' in value:
+    # log.debug('Value is a Resolvable in dictlike form, extracting target_type and config')
+    # target_type = get_type(value['target_type'])
+    # value = value['config']
 
     if not isinstance(target_type, type):
         raise ValueError(f'Invalid target type {target_type}')

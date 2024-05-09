@@ -1,8 +1,10 @@
 # {{{                        --     imports     -
 
 from functools import partial
-from biocomptools.toollib.resolvable import make_resolvable, resolved
-from biocomp.utils import PartialFunction
+from typing import Annotated
+from biocomptools.toollib.resolvable import make_resolvable, resolved, Resolvable, resolvable, ResolvableOr
+from biocomptools.toollib.inheritable import merged_into
+from biocomp.utils import PartialFunction, ArbitraryModel
 from copy import deepcopy
 import logging
 import pandas as pd
@@ -109,75 +111,37 @@ for task in ftasks:
 
 log.info(f'Generated {len(ftasks)} plot tasks in {time1 - time0:.2f} seconds')
 
+## {{{              --     tests for some directly from python     --
 
-## {{{                   --     directly from python     --
+HELLO = 'hello world'
 pcfg = pl.PlotConfig(rc_context={'hey': 120000})
-
-pf = PartialFunction(func=lambda: print('hello world'))
-pfr = make_resolvable(value=pf)
-rpf = resolved(pfr) # -> ok
-rpf()
-
-
+pf = PartialFunction(func=lambda: 'hello world')
 pt = pl.PlotTask(plot_method=pf)
-pt.plot_method
-rpm = resolved(pt.plot_method)
-rpm() # -> ok
-
-ptr = make_resolvable(pl.PlotTask, value=pt) # this adds some bullshit...
-rptr = resolved(ptr)
-rptr.plot_method
-resolved(rptr.plot_method) # -> fails
-
-
-##
-
-
-ftask = pl.FigureTask(plot_tasks=[pt])#, plot_config=pcfg)
-
-pt0 = resolved(ftask.plot_tasks[0])
-pt0.plot_method # -> ok
-
-resolved(pt0.plot_config) # -> ok
-
-
-rpm0 = resolved(pt0.plot_method) # fails
-
-
-# fmaker = pl.SingleFigure(plot_tasks=[pl.PlotTask(plot_method=pf)])
-# pt0 = resolved(fmaker.plot_tasks[0])
-# resolved(pt0.plot_method) # -> not ok
-
-
-##
-
-
+fmaker = pl.SingleFigure(plot_tasks=[pt])
 dsource = pl.RawDataSource(
     data_path='~/Dropbox (MIT)/Biocomp/Experiments/2023-10-01_Cascades_CCv4/data/calibrated_data_v3/8xCsy4R_CasE.2023-10-01_Cascades_CCv4.csv',
     input_columns=["EBFP2", "MKO2", "MNEONGREEN"],
     output_column="1XIRFP720",
 )
-
 job = pl.PlotJob(data_source=dsource, figure_maker=fmaker, plot_config=pcfg)
+
 ds = resolved(job.data_source)
+assert (resolved(ds.plot_config).rc_context == {'hey': 120000})
+
+rfm = resolved(job.figure_maker)
+assert(type(rfm) == pl.SingleFigure)
 
 rds = resolved(ds)
-rds.plot_config # -> ok
+rfm2 = resolved(ds.figure_maker)
+assert(type(rfm2) == pl.SingleFigure)
 
-t0 = job.generate_figure_tasks()[0]
-rt0 = resolved(t0)
-rt0.plot_config # -> ok
-
-p0 = rt0.plot_tasks[0]
-rp0 = resolved(p0)
-rp0.plot_config # -> ok!
-rp0.plot_method
-
-
+rds.make_figure_tasks()
 ftasks = job.generate_figure_tasks()
+assert len(ftasks) == 1
 for task in ftasks:
-    task.run()
-
-
+    assert resolved(task.plot_config).rc_context == {'hey': 120000}
+    print(task.run())
+    assert task.run() == [HELLO]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

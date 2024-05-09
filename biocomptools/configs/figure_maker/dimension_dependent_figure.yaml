@@ -62,12 +62,11 @@ cases:
           # (this allows to specify different plot tasks for each subplot).
           # Since we only have one data source here, all plot_tasks will be initialized with the same data, just different ax (from the layout)
           # and of course any other parameters specialization we declare here.
-          #- ax: "${ftask: figure.axes[${ptask: context.task_index}]}" # this will be the 4 axes in the row. not needed if we don't specify n_tasks
-          - ax: "${ftask: figure.axes.${ptask: context.task_index}}" # this will be the 4 axes in the row. not needed if we don't specify n_tasks
-            plot_method:
-              _target_: biocomp.EncodedFunction
+          - plot_method:
+              _target_: biocomp.PartialFunction
               name: biocomp.smooth
               plot_data: "${ftask: data.0}"
+              # ax: "${ftask: figure.axes.${ptask: context.task_index}}" # this will be the 4 axes in the row. not needed if we don't specify n_tasks
              #... could change any other parameter here, like cmap, etc.
 
 

@@ -315,16 +315,16 @@ ResolvablePlotConfig = Annotated[ResolvableOr[PlotConfig], *resolvable(PlotConfi
 
 ResolvablePartialFunction = Annotated[ResolvableOr[PartialFunction], *resolvable(PartialFunction)]
 
+
 class PlotTask(ArbitraryTargetModel):
 
-    ax: ListOrSingle[Axes] = []  # the axes to plot on
     context: ResolvableDict = {}  # inherited from parent FigureTask
     plot_config: ResolvablePlotConfig = Field(default_factory=PlotConfig)  # the plot config
-    plot_method: ResolvablePartialFunction = {} # the function to call
+    plot_method: ResolvablePartialFunction = {}  # the function to call
 
     def run(self):
         if self.plot_method is not None:
-            resolved(self.plot_method)()
+            return resolved(self.plot_method)()
 
 
 ResolvablePlotTask = Annotated[ResolvableOr[PlotTask], *resolvable(PlotTask)]
@@ -342,9 +342,11 @@ class FigureTask(ArbitraryTargetModel):
     plot_tasks: List[ResolvablePlotTask] = []
 
     def run(self):
+        results = []
         for task in self.plot_tasks:
             print(f'Running task {task}...')
-            resolved(task).run()
+            results.append(resolved(task).run())
+        return results
 
     def model_post_init(self, *_):
         self.plot_tasks = merged_into_container(
@@ -362,6 +364,7 @@ ResolvableFigureTask = Annotated[ResolvableOr[FigureTask], *resolvable(FigureTas
 ## {{{                       --     Figure Makers     --
 
 FMaker = TypeVar("FMaker", bound="FigureMaker")
+
 
 class FigureMaker(ArbitraryTargetModel):
 
@@ -395,6 +398,8 @@ ResolvableFigureMaker = Annotated[ResolvableOr[FigureMaker], *resolvable(FigureM
 
 class SingleFigure(FigureMaker):
     """A figure maker that will spawn a figure task for each data item"""
+
+    target_: Any = 'biocomptools.toollib.plot.FigureTask'
 
     def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
         return [self.spawn_figure_task(d, {'figure_makers': ['single']}) for d in as_list(data)]
@@ -512,6 +517,7 @@ class DataSource(InheritableAttrsModel):
 
         with resolvers(make_resolvers({'this': self})):
             figmaker = resolved(self.figure_maker)
+            print(f'FigureMaker: {figmaker} of type {type(figmaker)}')
             try:
                 return figmaker.make_tasks(self.get_data())
             except NotImplementedError:
@@ -783,7 +789,15 @@ class PlotJob(InheritableAttrsModel):
     context: ResolvableDict = {}
     extra: Dict[str, Any] = {}
 
-    _inherit = {'data_source': INHERIT_ATTRS['PlotJob']['DataSource']}
+    # _inherit = {'data_source': INHERIT_ATTRS['PlotJob']['DataSource']}
+
+    def model_post_init(self, *_):
+        print('Post init PlotJob')
+        self.data_source = merged_into(
+            self.data_source,
+            self,
+            INHERIT_ATTRS['PlotJob']['DataSource'],
+        )
 
     def generate_figure_tasks(self) -> List[FigureTask]:
         with resolvers(make_resolvers({'job': self, 'this': self})):
