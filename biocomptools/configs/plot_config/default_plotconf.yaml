@@ -132,6 +132,8 @@ callstack_params:
     vlims: ${general.vlims}
 
   smooth_3d_params:
+    smooth_2d_params:
+      draw_colorbar: false
     xlims: ${general.xlims}
     ylims: ${general.ylims}
     zlims: ${general.zlims}
@@ -144,7 +146,7 @@ callstack_params:
     projection_diag_coef: 0.5
     xaxis_labelpad: 22
     yaxis_labelpad: 25
-    #zaxis_labelpad: 3500
+    zaxis_labelpad: 35
     heatmap_params:
       contours: [0.1, 0.3, 0.5]
     cube_edge_props:
@@ -188,7 +190,7 @@ callstack_params:
           minor: [{direction: [1, 0, 0], length: 2, props: {color: "${general.colors.grey}", linewidth: 0.2}}]
           slice: [{direction: [1, 0, 0], length: 80, props: {color: "${general.colors.grey}", alpha: 0.5, dashes: [5, 5], linewidth: 0.2}}]
         zaxis_title:
-          offset: [600, 0]
+          offset: [60, 0]
           props:
             fontsize: 8
             rotation: 45
@@ -209,6 +211,4 @@ callstack_params:
           linestyle: '-'
           linewidth: 0.5
           zorder: 2147483637
-    smooth_2d_params:
-      draw_colorbar: false
 

@@ -29,7 +29,7 @@
 ## {{{                          --     imports     --
 from contextlib import contextmanager
 from biocomp import utils as ut
-from copy import deepcopy
+from copy import deepcopy, copy
 from functools import partial
 from typing import (
     Dict,
@@ -63,7 +63,6 @@ for handler in logging.root.handlers[:]:
 logging.basicConfig(level="NOTSET", format=LOGFORMAT, datefmt="[%X]", handlers=[RichHandler()])
 log = logging.getLogger('biocomptools.biocomplot.utils.inheritable')
 log.setLevel(logging.INFO)
-log.setLevel(logging.DEBUG)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -97,7 +96,6 @@ def merged(parent: DictLike, child, **kw):
     return the result without modifying child,
     and in the same type as child.
     """
-    print(f'{type(parent)=}, {type(child)=}')
 
     pdict, cdict = as_dict(parent), as_dict(child)
 
@@ -116,7 +114,8 @@ def merged(parent: DictLike, child, **kw):
         if ctype is None or issubclass(ptype, ctype):
             merged['_target_'] = dump_type(ptype)
 
-    if isinstance(child, DictConfig):
+    # DictConfig has priority over vanilla dict
+    if isinstance(child, DictConfig) or isinstance(parent, DictConfig):
         return OmegaConf.create(merged)
 
     return merged
@@ -171,10 +170,13 @@ def inplace_merge_into(target: Any, parent: Any, attr_names: ListOrSingle[str], 
             set_dict_attr(target, attr_name, merged_attr)
 
 
-def merged_into(target: T, parent: Any, attr_names: ListOrSingle[str], **kw) -> T:
+def merged_into(target: T, parent: Any, attr_names: ListOrSingle[str], deep=True, **kw) -> T:
     """merge parent[attr_name] into target[attr_name] and return a new target object"""
-    target_copy = deepcopy(target)
-    inplace_merge_into(target_copy, parent, attr_names, **kw)
+    if deep:
+        target_copy = deepcopy(target)
+    else:
+        target_copy = target
+    inplace_merge_into(target_copy, parent, attr_names, deep=deep, **kw)
     return target_copy
 
 
@@ -199,3 +201,4 @@ class InheritableAttrsModel(cm.ArbitraryModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

@@ -1,8 +1,7 @@
-
 # a figure maker that will produce different things depending on the data input dimensions.
 # Should be called on a single plotdata (inside a ForEachData, for example)
 _target_: SwitchFigure
-condition: '${data: dimensions.input}' # or maybe we can avoid the 'this' and use ${data: dimensions.input}
+condition: "${data: dimensions.input}" # or maybe we can avoid the 'this' and use ${data: dimensions.input}
 cases:
   1: # if input is 1D we make a density plot (i.e. a fancier scatter plot)
     _target_: SingleFigure
@@ -14,59 +13,66 @@ cases:
 
   2: # if input is 2D we make a smooth (gaussian averaged) heatmap
     _target_: SingleFigure
-    plot_method:
-      _target_: biocomp.smooth
+    plot_tasks:
+      - plot_method:
+          func: biocomp.plotutils.smooth
+          kwargs:
+            plot_data: "${ftask: data.0}"
+            ax: "${ptask: context.figure.flatax}"
+
 
   3: # in 3d, we produce 2 things: a sequence of frames going through the z-axis, and a single figure with 4 subplots at different z-slices
     _target_: MultiFigure
-
     figure_makers:
-
       # video: make 10 frames (each on its own figure) going through the z-axis
       - _target_: MultiFigure
-        n_repeats: 10 # duplicates the below figure_maker 10 times
-        figure_maker:
+        n_repeats: 2 # duplicates the below figure_maker 10 times
+        figure_makers:
           _target_: SingleFigure # each repeat will produce a single figure
           figure_spec:
-            output_file: "${ftask: metadata.title}_3D_${ftask: context.multifigure_index}.png" # bandpass_3D_0.png, bandpass_3D_1.png, etc.
-          plot_method:
-            _target_: biocomp.smooth
+            output_file: "${ftask: data.0.metadata.title}_3D/frame_${ftask: context.multifigure_index}.png"
+          run_after:
+            - func: biocomptools.toollib.plot.make_video
+              kwargs:
+                input_file_pattern: "${ftask: figure_spec.output_dir}/${ftask: data.0.metadata.title}_3D/frame_*.png"
+                output_file: "${ftask: figure_spec.output_dir}/${ftask: data.0.metadata.title}_3D.mp4"
+                fps: 10
+
+          plot_tasks:
+            - plot_method:
+                func: biocomp.plotutils.smooth
+                kwargs:
+                  plot_data: "${ftask: data.0}"
+                  ax: "${ptask: context.figure.flatax}"
+
           plot_config:
             callstack_params:
               smooth_3d_params:
                 zslices:
                   [
-                    "${np: interp, ${this: context.repeat_index}, [0, ${this: context.n_repeats}], ${this: plot_config.general.zlims}}",
+                    "${func: numpy.interp, ${ptask: context.multifigure_index}, [0, ${func: numpy.subtract, ${ptask: context.multifigure_n_repeats}, 1}], [0.05, 0.6]}",
                   ]
 
       # slices: make a single figure with 4 subplots in a row at different z-values
-      - _target_: SingleFigure
-        plot_config:
-          callstack_params:
-            smooth_3d_params:
-              zslices:
-                [ "${np: interp, ${ptask: context.task_index}, [0, ${ptask: context.n_tasks}], ${ptask: plot_config.general.zlims}}" ]
+#      - _target_: SingleFigure
+        #n_plot_tasks: 1
 
-        figure_spec:
-          output_file: "${ftask: metadata.title}_slices.png"
-          layout: [1, 4] # 1 row, 4 columns.
+        #plot_config:
+          #callstack_params:
+            #smooth_3d_params:
+              ##zslices: "${func: numpy.linspace, ${ptask: plot_config.general.zlims.0}, ${ptask: plot_config.general.zlims.1},  ${ptask: context.figure.n_axes}}"
+              #zslices: [0.05, 0.25, 0.4, 0.55]
 
-        ## what if we wantg to call a single function that takes several axes (maybe a row) as input?
-        ## we can manually specify the ax, and the number of plot_tasks using n_tasks (by default it's -1, which means it will use the number of axes)
+        #figure_spec:
+          #output_file: "${ftask: data.0.metadata.title}_slices.png"
+          #layout:
+            #_target_: biocomp.plotutils.SimpleLayout
+            #rows: 1
+            #cols: 4
 
-        n_tasks: 4 # we have 4 subplots, so we need 4 plot_tasks
-
-        plot_tasks: 
-          # if we didnt specify this field, it would use a defualt plot_task that takes everything from the parent figuremaker
-          # which would work for us, but just to illustrate, I'm going to specify one plot task here (it'll be duplicated 4 times)
-          # (this allows to specify different plot tasks for each subplot).
-          # Since we only have one data source here, all plot_tasks will be initialized with the same data, just different ax (from the layout)
-          # and of course any other parameters specialization we declare here.
-          - plot_method:
-              _target_: biocomp.PartialFunction
-              name: biocomp.smooth
-              plot_data: "${ftask: data.0}"
-              # ax: "${ftask: figure.axes.${ptask: context.task_index}}" # this will be the 4 axes in the row. not needed if we don't specify n_tasks
-             #... could change any other parameter here, like cmap, etc.
-
-
+        #plot_tasks:
+          #- plot_method:
+              #func: biocomp.plotutils.smooth
+              #kwargs:
+                #plot_data: "${ftask: data.0}"
+#                ax: "${ptask: context.figure.flatax}" # all axes in the row.

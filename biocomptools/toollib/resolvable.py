@@ -27,7 +27,7 @@ configuration is parsed, because the figure task doesn't exist yet.
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     imports     --
 from dataclasses import is_dataclass, fields
-from copy import deepcopy
+from copy import deepcopy, copy
 from importlib import import_module
 from functools import partial
 from pydantic.functional_validators import BeforeValidator
@@ -70,8 +70,11 @@ def short_conf(conf: DictLike) -> str:
     if conf is None:
         return 'None'
     try:
+
         long = OmegaConf.to_yaml(conf, resolve=False)
-        return long[:100] + ' [...] \n' if len(long) > 100 else long
+        if isinstance(conf, DictConfig):
+            long = '(DictConfig):' + long
+        return long[:300] + ' [...] \n' if len(long) > 300 else long
     except Exception as e:
         return str(conf)
 
@@ -198,7 +201,6 @@ class Resolvable(ArbitraryModel, Generic[T]):
     When not resolved, it carries its DictLike representation from which it can be constrArbitrar
     """
 
-    # is_resolvable: bool = Field(True, alias="__resolvable__")
 
     target_type: Type[T]
     config: DictLike = {}
@@ -224,7 +226,7 @@ class Resolvable(ArbitraryModel, Generic[T]):
         confstr = '\n ' + short_conf(self.config) if self.config is not None else 'Empty'
         indented_conf = indentstr + confstr.replace('\n', '\n ' + indentstr)
         name = f' "{self.name}" ' if self.name is not None else ''
-        return f'Resolvable{name}<{typename}>:{indented_conf}'
+        return indentstr+f'Resolvable{name}<{typename}>:{indented_conf}'
 
     # a Resolvable is dict-like (it transparently forwards dict-like operations to its config)
 
@@ -271,18 +273,13 @@ def is_dictlike(obj):
     return isinstance(obj, DictLike) or is_dataclass(obj)
 
 
-def resolve_unwrap(d: Any) -> Any:
-    if is_dictlike(d) and '__resolvable__' in d:
-        return d['config']
-    return d
-
-
 def make_resolvable(
     target_type: Optional[Type[T]] = None,
     value: Optional[Union[T, Resolvable, DictLike]] = None,
     name: Optional[str] = None,
     clsname: Optional[str] = None,
     force_resolvable=True,  # if True, will attempt to wrap any value in a Resolvable
+    force_omegaconf=False,  # if True, will wrap any value in an OmegaConf DictConfig
 ) -> Resolvable[T]:
     """
     Return a Resolvable object from a value and a target type.
@@ -293,11 +290,13 @@ def make_resolvable(
 
     original_target_type = target_type
 
-    value = value or {}
+    if value is None:
+        value = {}
+
 
     if isinstance(value, Resolvable):
         target_type = value.target_type
-        value = deepcopy(value.config)
+        value = copy(value.config)
         log.debug('value is already a Resolvable, using target_type=%s', target_type)
     else:
         if not is_dictlike(value):
@@ -314,22 +313,14 @@ def make_resolvable(
 
     assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}'
 
-    # now there is the case where this dictlike actually codes for a Resolvable
-    # This happens when the object we're dumping has some attributes that are themselves resolvables
-    # Calling model_dump on the object will recursively call model_dump on the children attributes
-    # since these children are Resolvable objects, the resolvable model_dump is going to be called.
-    # One thing  could do instead of this is to override Resolvable's model_dump to only dump the
-    # inner config, to which it can maybe add its information by overriding the _target_ field?
-
-    # if '__resolvable__' in value:
-    # log.debug('Value is a Resolvable in dictlike form, extracting target_type and config')
-    # target_type = get_type(value['target_type'])
-    # value = value['config']
+    if force_omegaconf:
+        value = DictConfig(value)
 
     if not isinstance(target_type, type):
         raise ValueError(f'Invalid target type {target_type}')
 
-    original_target_type = original_target_type or target_type
+    if original_target_type is None:
+        original_target_type = target_type
 
     if not issubclass(target_type, original_target_type):
         raise ValueError(f'Invalid {target_type=} is unrelated to {original_target_type=}')
@@ -394,9 +385,10 @@ def resolved(resolvable: Any, resolvers=None):
     """
 
     if not isinstance(resolvable, Resolvable):
-        return deepcopy(resolvable)
+        return copy(resolvable)
 
-    resolvers = resolvers or {}
+    if resolvers is None:
+        resolvers = {}
 
     log.debug('Resolving %s', resolvable)
 
@@ -405,3 +397,4 @@ def resolved(resolvable: Any, resolvers=None):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}#
+

@@ -1,9 +1,19 @@
 # {{{                        --     imports     -
 
+from time import time
+import matplotlib.pyplot as plt
 from functools import partial
 from typing import Annotated
-from biocomptools.toollib.resolvable import make_resolvable, resolved, Resolvable, resolvable, ResolvableOr
+from biocomptools.toollib.resolvable import (
+    make_resolvable,
+    resolved,
+    Resolvable,
+    resolvable,
+    ResolvableOr,
+)
 from biocomptools.toollib.inheritable import merged_into
+import biocomp.utils as ut
+import biocomp.datautils as du
 from biocomp.utils import PartialFunction, ArbitraryModel
 from copy import deepcopy
 import logging
@@ -97,51 +107,29 @@ job_cfg.extra.base_figure_maker
 
 job = pl.PlotJob.model_validate(job_cfg)
 
+
+# ray log to warn:
+raylog = logging.getLogger('ray')
+raylog.setLevel(logging.WARN)
+jaxlog = logging.getLogger('jax')
+jaxlog.setLevel(logging.WARN)
+
+# time0 = time()
+# job.run_tasks()
+# time1 = time()
+# print(f'Time to run tasks: {time1 - time0:.2f} seconds')
+
+
+t2 = time()
+ftasks = job.generate_figure_tasks()
+for task in ftasks:
+    task.run()
+t3 = time()
+print(f'Time to run figure tasks: {t3 - t2:.2f} seconds')
+
+
+plt.show()
+
 ##────────────────────────────────────────────────────────────────────────────}}}##
 
-from time import time
-
-time0 = time()
-ftasks = job.generate_figure_tasks()
-time1 = time()
-
-for task in ftasks:
-    print(f'{task.context=}')
-    print()
-
-log.info(f'Generated {len(ftasks)} plot tasks in {time1 - time0:.2f} seconds')
-
-## {{{              --     tests for some directly from python     --
-
-HELLO = 'hello world'
-pcfg = pl.PlotConfig(rc_context={'hey': 120000})
-pf = PartialFunction(func=lambda: 'hello world')
-pt = pl.PlotTask(plot_method=pf)
-fmaker = pl.SingleFigure(plot_tasks=[pt])
-dsource = pl.RawDataSource(
-    data_path='~/Dropbox (MIT)/Biocomp/Experiments/2023-10-01_Cascades_CCv4/data/calibrated_data_v3/8xCsy4R_CasE.2023-10-01_Cascades_CCv4.csv',
-    input_columns=["EBFP2", "MKO2", "MNEONGREEN"],
-    output_column="1XIRFP720",
-)
-job = pl.PlotJob(data_source=dsource, figure_maker=fmaker, plot_config=pcfg)
-
-ds = resolved(job.data_source)
-assert (resolved(ds.plot_config).rc_context == {'hey': 120000})
-
-rfm = resolved(job.figure_maker)
-assert(type(rfm) == pl.SingleFigure)
-
-rds = resolved(ds)
-rfm2 = resolved(ds.figure_maker)
-assert(type(rfm2) == pl.SingleFigure)
-
-rds.make_figure_tasks()
-ftasks = job.generate_figure_tasks()
-assert len(ftasks) == 1
-for task in ftasks:
-    assert resolved(task.plot_config).rc_context == {'hey': 120000}
-    print(task.run())
-    assert task.run() == [HELLO]
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
