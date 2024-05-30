@@ -4,11 +4,18 @@ local_conf_file: ${oc.env:BIOCOMP_LOCAL_CONFIG_FILE, ???}
 protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
 
 db:
-  name: ${oc.env:BIOCOMP_DB_NAME, 'biocomp'}
-  user: ${oc.env:BIOCOMP_DB_USER, 'biocomp'}
-  port: ${oc.env:BIOCOMP_DB_PORT, 5432}
-  pass: ${oc.env:BIOCOMP_DB_PASS, ???}
-  host: ${oc.env:BIOCOMP_DB_HOST, ???}
+  postgre:
+    name: ${oc.env:BIOCOMP_DB_NAME, 'biocomp'}
+    user: ${oc.env:BIOCOMP_DB_USER, 'biocomp'}
+    port: ${oc.env:BIOCOMP_DB_PORT, 5432}
+    pass: ${oc.env:BIOCOMP_DB_PASS, ???}
+    host: ${oc.env:BIOCOMP_DB_HOST, ???}
+  sqlite:
+    path: ${oc.env:BIOCOMP_SQLITE_DB_PATH, ${...paths.root}/biocompdb.sqlite}
+    backup:
+      dir: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_DIR, ${....paths.root}/db_backups/}
+      keep_n: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_KEEP_N, 50}
+
 
 paths:
   root: ${oc.env:BIOCOMP_ROOT, '/Users/jeandisset/Dropbox (MIT)/Biocomp'}

@@ -13,12 +13,18 @@ cases:
 
   2: # if input is 2D we make a smooth (gaussian averaged) heatmap
     _target_: SingleFigure
+
+    figure_spec:
+      output_file: "${ftask: data.0.metadata.title}_2dheatmap.png"
+      extra_args:
+        dpi: 400
+
     plot_tasks:
       - plot_method:
           func: biocomp.plotutils.smooth
           kwargs:
             plot_data: "${ftask: data.0}"
-            ax: "${ptask: context.figure.flatax}"
+            ax: "${ptask: context.figure.flat_ax}"
 
 
   3: # in 3d, we produce 2 things: a sequence of frames going through the z-axis, and a single figure with 4 subplots at different z-slices
@@ -26,24 +32,18 @@ cases:
     figure_makers:
       # video: make 10 frames (each on its own figure) going through the z-axis
       - _target_: MultiFigure
-        n_repeats: 2 # duplicates the below figure_maker 10 times
+        n_repeats: 30 # duplicates the below figure_maker 10 times
         figure_makers:
           _target_: SingleFigure # each repeat will produce a single figure
           figure_spec:
-            output_file: "${ftask: data.0.metadata.title}_3D/frame_${ftask: context.multifigure_index}.png"
-          run_after:
-            - func: biocomptools.toollib.plot.make_video
-              kwargs:
-                input_file_pattern: "${ftask: figure_spec.output_dir}/${ftask: data.0.metadata.title}_3D/frame_*.png"
-                output_file: "${ftask: figure_spec.output_dir}/${ftask: data.0.metadata.title}_3D.mp4"
-                fps: 10
-
+            output_file: "${ftask: data.0.metadata.title}_3Dframes/frame_${ftask: context.multifigure_index}.png"
+          
           plot_tasks:
             - plot_method:
                 func: biocomp.plotutils.smooth
                 kwargs:
                   plot_data: "${ftask: data.0}"
-                  ax: "${ptask: context.figure.flatax}"
+                  ax: "${ptask: context.figure.flat_ax}"
 
           plot_config:
             callstack_params:
@@ -53,26 +53,27 @@ cases:
                     "${func: numpy.interp, ${ptask: context.multifigure_index}, [0, ${func: numpy.subtract, ${ptask: context.multifigure_n_repeats}, 1}], [0.05, 0.6]}",
                   ]
 
-      # slices: make a single figure with 4 subplots in a row at different z-values
-#      - _target_: SingleFigure
-        #n_plot_tasks: 1
+                  # slices: make a single figure with 4 subplots in a row at different z-values
+      - _target_: SingleFigure
+        n_plot_tasks: 1
 
-        #plot_config:
-          #callstack_params:
-            #smooth_3d_params:
-              ##zslices: "${func: numpy.linspace, ${ptask: plot_config.general.zlims.0}, ${ptask: plot_config.general.zlims.1},  ${ptask: context.figure.n_axes}}"
-              #zslices: [0.05, 0.25, 0.4, 0.55]
+        plot_config:
+          callstack_params:
+            smooth_3d_params:
+              #zslices: "${func: numpy.linspace, ${ptask: plot_config.general.zlims.0}, ${ptask: plot_config.general.zlims.1},  ${ptask: context.figure.n_axes}}"
+              zslices: [0.05, 0.25, 0.4, 0.55]
 
-        #figure_spec:
-          #output_file: "${ftask: data.0.metadata.title}_slices.png"
-          #layout:
-            #_target_: biocomp.plotutils.SimpleLayout
-            #rows: 1
-            #cols: 4
+        figure_spec:
+          output_file: "${ftask: data.0.metadata.title}_slices.png"
+          layout:
+            _target_: biocomp.plotutils.SimpleLayout
+            rows: 1
+            cols: 4
 
-        #plot_tasks:
-          #- plot_method:
-              #func: biocomp.plotutils.smooth
-              #kwargs:
-                #plot_data: "${ftask: data.0}"
-#                ax: "${ptask: context.figure.flatax}" # all axes in the row.
+        plot_tasks:
+          - plot_method:
+              func: biocomp.plotutils.smooth
+              kwargs:
+                plot_data: "${ftask: data.0}"
+                ax: "${ptask: context.figure.flat_ax}" # all axes in the row.
+

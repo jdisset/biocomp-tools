@@ -32,15 +32,19 @@ from rich import print as rprint
 # import common as cm
 # from biocomp.datautils import DEFAULT_DATA_CONFIG
 
+from pydantic import BaseModel
 
 import logging
 from biocomptools.toollib import common as cm
 from biocomptools.toollib import plot as pl
 
 from omegaconf import OmegaConf
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 config = cm.load_config()
+
+config.db.sqlite
 prog = cm.CLIProgram()
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
@@ -52,11 +56,10 @@ DEFAULT_CALIB_NAMES = list(config.calib.names)
 DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
 DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
 DEFAULT_XP_CACHE_DIR = config.paths.cache.xp
+
 BIOCOMP_ROOT = config.paths.root
 
-DEFAULT_XP_PATH
-DEFAULT_RECIPE_PATH
-
+config.paths.cache
 
 ### {{{                --     arg declaration and parsing     --
 
@@ -87,7 +90,6 @@ logging.getLogger('jax').setLevel(logging.WARNING)
 # completely silence biocomp's logger (including warning and error messages)
 logging.getLogger('biocomp').setLevel(logging.CRITICAL)
 
-
 # rich console
 from rich.console import Console
 
@@ -114,7 +116,7 @@ for xp_dir in tqdm(xp_folders, desc='loading experiments'):
 
     base_xp_path = xp_dir.parent
 
-    xp = bc.XP(
+    new_xp = bc.XP(
         xp_dir.name,
         base_xp_path,
         recipe_path=prog.recipe_paths,
@@ -125,14 +127,14 @@ for xp_dir in tqdm(xp_folders, desc='loading experiments'):
         show_progress=False,
     )
 
-    recipe_loading_errors = xp.recipe_loading_errors
-    xp_entries[xp.name] = {
-        'name': xp.name,
-        'transfection_date': xp.transfection_date,
+    recipe_loading_errors = new_xp.recipe_loading_errors
+    xp_entries[new_xp.name] = {
+        'name': new_xp.name,
+        'transfection_date': new_xp.transfection_date,
         'path': Path(xp_dir).relative_to(prog.base_dir),
-        'recipe_errors': xp.recipe_loading_errors,
+        'recipe_errors': new_xp.recipe_loading_errors,
     }
-    xp_objs[xp.name] = xp
+    xp_objs[new_xp.name] = new_xp
 
 
 logger.info(f'found {len(xp_entries)} experiments')
@@ -160,10 +162,10 @@ def calibration_info(xppath, calib_paths=prog.calib_paths, calib_names=prog.cali
     return calib_type, calib_plot, calib_path
 
 
-for xp in xp_entries.values():
-    calib_type, calib_plot, _ = calibration_info(BIOCOMP_ROOT / xp['path'])
-    xp['calibration_version'] = calib_type
-    xp['has_calibration_diagnostics'] = calib_plot
+for new_xp in xp_entries.values():
+    calib_type, calib_plot, _ = calibration_info(BIOCOMP_ROOT / new_xp['path'])
+    new_xp['calibration_version'] = calib_type
+    new_xp['has_calibration_diagnostics'] = calib_plot
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -174,27 +176,27 @@ total_samples = sum([len(x.samples) for x in xp_objs.values()])
 logger.info(f'Building networks for {total_samples} samples')
 progress = tqdm(total=total_samples, desc='Building networks')
 
-for xpname, xp in list(xp_objs.items())[:]:
+for xpname, new_xp in list(xp_objs.items())[:]:
     is_ok = True
     progress.set_description(f'Building networks for {xpname}')
-    networks, sample_names = xp.build_networks(
+    networks, sample_names = new_xp.build_networks(
         ignore_errors=True,
         inverse='all',
         use_cache=config.paths.cache.networks,
         progress_callback=lambda _: progress.update(1),
     )
-    X, Y = xp.get_XY(networks, sample_names, ignore_errors=True)
-    if xp.network_building_errors:
+    X, Y = new_xp.get_XY(networks, sample_names, ignore_errors=True)
+    if new_xp.network_building_errors:
         is_ok = False
-    if xp.data_loading_errors:
+    if new_xp.data_loading_errors:
         is_ok = False
-    xp_entries[xpname]['network_building_errors'] = xp.network_building_errors
-    xp_entries[xpname]['data_loading_errors'] = xp.data_loading_errors
+    xp_entries[xpname]['network_building_errors'] = new_xp.network_building_errors
+    xp_entries[xpname]['data_loading_errors'] = new_xp.data_loading_errors
     assert len(networks) == len(X) == len(Y)
     for i, net_entry in enumerate(networks):
         if net_entry:
             sname = sample_names[i]
-            data_file = xp.get_sample_data_file(sname, ignore_errors=True)
+            data_file = new_xp.get_sample_data_file(sname, ignore_errors=True)
             # subtract prog.xp_path from data_file to get the relative path:
             if data_file is not None:
                 data_file = Path(data_file).relative_to(prog.base_dir)
@@ -210,6 +212,8 @@ for xpname, xp in list(xp_objs.items())[:]:
                 'recipe_name': net_entry.metadata['recipe_name'],
                 'recipe_file': recipe_file,
                 'data_file': data_file,
+                # 'network_info': net_entry.metadata.get('network_info', None),
+                'network_info': bc.network.generate_network_info(net_entry),
             }
             all_networks.append(net_entry)
 
@@ -224,74 +228,191 @@ for xpname, xp in list(xp_objs.items())[:]:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
-### {{{        --     add architecture family, sequestron type, ...     --
+
+## {{{                   --     connect and backup db     --
+
+from copy import deepcopy
+import sqlite3
+import xxhash
+import biocomptools.toollib.models as md
+from typing import TypeVar, List
+import shutil
+import difflib
+from sqlalchemy.orm.exc import NoResultFound
+from sqlalchemy.inspection import inspect
+from sqlmodel import tuple_
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from typing import Type
+
+M = TypeVar('M', bound=BaseModel)
+SQL_M = TypeVar('SQL_M', bound=SQLModel)
 
 
-def flatten(l):
-    return [item for sublist in l for item in sublist]
+def get_db_hash(db_path: str | Path) -> str:
+    db_path = Path(db_path)
+    conn = sqlite3.connect(db_path)
+    db_full_dump = '\n'.join(conn.iterdump())
+    conn.close()
+    return xxhash.xxh128(db_full_dump).hexdigest()
 
 
-local_savedir = Path('~/ResearchMisc/biocomp/').expanduser()
-local_savedir.mkdir(parents=True, exist_ok=True)
-url_base = 'https://jdisset.com/biocomp'
+def backup_db_if_changed(db_path=config.db.sqlite.path, db_backup_dir=config.db.sqlite.backup.dir):
+    db_path = Path(db_path)
+    db_backup_dir = Path(db_backup_dir)
 
-for net_entry in tqdm(all_networks, desc='Adding network metadata'):
-    net = net_entry['network']
-    arch, seqtype = ut.get_network_family(net)
-    uorf_vals, uorf_names = ut.get_all_uorf_values(net)
-    cdg = net.central_dogma_graph
-    genes = flatten(cdg[cdg.type == 'PRT']['content'].tolist())
-    new_entry = {
-        'xp': net.metadata['from_xp'],
-        'name': net.name,
-        'sequestron_type': seqtype,
-        'architecture': arch,
-        'ern_names': ', '.join(ut.get_all_ERNs_names(net)),
-        'uorf_values': ', '.join([str(v) for v in uorf_vals]),
-        'uorf_names': ', '.join(flatten(uorf_names)),
-        'genes': ', '.join(genes),
-        'markers': ', '.join(net.get_inverted_input_proteins()),
-        'output_proteins': ', '.join(net.get_output_proteins()),
-    }
-    net_entry.update(new_entry)
+    db_backup_dir.mkdir(parents=True, exist_ok=True)
+    existing_backups = sorted(db_backup_dir.glob(f'{db_path.stem}_*.sqlite'))
+    latest_backup = None if not existing_backups else existing_backups[-1]
+
+    new_db_backup_path = (
+        db_backup_dir / f'{db_path.stem}_{time.strftime("%Y-%m-%d_%Hh%Mm%Ss")}.sqlite'
+    )
+
+    if latest_backup is not None:
+        latest_backup_hash = get_db_hash(latest_backup)
+        current_hash = get_db_hash(db_path)
+        if latest_backup_hash == current_hash:
+            logger.info(f'no changes in db, skipping backup')
+            return
+
+    logger.info(f'backing up db to {new_db_backup_path}')
+    shutil.copy(db_path, new_db_backup_path)
 
 
-##────────────────────────────────────────────────────────────────────────────}}}##
+def diff_strings(a: str, b: str) -> str:
+    output = []
+    matcher = difflib.SequenceMatcher(None, a, b)
+    ADD_COLOR = '\x1b[38;5;16;48;5;78m'
+    DEL_COLOR = '\x1b[38;5;16;48;5;210m'
+    END_ADD = '\x1b[0m'
+    END_DEL = '\x1b[0m'
+    for opcode, a0, a1, b0, b1 in matcher.get_opcodes():
+        if opcode == 'equal':
+            output.append(a[a0:a1])
+        elif opcode == 'insert':
+            output.append(f'{ADD_COLOR}{b[b0:b1]}{END_ADD}')
+        elif opcode == 'delete':
+            output.append(f'{DEL_COLOR}{a[a0:a1]}{END_DEL}')
+        elif opcode == 'replace':
+            output.append(f'{ADD_COLOR}{b[b0:b1]}{END_ADD}')
+            output.append(f'{DEL_COLOR}{a[a0:a1]}{END_DEL}')
+    return ''.join(output)
+
+
+def merge_model(mA: M, mB: M, priorities_A=[], except_if_null=True):
+    """Merge B into A, keeping the values from A if they are in priorities_A,
+    and from B otherwise. If except_if_null is True, then values from B that are None are not copied
+    """
+    ma_dump = mA.model_dump()
+    for k, v in mB.model_dump().items():
+        if k in priorities_A:
+            continue
+        if except_if_null and v is None:
+            continue
+        ma_dump[k] = v
+    mA.model_validate(ma_dump)
+
+
+def print_model_diff(mA: M, mB: M):
+    """Print the differences between two models"""
+    ma_dump = mA.model_dump()
+    mb_dump = mB.model_dump()
+    for k in ma_dump.keys():
+        if k not in mb_dump:
+            print(f'Model B does not have key {k}')
+        elif ma_dump[k] != mb_dump[k]:
+            print(f'{k}: {diff_strings(str(ma_dump[k]), str(mb_dump[k]))}')
+    for k in mb_dump.keys():
+        if k not in ma_dump:
+            print(f'Model A does not have key {k}')
+
+
+def update_records(new_records: List[SQL_M], merge_keep: list[str] = []):
+    model_type = type(new_records[0])
+    engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path, False)
+    backup_db_if_changed()
+
+    keys = inspect(model_type).primary_key
+
+    def get_key(record):
+        return tuple(getattr(record, k.name) for k in keys)
+
+    with Session(engine) as session:
+        for new_record in new_records:
+            try:
+                cur_record = session.exec(
+                    select(model_type).where(tuple_(*get_key(model_type)) == get_key(new_record))
+                ).one()
+            except NoResultFound:
+                rprint(f'[bold green]adding new record {new_record}[/bold green]')
+                session.add(new_record)
+                session.commit()
+            else:
+                old_record = deepcopy(cur_record)
+                merge_model(cur_record, new_record, priorities_A=merge_keep)
+                if cur_record == old_record:
+                    rprint(f'[bold blue]{get_key(new_record)}[/bold blue] has no changes')
+                else:
+                    rprint(f'[bold yellow]updating record {new_record}[/bold yellow]')
+                    print_model_diff(old_record, cur_record)
+                    session.add(cur_record)
+                    session.commit()
+                    session.refresh(cur_record)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                  --     create and update xpdf     --
 
 xpdf = pd.DataFrame(xp_entries).T
+
 # replace all the *_errors types to string
+
 error_cols = sorted([col for col in xpdf.columns if '_errors' in col])
 for col in error_cols:
     xpdf[col] = xpdf[col].astype(str)
     xpdf[col] = xpdf[col].apply(lambda x: x.replace('nan', ''))
 
-# cm.insert_or_update_table(xpdf, 'experiment', 'name')
+all_xps = [md.Experiment(**row.to_dict()) for i, row in xpdf.iterrows()]
 
-cm.update_table(xpdf, 'experiment', 'name')
+# now we can update all the xps
+backup_db_if_changed()
+update_records(all_xps, merge_keep=['comments'])
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                  --     create and update netdf     --
+
 netdf = pd.DataFrame(all_networks)
-netdf = netdf.drop(columns=['network'])
 
-# compute unique names
-unique_names = []
-for i, row in netdf.iterrows():
-    n = f'{row["recipe_name"]}_{row["xp"]}_{"-".join(row["markers"].split(", "))}'
-    unique_names.append(n)
-netdf['name'] = unique_names
-n_names = len(netdf['name'].unique())
-if n_names != len(netdf):
-    raise ValueError(f'found {len(netdf)} networks, but {n_names} unique names')
+all_networks = [
+    md.Network.model_validate({'name': '', **row.to_dict()}) for i, row in netdf.iterrows()
+]
+all_names = set()
+for n in all_networks:
+    if n.network_info is None:
+        print(f'network {n.name} has no network_info')
+        print(n)
+    n.name = n.generate_unique_name()
+    if n.name in all_names:
+        raise ValueError(f'duplicate name {n.name}')
+    all_names.add(n.name)
+    if type(n.recipe_file) is not str:
+        print(f'network {n.name} has recipe path of type {type(n.recipe_file)}')
 
-# check that each xp exists in the experiment table
-for xp in netdf['xp'].unique():
-    if xp not in xpdf.index:
-        raise ValueError(f'xp {xp} not found in experiment table')
+##
+backup_db_if_changed()
 
-cm.update_table(netdf, 'network', 'name')
+# clear the entire table
+from sqlalchemy import delete
+engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path, False)
+with Session(engine) as session:
+    session.exec(delete(md.Network))
+    session.commit()
+
+
+update_records(all_networks, merge_keep=['data_quality', 'comments'])
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

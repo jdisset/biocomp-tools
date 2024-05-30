@@ -9,6 +9,11 @@ general:
     grey: '#777777'
 
 rc_context:
+
+  savefig.pad_inches:  0.2
+  savefig.dpi: 300
+
+  figure.dpi: 300
   figure.facecolor: white
 
   axes.labelcolor: ${general.colors.grey}
@@ -80,7 +85,6 @@ rc_context:
 
   text.latex.preamble: \usepackage{cmbright}
   text.usetex: true
-
 
 
 callstack_params:

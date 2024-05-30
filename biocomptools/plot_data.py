@@ -12,6 +12,7 @@ from biocomptools.toollib.resolvable import (
     ResolvableOr,
 )
 from biocomptools.toollib.inheritable import merged_into
+from biocomptools.toollib.configutils import load_hydra_config_file
 import biocomp.utils as ut
 import biocomp.datautils as du
 from biocomp.utils import PartialFunction, ArbitraryModel
@@ -40,73 +41,15 @@ log.setLevel(logging.INFO)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                   --     plugin for searchpath     --
-
-
-class BiocompSearchPathPlugin(SearchPathPlugin):
-    def manipulate_search_path(self, search_path: ConfigSearchPath) -> None:
-        search_path.append(provider="biocomptools", path="pkg://biocomptools/configs")
-
-
-Plugins.instance().register(BiocompSearchPathPlugin)
-
-
-def reset_hydra(config_dir=None):
-    GlobalHydra.instance().clear()
-    if config_dir is not None:
-        config_dir_path = Path(config_dir).expanduser().resolve().absolute()
-        print(f'Initializing hydra with config dir {config_dir_path}')
-        # make absolute:
-        assert config_dir_path.exists()
-        assert config_dir_path.is_dir()
-        initialize_config_dir(config_dir=config_dir, version_base="1.3")
-    else:
-        initialize(version_base="1.3")
-
-
-"""
-Utils for plotting data in various ways, from the network representation of an experiment.
-It can build this network from scratch given a recipe, library and data file, or it can
-use a database file to load the network and plot it.
-Uses plotjob descriptions to define the plot to be made, and the data to be used.
-"""
-
-# ut.generate_full_nested_config(namespace='biocomp.plotutils')
-# print(ut.dump_default_config('biocomp.plotutils'))
-
-# rprint(OmegaConf.to_yaml(cfg))
-# rprint(OmegaConf.to_yaml(cfg.data_location))
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                         --     load cfg     --
 
-log = logging.getLogger('biocomptools.biocomplot')
-log.setLevel(logging.DEBUG)
-from biocomptools.toollib.plot import PlotTask, PlotConfig, FigureMaker, DataSource
+# JOB_FILE = '~/Code/Weiss/playground/plot_jobs/uorf_matrices.yaml'
+JOB_FILE = '~/Code/Weiss/playground/local_job.yaml'
+JOB_FILE = '~/Code/Weiss/playground/local_job.yaml'
+JOB_FILE = '~/Code/Weiss/playground/georg_job.yaml'
 
-reset_hydra()
-
-# cs = ConfigStore.instance()
-# cs.store(group="figure", name="default_figure", node=pu.FigureSpec)
-# cs.store(name="base_plotjob", node=pl.PlotJob)
-# base_cfg = compose(config_name="base_plotjob")
-
-plot_job_file = '~/Code/Weiss/playground/local_job.yaml'
-plot_file_path = Path(plot_job_file).expanduser().resolve().absolute()
-if not plot_file_path.exists():
-    raise ValueError(f'Plot job file {plot_file_path} does not exist')
-file_dir = Path(plot_file_path).parent.resolve().absolute().as_posix()
-file_ext = plot_file_path.suffix
-
-reset_hydra(config_dir=file_dir)
-# job_cfg = compose(config_name=plot_file_path.stem, return_hydra_config=True)
-job_cfg = compose(config_name=plot_file_path.stem)
-job_cfg.extra.base_figure_maker
-
-job = pl.PlotJob.model_validate(job_cfg)
-
+job = pl.PlotJob.model_validate(load_hydra_config_file(JOB_FILE))
 
 # ray log to warn:
 raylog = logging.getLogger('ray')
@@ -114,22 +57,55 @@ raylog.setLevel(logging.WARN)
 jaxlog = logging.getLogger('jax')
 jaxlog.setLevel(logging.WARN)
 
-# time0 = time()
-# job.run_tasks()
-# time1 = time()
-# print(f'Time to run tasks: {time1 - time0:.2f} seconds')
+time0 = time()
+job.run_tasks_sequential()
+time1 = time()
+print(f'Time to run tasks: {time1 - time0:.2f} seconds')
 
 
-t2 = time()
-ftasks = job.generate_figure_tasks()
-for task in ftasks:
-    task.run()
-t3 = time()
-print(f'Time to run figure tasks: {t3 - t2:.2f} seconds')
-
-
-plt.show()
+# # find all dirs with *3Dframes at the end:
+# frame_dirs = list(Path('./output_plot').glob('*3Dframes'))
+# for frame_dir in frame_dirs:
+# print(f'Processing {frame_dir}')
+# pl.make_video(input_file_pattern=f'{frame_dir}/frame_%d.png',
+# output_file=f'{frame_dir}.mp4',
+# fps=15)
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
+georg_xpdir = Path("~/Dropbox (MIT)/Biocomp/Experiments/miR_bandpass").expanduser()
+df = pd.read_csv(georg_xpdir / "csv_jean.csv", index_col=0)
+##
+# mkdir for calib raw:
+calib_dir = georg_xpdir / "calibration/controls/gated"
+calib_dir.mkdir(exist_ok=True, parents=True)
 
+tube_dir = georg_xpdir / "tubes"
+tube_dir.mkdir(exist_ok=True, parents=True)
 
+# list all tube names:
+tube_names = df['TUBE_NAME'].unique()
+
+cdf = df[(df['Cells']) & (~df['singlets'])]
+
+color_controls = {
+    'mNeongreen': cdf[cdf['TUBE_NAME'] == 'A1'],
+    'eBFP2': cdf[cdf['TUBE_NAME'] == 'A2'],
+    'mKO2': cdf[cdf['TUBE_NAME'] == 'A3'],
+    'mMaroon1': cdf[cdf['TUBE_NAME'] == 'A4'],
+    'all': cdf[cdf['TUBE_NAME'] == 'A5'],
+    'empty': cdf[cdf['TUBE_NAME'] == 'A6'],
+}
+
+tubes = {tbname: df[df['TUBE_NAME'] == tbname] for tbname in tube_names if not tbname.startswith('A')}
+
+exclude_columns = ['TUBE_NAME', 'Cells', 'singlets']
+columns = [col for col in df.columns if col not in exclude_columns]
+
+# save
+for cname, c in color_controls.items():
+    c[columns].to_csv(calib_dir / f'{cname}.csv', index=False)
+
+for tbname, t in tubes.items():
+    t[columns].to_csv(tube_dir / f'{tbname}.csv', index=False)
+
+print('Done')

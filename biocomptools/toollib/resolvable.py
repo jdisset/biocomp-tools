@@ -212,6 +212,7 @@ class Resolvable(ArbitraryModel, Generic[T]):
     dump_target: bool = True # add a _target_ key to the dumped config
 
     def model_post_init(self, *_):
+        # self.__orig_class__ = Resolvable[T]
         log.debug('Resolvable post-init: %s', self)
 
     def resolve(self):
@@ -279,7 +280,8 @@ def make_resolvable(
     name: Optional[str] = None,
     clsname: Optional[str] = None,
     force_resolvable=True,  # if True, will attempt to wrap any value in a Resolvable
-    force_omegaconf=False,  # if True, will wrap any value in an OmegaConf DictConfig
+    to_omegaconf=False,  # if True, will anntempt to wrap any value in an OmegaConf DictConfig
+    silent_fail=False,  # if True, will not raise an error if the value is not dict-like
 ) -> Resolvable[T]:
     """
     Return a Resolvable object from a value and a target type.
@@ -313,8 +315,13 @@ def make_resolvable(
 
     assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}'
 
-    if force_omegaconf:
-        value = DictConfig(value)
+    if to_omegaconf:
+        try:
+            value = DictConfig(value)
+        except Exception as e:
+            if not silent_fail:
+                raise ValueError(f'Invalid {value=} for {target_type=}')
+            log.warning('Failed to convert to OmegaConf: %s\nFallin back to raw dict', e)
 
     if not isinstance(target_type, type):
         raise ValueError(f'Invalid target type {target_type}')
@@ -327,12 +334,13 @@ def make_resolvable(
 
     assert is_dictlike(value), f'Invalid {value=} for {target_type}'
 
-    return Resolvable[T](
+    r = Resolvable[target_type](
         target_type=target_type,
         config=value,  # type: ignore
         name=name,
         clsname=clsname,
     )
+    return r
 
 
 def make_resolvable_validator(target_type, **kw) -> Callable:

@@ -187,3 +187,38 @@ assert isinstance(rptr.plot_method, Resolvable)
 assert resolved(rptr.plot_method)() == HELLO
 
 print(resolved(rptr.plot_method)())
+
+
+## {{{              --     tests for some directly from python     --
+
+HELLO = 'hello world'
+pcfg = pl.PlotConfig(rc_context={'hey': 120000})
+pf = PartialFunction(func=lambda: 'hello world')
+pt = pl.PlotTask(plot_method=pf)
+fmaker = pl.SingleFigure(plot_tasks=[pt])
+dsource = pl.RawDataSource(
+    data_path='~/Dropbox (MIT)/Biocomp/Experiments/2023-10-01_Cascades_CCv4/data/calibrated_data_v3/8xCsy4R_CasE.2023-10-01_Cascades_CCv4.csv',
+    input_columns=["EBFP2", "MKO2", "MNEONGREEN"],
+    output_column="1XIRFP720",
+)
+job = pl.PlotJob(data_source=dsource, figure_maker=fmaker, plot_config=pcfg)
+
+ds = resolved(job.data_source)
+assert (resolved(ds.plot_config).rc_context == {'hey': 120000})
+
+rfm = resolved(job.figure_maker)
+assert(type(rfm) == pl.SingleFigure)
+
+rds = resolved(ds)
+rfm2 = resolved(ds.figure_maker)
+assert(type(rfm2) == pl.SingleFigure)
+
+rds.make_figure_tasks()
+ftasks = job.generate_figure_tasks()
+assert len(ftasks) == 1
+for task in ftasks:
+    assert resolved(task.plot_config).rc_context == {'hey': 120000}
+    print(task.run())
+    assert task.run() == [HELLO]
+
+##────────────────────────────────────────────────────────────────────────────}}}

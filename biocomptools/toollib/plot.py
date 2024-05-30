@@ -1,4 +1,5 @@
 ## {{{                          --     imports     -
+import glob
 from dataclasses import fields
 from omegaconf import OmegaConf
 from omegaconf import DictConfig, ListConfig
@@ -23,6 +24,7 @@ from biocomp import plotutils as pu
 from biocomp.plotutils import FigureSpec, PlotData, FigAx
 from biocomp.datautils import DataRescaler
 
+import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import ArbitraryTargetModel
 from biocomptools.toollib.inheritable import (
     merged_into,
@@ -32,6 +34,7 @@ from biocomptools.toollib.inheritable import (
 from biocomptools.toollib.resolvable import (
     resolved,
     resolvable,
+    make_resolvable_validator,
     make_resolvable,
     ResolvableOr,
     Resolvable,
@@ -98,6 +101,7 @@ pillow_logger.setLevel(logging.WARNING)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                           --     types     --
 
 T = TypeVar('T')
@@ -105,9 +109,16 @@ ListOrSingle = Union[List[T], T]
 DictLike = Union[Dict, DictConfig]
 
 
-resolvable = partial(resolvable, force_omegaconf=True)
+def annotated_resolvable_type(t: Type[T]):
+    return Annotated[
+        ResolvableOr[t],
+        BeforeValidator(make_resolvable_validator(t, to_omegaconf=True)),
+        Field(validate_default=True),
+    ]
 
-ResolvableDict = Annotated[ResolvableOr[dict], *resolvable(dict)]
+
+resolvable = partial(resolvable, to_omegaconf=True)
+ResolvableDict = Annotated[ResolvableOr[Dict[Any, Any]], *resolvable(dict)]
 ResolvableFigureSpec = Annotated[ResolvableOr[FigureSpec], *resolvable(FigureSpec)]
 THIS_MODULE_NAME = __name__.split('.')[0]
 
@@ -178,7 +189,10 @@ from importlib import import_module
 def obj_resolver(obj: Any, attr_path: str):
     res = obj
     for attr in attr_path.split('.'):
-        res = obj_get(res, attr)
+        try:
+            res = obj_get(res, attr)
+        except (AttributeError, KeyError, IndexError) as e:
+            raise AttributeError(f'Could not resolve {attr_path} in {type(obj)} instance: {e}')
     return res
 
 
@@ -225,11 +239,11 @@ MERGE_EXTEND_LISTS = {
 }
 
 
-def with_context(obj: T, context_dict: Dict[str, Any]) -> T:
+def with_context(obj: T, context_dict: Dict) -> T:
     return merged_into(obj, {'context': context_dict}, 'context', deep=False, **MERGE_EXTEND_LISTS)
 
 
-def resolved_with_context(obj: Resolvable[T], context_dict: Dict[str, Any]) -> T:
+def resolved_with_context(obj: Resolvable[T], context_dict: Dict) -> T:
     return with_context(resolved(obj), context_dict)
 
 
@@ -340,34 +354,38 @@ class PlotTask(ArbitraryTargetModel):
 
     context: Dict = {}  # inherited from parent FigureTask
     plot_config: ResolvablePlotConfig = {}  # the plot config
+
+    # TODO: switch to ResolvableOr, not an automated resolvabler
+
     plot_method: ResolvableFunction = {}  # the function to call
 
     auto_callstack_bind: bool = True  # whether to automatically bind callstack params
 
     def model_post_init(self, *a):
         super().model_post_init(*a)
-        self.context['self'] = self
 
     def run(self):
         with resolvers({**make_resolvers({'ptask': self, 'this': self}), **BASE_RESOLVERS}):
-            print(
-                f"PlotTask with {self.context['figure']=}, with address {id(self.context['figure'])}"
-            )
             pc = resolved(self.plot_config)
             return pc.prepare_func(resolved(self.plot_method), self.auto_callstack_bind)()
 
 
 ResolvablePlotTask = Annotated[ResolvableOr[PlotTask], *resolvable(PlotTask)]
 
+
 def make_video(input_file_pattern, output_file, fps=30, crf=17, vcodec='libx264'):
-    # ffmpeg -i slice_0.png -crf 17 -vcodec libx264 -vf "scale=iw:ih,format=yuv420p,crop=trunc(iw/2)*2:trunc(ih/2)*2" 3d_out.mp4
     import os
-    cmd = f'ffmpeg -y -r {fps} -pattern_type glob -i "{input_file_pattern}" -crf {crf} -vcodec {vcodec} -vf "scale=iw:ih,format=yuv420p,crop=trunc(iw/2)*2:trunc(ih/2)*2" {output_file}'
+
+    cmd = f'ffmpeg -y -r {fps} -i "{input_file_pattern}" -crf {crf} -vcodec {vcodec} -vf "scale=iw:ih,format=yuv420p,crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_file}"'
     print(f'Running command: {cmd}')
     os.system(cmd)
     print(f'Video created at {output_file}')
 
-class FigureTask(ArbitraryTargetModel):
+
+from tqdm import tqdm
+
+
+class FigureTask(ut.ArbitraryModel):
 
     # FigureTasks can be executed in parallel so need to be self-contained
 
@@ -376,8 +394,8 @@ class FigureTask(ArbitraryTargetModel):
     figure_spec: ResolvableFigureSpec = {}
     plot_config: ResolvablePlotConfig = {}
     plot_tasks: List[ResolvablePlotTask] = []
+    extra_tasks: List[ResolvableOr[PartialFunction]] = []
     n_plot_tasks: int = 0  # modes: 0: auto (n_axis), >0: fixed number (tile to it)
-    run_after: List[ResolvableFunction] = []
 
     def make_plot_tasks(self, figax: FigAx) -> List[PlotTask]:
         ntasks = self.context.get('n_plot_tasks', self.n_plot_tasks)
@@ -393,18 +411,23 @@ class FigureTask(ArbitraryTargetModel):
             for i, task in enumerate(self.get_n_plot_tasks(ntasks))
         ]
 
+    @property
+    def flat_data(self):
+        fd = ut.flatten(self.data)
+        return fd
+
     def run(self):
         with resolvers(make_resolvers({'ftask': self, 'this': self})):
             self.figure_spec = resolved(self.figure_spec)
             assert isinstance(self.figure_spec, FigureSpec)
             with mpl.rc_context(rc=resolved(self.plot_config).rc_context):
-                figax = self.figure_spec.make_figure() # type: ignore
+                figax = self.figure_spec.make_figure()  # type: ignore
                 ntasks = self.n_plot_tasks or figax.n_axes
                 self.context['n_plot_tasks'] = ntasks
-                results = [t.run() for t in self.make_plot_tasks(figax)]
-                self.figure_spec.finalize(figax) # type: ignore
-                for func in self.run_after:
-                    resolved(func)()
+                results = [t.run() for t in tqdm(self.make_plot_tasks(figax), desc='Plotting')]
+                for task in self.extra_tasks:
+                    resolved(task)(self, figax)
+                self.figure_spec.finalize(figax)  # type: ignore
 
         return results
 
@@ -418,18 +441,20 @@ class FigureTask(ArbitraryTargetModel):
 
     def get_n_plot_tasks(self, n):
         if len(self.plot_tasks) == 1:
+            figlog.info('FigureTask has only one plot task. Repeating.')
             return self.plot_tasks * n
         elif len(self.plot_tasks) > n:
             figlog.warning(
                 f'FigureTask has {len(self.plot_tasks)} plot tasks, but {n=}. Truncating.'
             )
             return self.plot_tasks[:n]
-        else:
+        elif len(self.plot_tasks) < n:
             figlog.warning(
                 f'FigureTask has {len(self.plot_tasks)} plot tasks, but {n=}. Extending.'
             )
             closest_mult = n // len(self.plot_tasks)
             return self.plot_tasks * closest_mult + self.plot_tasks[: n % len(self.plot_tasks)]
+        return self.plot_tasks
 
 
 ResolvableFigureTask = Annotated[ResolvableOr[FigureTask], *resolvable(FigureTask)]
@@ -449,13 +474,11 @@ class FigureMaker(ArbitraryTargetModel):
     context: ResolvableDict = {}
     plot_tasks: List[ResolvablePlotTask] = []
     n_plot_tasks: int = 0  # modes: 0: auto (n_axis), >0: fixed number
-    run_after: List[ResolvableFunction] = []
 
     def spawn_figure_task(
         self, data, context=None, resolver_dict: Optional[dict[str, Any]] = None
     ) -> FigureTask:
         resolver_dict = resolver_dict or {}
-
         with resolvers(make_resolvers({'this': self, 'data': data, **resolver_dict})):
             task = with_context(
                 spawn(
@@ -465,7 +488,6 @@ class FigureMaker(ArbitraryTargetModel):
                             plot_tasks=self.plot_tasks,
                             data=data,
                             n_plot_tasks=self.n_plot_tasks,
-                            run_after=self.run_after,
                         )
                     ),
                     inherit_attr=INHERIT_ATTRS['FigureMaker']['FigureTask'],
@@ -473,9 +495,6 @@ class FigureMaker(ArbitraryTargetModel):
                 context or {},
             )
             return task
-
-    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
-        raise NotImplementedError('Cannot make tasks from a generic FigureMaker')
 
 
 ResolvableFigureMaker = Annotated[ResolvableOr[FigureMaker], *resolvable(FigureMaker)]
@@ -615,9 +634,9 @@ class DataSource(InheritableAttrsModel):
         with resolvers(make_resolvers({'this': self})):
             figmaker = resolved(self.figure_maker)
             assert len(figmaker.plot_config['callstack_params']) >= 7
-            try:
+            if hasattr(figmaker, 'make_tasks') and callable(figmaker.make_tasks):
                 return figmaker.make_tasks(self.get_data())
-            except NotImplementedError:
+            else:
                 figlog.debug('FigureMaker %s can\'t make tasks', figmaker)
 
         return []
@@ -656,7 +675,9 @@ class DataSourceGroup(DataSource):
     def get_data(self) -> List[PlotData]:
         """Get the data recursively from all the data sources in the group"""
         with resolvers(make_resolvers({'this': self})):
-            return flatten([resolved(src).get_data() for src in self.data_source])
+            return flatten(
+                [resolved(src).get_data() for src in tqdm(self.data_source, desc='Loading data')]
+            )
 
     def make_figure_tasks(self) -> List[FigureTask]:
         tasks = super().make_figure_tasks()  # make tasks with the FigureMaker for this source
@@ -679,42 +700,56 @@ class DataSourceGroup(DataSource):
 ## {{{                          --     Recipe     --
 
 
-class RecipeDataSource(DataSource):
-    # TODO
+def to_str(data: Any) -> Any:
+    if not isinstance(data, str) and data is not None:
+        return str(data)
+    return data
 
-    def __init__(
-        self,
-        data_path: str,
-        recipe_path: str,
-        cache_dir: str,
-        color_aliases: Optional[Dict[str, str]] = None,
-        input_order: Optional[
-            List[str]
-        ] = None,  # TODO make it work with protein names instead of column
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.data_path = data_path
-        self.recipe_path = recipe_path
-        self.cache_dir = cache_dir
-        self.color_aliases = color_aliases
 
-    def resolve(self) -> List[pu.PlotData]:
+ForcedStr = Annotated[str, BeforeValidator(to_str)]
+ForcedOptionalStr = Annotated[Optional[str], BeforeValidator(to_str)]
+
+
+class RecipeDataSource(SpecializedDataSource):
+
+    recipe_path: ForcedStr
+    data_path: ForcedStr
+    cache_dir: ForcedOptionalStr = None
+    color_aliases: Optional[Dict[str, str]] = cm.config.protein_aliases
+    input_order: Optional[List[int]] = None
+
+    def get_data(self) -> List[pu.PlotData]:
         lib = ut.load_lib()
         recipe_file = Path(self.recipe_path).expanduser().resolve()
         data_file = Path(self.data_path).expanduser().resolve()
         candidate_networks = bc.recipe.network_from_recipe(
             recipe_file, lib, inverse='shortest', use_cache=self.cache_dir
         )
+        assert isinstance(candidate_networks, list)
         if len(candidate_networks) == 0:
             raise ValueError(f'No networks built for recipe {self.recipe_path}')
         assert len(candidate_networks) == 1
         X, Y = bc.recipe.get_network_XY(
             candidate_networks[0], data_file, color_aliases=self.color_aliases
         )
-        # rescaler = hydra.utils.instantiate(self.rescaler)
+        assert isinstance(X, np.ndarray)
+        assert isinstance(Y, np.ndarray)
+
+        metadata = resolved(self.metadata)
+        metadata['filename'] = data_file.name
+        metadata['file_path'] = data_file.as_posix()
+        metadata['file_stem'] = data_file.stem
+        metadata['recipe_path'] = recipe_file.as_posix()
+        metadata['recipe_stem'] = recipe_file.stem
+        metadata['network_info'] = bc.network.generate_network_info(candidate_networks[0])
+
         pdata = pu.extract_plot_data_from_network(
-            candidate_networks[0], X, Y, rescaler=rescaler, protein_aliases=self.color_aliases
+            candidate_networks[0],
+            X,
+            Y,
+            input_order=self.input_order,
+            protein_aliases=self.color_aliases,
+            metadata=metadata,
         )
         return [pdata]
 
@@ -735,11 +770,14 @@ class RawDataSource(SpecializedDataSource):
     input_names: Optional[List[str]] = None  # alias to use for input_columns
     output_name: Optional[str] = None  # alias to use for output_column
 
-    def get_data(self) -> List[PlotData]:
+    file_order: Optional[PartialFunction | Callable] = None
+
+    def model_post_init(self, *a):
+        if self.file_order is None:
+            self.file_order = partial(sorted, key=lambda x: x.stem)
+
+    def check_file(self, data_file):
         SUPPORTED_EXTENSIONS = ['.csv']
-
-        data_file = Path(self.data_path).expanduser().resolve()
-
         if not data_file.exists():
             raise ValueError(f'Data path {data_file} does not exist')
         extension = data_file.suffix
@@ -748,48 +786,74 @@ class RawDataSource(SpecializedDataSource):
                 f'''Unsupported extension {extension} for {data_file}.
                     Supported extensions: {SUPPORTED_EXTENSIONS}'''
             )
-        else:
-            if extension == '.csv':
-                df = pd.read_csv(data_file, engine="pyarrow")
-                assert isinstance(df, pd.DataFrame)
-                assert self.input_columns is not None
-                for col in self.input_columns:
-                    if col not in df.columns:
-                        raise ValueError(
-                            f'Column {col} not found in {data_file}. Available: {df.columns}'
-                        )
-                assert self.output_column is not None
-                if self.output_column not in df.columns:
+
+    def load_file(self, data_file) -> List[PlotData]:
+
+        extension = data_file.suffix
+
+        if extension == '.csv':
+            df = pd.read_csv(data_file, engine="pyarrow")
+            assert isinstance(df, pd.DataFrame)
+            assert self.input_columns is not None
+            for col in self.input_columns:
+                if col not in df.columns:
                     raise ValueError(
-                        f'''Column {self.output_column} not found in {data_file}.
-                    Available: {df.columns}'''
+                        f'Column {col} not found in {data_file}. Available: {df.columns}'
                     )
+            assert self.output_column is not None
+            if self.output_column not in df.columns:
+                raise ValueError(
+                    f'''Column {self.output_column} not found in {data_file}.
+                Available: {df.columns}'''
+                )
 
-                input_names = self.input_columns
-                output_name = self.output_column
+            input_names = self.input_columns
+            output_name = self.output_column
 
-                if self.input_names is not None:
-                    assert len(self.input_names) == len(self.input_columns)
-                    input_names = self.input_names
-                if self.output_name is not None:
-                    assert isinstance(self.output_column, str)
-                    output_name = self.output_name
+            if self.input_names is not None:
+                assert len(self.input_names) == len(self.input_columns)
+                input_names = self.input_names
+            if self.output_name is not None:
+                assert isinstance(self.output_column, str)
+                output_name = self.output_name
 
-                x = df[self.input_columns].to_numpy()
-                y = df[self.output_column].to_numpy()
+            x = df[self.input_columns].to_numpy()
+            y = df[self.output_column].to_numpy()
 
-                return [
-                    pu.PlotData(
-                        x=x,
-                        y=y,
-                        input_names=input_names,
-                        output_name=output_name,
-                        metadata=resolved(self.metadata),
-                    )
-                ]
+            metadata = resolved(self.metadata)
+            metadata['filename'] = data_file.name
+            metadata['file_path'] = data_file.as_posix()
+            metadata['file_stem'] = data_file.stem
 
-            else:
-                raise NotImplementedError(f'Extension {extension} not implemented')
+            return [
+                pu.PlotData(
+                    x=x,
+                    y=y,
+                    input_names=input_names,
+                    output_name=output_name,
+                    metadata=metadata,
+                )
+            ]
+
+        else:
+            raise NotImplementedError(f'Extension {extension} not implemented')
+
+    def get_data(self) -> List[PlotData]:
+        if isinstance(self.data_path, str):
+            # data_path can contain wildcards in the filename so we glob all into a list
+            datapath = Path(self.data_path).expanduser().resolve().absolute().as_posix()
+            all_data_files = [Path(f) for f in glob.glob(datapath)]
+        else:
+            all_data_files = [self.data_path]
+
+        all_data_files = sorted(all_data_files, key=lambda x: x.stem)
+        print(f'Found {len(all_data_files)} data files for {self.data_path}')
+        all_data = []
+        for data_file in all_data_files:
+            self.check_file(data_file)
+            all_data += self.load_file(data_file)
+        print(f'Loaded {len(all_data)} data files for {self.data_path}')
+        return all_data
 
     def __repr__(self, indent=0):
         indentstr = ' ' * indent
@@ -837,7 +901,7 @@ def as_datasourcegroup(ds_cfg: OmConfig) -> DictConfig:
             else:
                 new_cfg[k] = v
     elif isinstance(ds_cfg, ListConfig):
-        data_source = ds_cfg
+        data_source = [*ds_cfg]
     else:
         raise ValueError(f'Invalid DataSourceGroup config {ds_cfg}')
     new_cfg['data_source'] = data_source
@@ -913,6 +977,11 @@ class PlotJob(InheritableAttrsModel):
             futures = [worker.remote(task, progress) for task in tasks]
             ray.get(futures)
             progress.close()
+
+    def run_tasks_sequential(self):
+        tasks = self.generate_figure_tasks()
+        for task in tasks:
+            task.run()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
