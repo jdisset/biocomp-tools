@@ -47,6 +47,7 @@ import logging
 from rich.logging import RichHandler
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, Field, model_serializer
+import biocomp.utils as ut
 
 from biocomptools.toollib import common as cm
 from biocomptools.toollib.common import DictLike, open_dictlike, ArbitraryModel
@@ -82,6 +83,7 @@ def short_conf(conf: DictLike) -> str:
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                     --     instantiate utils     --
 
+DEFAULT_MODULE_NAMES = ['biocomptools.toollib.plot', 'biocomptools.toollib.figuremakers', 'biocomptools.toollib.datasources']
 
 def with_str_keys(d: DictLike) -> Dict[str, Any]:
     return {str(k): v for k, v in d.items()}
@@ -96,22 +98,14 @@ def get_public_attrs(obj):
     return [a for a in dir(obj) if not a.startswith('__')]
 
 
-def get_type(target_type: Union[str, Type[T]], default_target_module='') -> Type[T]:
+def get_type(target_type: Union[str, Type[T]], available_module_names=DEFAULT_MODULE_NAMES) -> Type[T]:
     if isinstance(target_type, str):
-        target_parts = target_type.split('.')
-        target_module = '.'.join(target_parts[:-1])
-        try:
-            target_module = import_module(target_module)
-            target_class = getattr(target_module, target_parts[-1])
-        except:
-            target_module = import_module(default_target_module)
-            target_class = getattr(target_module, target_parts[-1])
-        return target_class
+        return ut.decode_type(target_type, available_module_names)
     else:
         return target_type
 
 
-def get_explicit_target_type(obj, default_module='biocomptools.toollib.plot'):
+def get_explicit_target_type(obj, available_module_names=DEFAULT_MODULE_NAMES):
     # a _target_ key in the dict indicates the target type
 
     def isnull(x):
@@ -131,16 +125,16 @@ def get_explicit_target_type(obj, default_module='biocomptools.toollib.plot'):
 
     assert isinstance(target, str), f'Invalid target type {target}'
 
-    return get_type(target, default_module)
+    return get_type(target, available_module_names)
 
 
 def remove_target_key(obj: DictLike):
     return {k: v for k, v in obj.items() if k != '_target_'}
 
 
-def target_instantiate(obj: DictLike, default_module='biocomptools.toollib.plot'):
+def target_instantiate(obj: DictLike, available_module_names=DEFAULT_MODULE_NAMES) -> Any:
     """simply create an instance of _target_ with the rest of the dict as kwargs"""
-    target_class = get_explicit_target_type(obj, default_module)
+    target_class = get_explicit_target_type(obj, available_module_names)
     assert target_class is not None, f'No target class found in {obj}'
     kwargs = remove_target_key(obj)
     return target_class(**with_str_keys(kwargs))
@@ -192,7 +186,6 @@ def build_from_config(
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     Resolvable     --
 
-
 class Resolvable(ArbitraryModel, Generic[T]):
     """
     A Resolvable is a wrapper around an object that can be constructed at the last minute.
@@ -200,7 +193,6 @@ class Resolvable(ArbitraryModel, Generic[T]):
     (this, plot_task, data, figure_task, etc.)
     When not resolved, it carries its DictLike representation from which it can be constrArbitrar
     """
-
 
     target_type: Type[T]
     config: DictLike = {}
@@ -249,8 +241,12 @@ class Resolvable(ArbitraryModel, Generic[T]):
             return False
         return self.config == other.config and self.target_type == other.target_type
 
+    # boolean test (is empty):
+    def __bool__(self):
+        return bool(self.config)
+
     @model_serializer()
-    def model_dump(self):
+    def mdump(self):
         cfg = self.config
         if isinstance(cfg, DictConfig):
             cfg = OmegaConf.to_container(cfg, resolve=False)
@@ -258,6 +254,9 @@ class Resolvable(ArbitraryModel, Generic[T]):
         if self.dump_target:
             cfg = {'_target_': dump_type(self.target_type), **cfg}
         return cfg
+
+
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -281,7 +280,7 @@ def make_resolvable(
     clsname: Optional[str] = None,
     force_resolvable=True,  # if True, will attempt to wrap any value in a Resolvable
     to_omegaconf=False,  # if True, will anntempt to wrap any value in an OmegaConf DictConfig
-    silent_fail=False,  # if True, will not raise an error if the value is not dict-like
+    silent_fail=True,  # if True, will not raise an error if the value is not dict-like
 ) -> Resolvable[T]:
     """
     Return a Resolvable object from a value and a target type.
@@ -310,17 +309,15 @@ def make_resolvable(
                     log.debug('Dumped value=%s, target_type=%s', value, target_type)
                 except AttributeError:
                     raise ValueError(f'Can\'t dump {value=} with {target_type=}')
-            else:
-                raise ValueError(f'Invalid {value=} for {target_type=}')
 
-    assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}'
+    assert isinstance(value, DictLike), f'Invalid {value=} for {target_type}. got {type(value)}'
 
     if to_omegaconf:
         try:
             value = DictConfig(value)
         except Exception as e:
             if not silent_fail:
-                raise ValueError(f'Invalid {value=} for {target_type=}')
+                raise ValueError(f'Invalid {value=} for {target_type=}: {e}')
             log.warning('Failed to convert to OmegaConf: %s\nFallin back to raw dict', e)
 
     if not isinstance(target_type, type):
@@ -332,6 +329,11 @@ def make_resolvable(
     if not issubclass(target_type, original_target_type):
         raise ValueError(f'Invalid {target_type=} is unrelated to {original_target_type=}')
 
+    dump_target = True
+    if target_type == original_target_type and len(value) == 0:
+        # it's a default constructor, we don't need to dump the _target_:
+        dump_target = False
+
     assert is_dictlike(value), f'Invalid {value=} for {target_type}'
 
     r = Resolvable[target_type](
@@ -339,7 +341,9 @@ def make_resolvable(
         config=value,  # type: ignore
         name=name,
         clsname=clsname,
+        dump_target=dump_target
     )
+
     return r
 
 
@@ -405,4 +409,5 @@ def resolved(resolvable: Any, resolvers=None):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}#
+
 

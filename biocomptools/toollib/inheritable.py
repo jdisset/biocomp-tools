@@ -193,12 +193,11 @@ class InheritableAttrsModel(cm.ArbitraryModel):
 
     _inherit: dict[str, list[str] | str] = {}
 
-    def model_post_init(self, *_):
+    def model_post_init(self, *a):
         for k, v in self._inherit.items():
             if isinstance(v, str):
                 v = [v]
             setattr(self, k, merged_into(getattr(self, k), self, v))
-
+        super().model_post_init(*a)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

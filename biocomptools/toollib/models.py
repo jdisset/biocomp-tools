@@ -4,6 +4,9 @@ import sqlalchemy as sa
 from sqlalchemy import Column, JSON
 import datetime
 from pydantic import BaseModel, BeforeValidator
+from pathlib import Path
+import biocomp.utils as ut
+import biocomp as bc
 
 def to_str(data: Any) -> Any:
     if not isinstance(data, str) and data is not None:
@@ -60,6 +63,7 @@ class TrainingRun(BiocompDB, table=True):
 
     predictions: List["Prediction"] = Relationship(back_populates="training_run")
 
+
 class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     xp: str = Field(foreign_key="experiment.name")
@@ -81,6 +85,48 @@ class Network(BiocompDB, table=True):
     def generate_unique_name(self):
         # n = f'{row["recipe_name"]}_{row["xp"]}_{"-".join(row["network_info"]["markers"].split(", "))}'
         return f"{self.recipe_name}_{self.xp}_{'-'.join(self.network_info['markers'])}"
+
+
+    def get_recipe_content(self, path_prefix=None):
+        if self.recipe_file is None:
+            return None
+        recipe_file = Path(self.recipe_file)
+        if path_prefix is not None:
+            recipe_file = Path(path_prefix) / recipe_file
+        recipe_file = recipe_file.expanduser().resolve()
+        with open(recipe_file, 'r') as f:
+            return f.read()
+
+
+def build(network: Network, path_prefix=None, lib=None, cache_dir=None, overwrite_info=True):
+    lib = lib or ut.load_lib()
+    if network.recipe_file is None:
+        return None
+
+    if path_prefix is not None:
+        recipe_file = Path(path_prefix) / network.recipe_file
+    else:
+        recipe_file = Path(network.recipe_file)
+
+    recipe_file = recipe_file.expanduser().resolve()
+
+    candidate_networks = bc.recipe.network_from_recipe(
+        recipe_file, lib, inverse='shortest', use_cache=cache_dir
+    )
+
+    assert isinstance(candidate_networks, list)
+    if len(candidate_networks) == 0:
+        raise ValueError(f'No networks built for recipe {recipe_file}')
+    assert len(candidate_networks) == 1
+
+    net = candidate_networks[0]
+
+    if overwrite_info:
+        network.network_info = bc.network.generate_network_info(net)
+        net.metadata['network_info'] = network.network_info
+
+    return net
+
 
 
 class Prediction(BiocompDB, table=True):

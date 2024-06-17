@@ -15,7 +15,7 @@ cases:
     _target_: SingleFigure
 
     figure_spec:
-      output_file: "${ftask: data.0.metadata.title}_2dheatmap.png"
+      output_file: "${ftask: data.0.metadata.file_stem}_2dheatmap.png"
       extra_args:
         dpi: 400
 
@@ -25,6 +25,15 @@ cases:
           kwargs:
             plot_data: "${ftask: data.0}"
             ax: "${ptask: context.figure.flat_ax}"
+
+        raw_method:
+          func: biocomptools.toollib.plot.write_text
+          kwargs:
+            canvas: "${ptask: context.figure.flat_ax.0}"
+            content: "${ftask: flat_data.0.metadata.network_info}"
+            coords: [-0.5, 0.5]
+            verticalalignment: center
+            horizontalalignment: right
 
 
   3: # in 3d, we produce 2 things: a sequence of frames going through the z-axis, and a single figure with 4 subplots at different z-slices
@@ -36,7 +45,7 @@ cases:
         figure_makers:
           _target_: SingleFigure # each repeat will produce a single figure
           figure_spec:
-            output_file: "${ftask: data.0.metadata.title}_3Dframes/frame_${ftask: context.multifigure_index}.png"
+            output_file: "${ftask: data.0.metadata.file_stem}_3Dframes/frame_${ftask: context.multifigure_index}.png"
           
           plot_tasks:
             - plot_method:
@@ -61,10 +70,10 @@ cases:
           callstack_params:
             smooth_3d_params:
               #zslices: "${func: numpy.linspace, ${ptask: plot_config.general.zlims.0}, ${ptask: plot_config.general.zlims.1},  ${ptask: context.figure.n_axes}}"
-              zslices: [0.05, 0.25, 0.4, 0.55]
+              zslices: [0.0, 0.25, 0.4, 0.55]
 
         figure_spec:
-          output_file: "${ftask: data.0.metadata.title}_slices.png"
+          output_file: "${ftask: data.0.metadata.file_stem}_slices.png"
           layout:
             _target_: biocomp.plotutils.SimpleLayout
             rows: 1
@@ -76,4 +85,13 @@ cases:
               kwargs:
                 plot_data: "${ftask: data.0}"
                 ax: "${ptask: context.figure.flat_ax}" # all axes in the row.
+
+            raw_method:
+              func: biocomptools.toollib.plot.write_text
+              kwargs:
+                canvas: "${ptask: context.figure.flat_ax.0}"
+                content: "${ftask: flat_data.0.metadata.network_info}"
+                coords: [-0.5, 0.5]
+                verticalalignment: center
+                horizontalalignment: right
 

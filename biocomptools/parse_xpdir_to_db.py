@@ -373,7 +373,7 @@ for col in error_cols:
     xpdf[col] = xpdf[col].astype(str)
     xpdf[col] = xpdf[col].apply(lambda x: x.replace('nan', ''))
 
-all_xps = [md.Experiment(**row.to_dict()) for i, row in xpdf.iterrows()]
+all_xps = [md.Experiment.model_validate(row.to_dict()) for i, row in xpdf.iterrows()]
 
 # now we can update all the xps
 backup_db_if_changed()
@@ -401,7 +401,6 @@ for n in all_networks:
     if type(n.recipe_file) is not str:
         print(f'network {n.name} has recipe path of type {type(n.recipe_file)}')
 
-##
 backup_db_if_changed()
 
 # clear the entire table

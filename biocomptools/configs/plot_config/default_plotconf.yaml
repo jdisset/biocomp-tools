@@ -104,13 +104,16 @@ callstack_params:
     noise_smooth: 0
     use_log_density: true
     vlims: ${general.vlims}
+
   knn_avg_params:
     avg_method: mean
     k: 500
     min_points: 20
+
   knn_grid_params:
     grid_resolution: 200
     is_density_plot: false
+
   mkfig_params:
     dpi: 300
     size: [4, 4]
@@ -134,6 +137,8 @@ callstack_params:
     xlims: ${general.xlims}
     ylims: ${general.ylims}
     vlims: ${general.vlims}
+    heatmap_params:
+      contours: [0.1, 0.3, 0.5]
 
   smooth_3d_params:
     smooth_2d_params:

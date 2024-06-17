@@ -25,6 +25,7 @@ from typing import (
     Union,
     List,
     Tuple,
+    Type,
     Dict,
     Any,
     Callable,
@@ -45,7 +46,7 @@ BASE_CONFIG_FILE_PATH = 'configs/default.yaml'
 BASE_CONFIG_FILE = pkg_resources.resource_filename('biocomptools', BASE_CONFIG_FILE_PATH)
 
 tlog = logging.getLogger('biocomptools.common')
-tlog.setLevel(logging.DEBUG)
+tlog.setLevel(logging.WARNING)
 
 
 def load_config(*config_files):
@@ -92,17 +93,34 @@ def dict_like(obj) -> bool:
 
 
 class ArbitraryTargetModel(ArbitraryModel):
-    target_: Any = Field(None, alias='_target_')
+    """A pydantic model that has a _target_ set to the name of the class
+    for easy (de)serialization"""
 
-    def model_post_init(self, *_) -> None:
-        # if target_ is not None, we set the target attribute to the name of the class
-        # self.target_ = self.__class__.__name__ if self.target_ is None else self.target_
-        # but we need to add the full path to the class
+    target_: Optional[str | Type] = Field(None, alias='_target_')
+
+    def model_post_init(self, *a) -> None:
+        # if target_ is None, we set the target attribute to the name of the class
         self.target_ = (
             self.__class__.__module__ + '.' + self.__class__.__name__
             if self.target_ is None
             else self.target_
         )
+        super().model_post_init(*a)
+
+    # # more thorough "exclude_default" implementation:
+    # def model_dump(self, *args, exclude_defaults=False, **kwargs):
+    # print('arbitrarytargetmodel dump')
+    # if not exclude_defaults:
+    # return super().model_dump(exclude_defaults=False, *args, **kwargs)
+    # else:
+    # print('excluding default in a targetmodel')
+    # # we try to build the object first, dump it, then dump this one,
+    # # and manually remove the fields that are the same
+    # dmp = super().model_dump(exclude_defaults=True, *args, **kwargs)
+    # default_dmp = self.__class__().model_dump(*args, **kwargs)
+    # res_dump = {k: v for k, v in dmp.items() if default_dmp[k] != v}
+    # print(f'{dmp=}, {default_dmp=}, {res_dump=}')
+    # return res_dump
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -406,6 +424,23 @@ def reorder_columns_back(df, columns):
     """
     columns = list(columns)
     return df[[col for col in df.columns if col not in columns] + columns]
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+## {{{                        --     misc utils     --
+
+# import os
+import subprocess
+
+# def make_video(input_file_pattern, output_file, fps=30, crf=17, vcodec='libx264'):
+# cmd = f'ffmpeg -y -r {fps} -i "{input_file_pattern}" -crf {crf} -vcodec {vcodec} -vf "scale=iw:ih,format=yuv420p,crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_file}"'
+# print(f'Running command: {cmd}')
+# os.system(cmd)
+# print(f'Video created at {output_file}')
+
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

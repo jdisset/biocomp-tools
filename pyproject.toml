@@ -31,6 +31,10 @@ venvPath = "/opt/homebrew/Caskroom/miniconda/base/envs"
 venv = "py311"
 
 
+[tool.poetry.scripts]
+biocomp-plotdata = "biocomptools.plot_data:main"
+
+
 [tool.setuptools]
 packages = ["biocomptools"]
 #package_dir = {"" = "."}
