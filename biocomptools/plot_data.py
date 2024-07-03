@@ -1,5 +1,4 @@
 # {{{                        --     imports     -
-from dracon import load_config_file
 import ray
 import biocomp.utils as ut
 import biocomptools.toollib.plot as pl
@@ -8,6 +7,8 @@ import hydra
 import rich
 import logging
 import argparse
+import dracon as dr
+from omegaconf import OmegaConf
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -27,7 +28,9 @@ def setup_logging(loglevel = logging.WARNING):
 setup_logging()
 
 def get_job_tasks(job_file: Path) -> list[pl.FigureTask]:
-    job = pl.PlotJob.model_validate(load_config_file(job_file))
+    conf = dr.load(job_file)
+    oconf = OmegaConf.create(conf)
+    job = pl.PlotJob.model_validate(oconf)
     return job.generate_figure_tasks()
 
 def run_task(task: pl.FigureTask):
