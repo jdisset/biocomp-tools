@@ -9,3 +9,4 @@ __pycache__
 wandb
 
 biocomptools/B1_3Dframes
+pyrightconfig.json
