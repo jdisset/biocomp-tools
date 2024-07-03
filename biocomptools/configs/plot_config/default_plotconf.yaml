@@ -7,6 +7,7 @@ general:
   cmap: bc_blues
   colors:
     grey: '#777777'
+    red: '#FF0000'
 
 rc_context:
 
@@ -93,7 +94,7 @@ callstack_params:
     axtransform: null
     bad_color: '#EEEEEE00'
     cmap: ${general.cmap}
-    contours: 3
+    contours: 0
     opacities: null
     vlims: ${general.vlims}
 
@@ -137,12 +138,12 @@ callstack_params:
     xlims: ${general.xlims}
     ylims: ${general.ylims}
     vlims: ${general.vlims}
-    heatmap_params:
-      contours: [0.1, 0.3, 0.5]
 
   smooth_3d_params:
     smooth_2d_params:
       draw_colorbar: false
+      heatmap_params:
+        contours: 0
     xlims: ${general.xlims}
     ylims: ${general.ylims}
     zlims: ${general.zlims}
@@ -156,8 +157,6 @@ callstack_params:
     xaxis_labelpad: 22
     yaxis_labelpad: 25
     zaxis_labelpad: 35
-    heatmap_params:
-      contours: [0.1, 0.3, 0.5]
     cube_edge_props:
       bottom_left:
         offset: [0, 0]
