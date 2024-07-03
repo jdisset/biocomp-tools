@@ -247,6 +247,8 @@ class DBSource(SpecializedDataSource):
         if network.data_file is None:
             raise ValueError(f'No data file specified for network {network.name}')
 
+        metadata['file_stem'] = Path(network.data_file).stem
+
         data_file = Path(self.root_path) / network.data_file
 
         if not data_file.exists():
