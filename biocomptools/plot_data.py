@@ -7,7 +7,7 @@ import hydra
 import rich
 import logging
 import argparse
-import dracon as dr
+from dracon import loader as dr
 from omegaconf import OmegaConf
 
 ##────────────────────────────────────────────────────────────────────────────}}}

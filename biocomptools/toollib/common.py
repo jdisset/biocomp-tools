@@ -21,7 +21,7 @@ from psycopg2.extras import execute_values
 import logging
 from tqdm import tqdm
 
-import dracon as dr
+from dracon import loader as dr
 
 from typing import (
     Union,

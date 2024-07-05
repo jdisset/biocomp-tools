@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 #biocomptools_train= "biocomp-tools:train.main"
+biocomp-plotdata = "biocomptools.plot_data:main"
 
 [tool.pyright]
 include = ["src"]
