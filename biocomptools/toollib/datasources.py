@@ -212,7 +212,7 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select, text
 from sqlalchemy.inspection import inspect
 from sqlalchemy.sql.elements import TextClause
 
-config = cm.load_config()
+config = cm.config
 
 def to_text_clause(data: Any) -> TextClause:
     if isinstance(data, str):
@@ -247,9 +247,9 @@ class DBSource(SpecializedDataSource):
         if network.data_file is None:
             raise ValueError(f'No data file specified for network {network.name}')
 
-        metadata['file_stem'] = Path(network.data_file).stem
+        metadata['file_stem'] = Path(network.data_file).expanduser().resolve().stem
 
-        data_file = Path(self.root_path) / network.data_file
+        data_file = Path(self.root_path).expanduser().resolve() / network.data_file
 
         if not data_file.exists():
             raise ValueError(f'Data file {data_file} does not exist for network {network.name}')

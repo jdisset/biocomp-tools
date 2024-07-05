@@ -12,7 +12,9 @@ dependencies = [
 	"biocomp",
 	"hydra-core",
 	"psycopg2-binary",
-
+	"ray",
+	"sqlmodel",
+	"pydantic"
 ]
 
 

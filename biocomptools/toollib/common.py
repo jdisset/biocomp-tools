@@ -21,6 +21,8 @@ from psycopg2.extras import execute_values
 import logging
 from tqdm import tqdm
 
+import dracon as dr
+
 from typing import (
     Union,
     List,
@@ -39,35 +41,16 @@ from pydantic import BaseModel, Field
 
 PathLike = Union[str, Path]
 
-from omegaconf import OmegaConf
-import pkg_resources
-
-BASE_CONFIG_FILE_PATH = 'configs/default.yaml'
-BASE_CONFIG_FILE = pkg_resources.resource_filename('biocomptools', BASE_CONFIG_FILE_PATH)
-
 tlog = logging.getLogger('biocomptools.common')
 tlog.setLevel(logging.WARNING)
 
+config = dr.load('pkg:biocomptools:configs/default.yaml')
+config = OmegaConf.create(config)
+OmegaConf.resolve(config)
 
-def load_config(*config_files):
-    config = OmegaConf.load(BASE_CONFIG_FILE)
-    OmegaConf.resolve(config)
-    if 'local_conf_file' in config and config.local_conf_file is not None:
-        local_conf_file = Path(config.local_conf_file)
-        if local_conf_file.exists():
-            local_config = OmegaConf.load(local_conf_file)
-            config = OmegaConf.merge(config, local_config)
-            tlog.debug(f'Loaded local config file {local_conf_file}')
-        else:
-            tlog.warning(f'Local config file {local_conf_file} not found')
-    for extra_config_file in config_files:
-        extra_config = OmegaConf.load(extra_config_file)
-        config = OmegaConf.merge(config, extra_config)
-        tlog.debug(f'Loaded extra config file {extra_config_file}')
-    return config
+def get_logger(subname):
+    return logging.getLogger(f'biocomptools.{subname}')
 
-
-config = load_config()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 

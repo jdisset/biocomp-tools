@@ -1,6 +1,6 @@
 # -------- main
 # local_conf file for biocomp that overrides the following. can be empty
-local_conf_file: ${oc.env:BIOCOMP_LOCAL_CONFIG_FILE, ???}
+#local_conf_file: ${oc.env:BIOCOMP_LOCAL_CONFIG_FILE, ???}
 protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
 
 db:
@@ -10,15 +10,19 @@ db:
     port: ${oc.env:BIOCOMP_DB_PORT, 5432}
     pass: ${oc.env:BIOCOMP_DB_PASS, ???}
     host: ${oc.env:BIOCOMP_DB_HOST, ???}
+
   sqlite:
     path: ${oc.env:BIOCOMP_SQLITE_DB_PATH, ${...paths.root}/biocompdb.sqlite}
     backup:
       dir: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_DIR, ${....paths.root}/db_backups/}
       keep_n: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_KEEP_N, 50}
 
+  gsheet:
+    google_app_credentials_path: ${oc.env:BIOCOMP_GOOGLE_APP_CREDENTIALS_PATH, '/Users/jeandisset/.google/biocomp/key.json'}
+    parts_sheet_key: "1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME"
 
 paths:
-  root: ${oc.env:BIOCOMP_ROOT, '/Users/jeandisset/Dropbox (MIT)/Biocomp'}
+  root: ${oc.env:BIOCOMP_ROOT, '~/Dropbox (MIT)/Biocomp'}
   cache:
     base_dir: ${oc.env:BIOCOMP_CACHE_DIR, '${paths.root}/__cache'}
     networks: ${oc.env:BIOCOMP_NETWORK_CACHE_DIR, '${.base_dir}/networks'}
