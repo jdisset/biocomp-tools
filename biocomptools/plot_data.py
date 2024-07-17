@@ -7,8 +7,8 @@ import hydra
 import rich
 import logging
 import argparse
-from dracon import loader as dr
 from omegaconf import OmegaConf
+import dracon as dr
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -28,7 +28,7 @@ def setup_logging(loglevel = logging.WARNING):
 setup_logging()
 
 def get_job_tasks(job_file: Path) -> list[pl.FigureTask]:
-    conf = dr.load(job_file)
+    conf = dr.load(job_file, raw_dict=True)
     oconf = OmegaConf.create(conf)
     job = pl.PlotJob.model_validate(oconf)
     return job.generate_figure_tasks()

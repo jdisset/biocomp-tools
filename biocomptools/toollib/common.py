@@ -21,7 +21,7 @@ from psycopg2.extras import execute_values
 import logging
 from tqdm import tqdm
 
-from dracon import loader as dr
+import dracon as dr
 
 from typing import (
     Union,
@@ -44,7 +44,7 @@ PathLike = Union[str, Path]
 tlog = logging.getLogger('biocomptools.common')
 tlog.setLevel(logging.WARNING)
 
-config = dr.load('pkg:biocomptools:configs/default.yaml')
+config = dr.load('pkg:biocomptools:configs/default.yaml', raw_dict=True)
 config = OmegaConf.create(config)
 OmegaConf.resolve(config)
 
