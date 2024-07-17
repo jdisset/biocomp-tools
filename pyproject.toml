@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "biocomptools"
@@ -19,7 +19,6 @@ dependencies = [
 
 
 [project.scripts]
-#biocomptools_train= "biocomp-tools:train.main"
 biocomp-plotdata = "biocomptools.plot_data:main"
 
 [tool.pyright]
@@ -34,14 +33,3 @@ venvPath = "/opt/homebrew/Caskroom/miniconda/base/envs"
 venv = "py311"
 
 
-[tool.poetry.scripts]
-biocomp-plotdata = "biocomptools.plot_data:main"
-
-
-[tool.setuptools]
-packages = ["biocomptools"]
-#package_dir = {"" = "."}
-#include_package_data = true
-
-#[tool.setuptools.package_data]
-#biocomptools = ["configs/*.yaml"]
