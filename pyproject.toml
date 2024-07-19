@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 biocomp-plotdata = "biocomptools.plot_data:main"
+biocomp-makevideo = "biocomptools.make_video:main"
 
 [tool.pyright]
 include = ["src"]
