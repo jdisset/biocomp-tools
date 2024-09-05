@@ -1,6 +1,4 @@
 # -------- main
-# local_conf file for biocomp that overrides the following. can be empty
-#local_conf_file: ${oc.env:BIOCOMP_LOCAL_CONFIG_FILE, ???}
 protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
 
 db:

@@ -1,0 +1,168 @@
+
+@startuml
+skinparam classAttributeIconSize 0
+skinparam nodesep 80
+skinparam ranksep 100
+
+!$inh_color  = "blue"
+!$res_color  = "green"
+
+class PlotJob {
+  <color:$inh_color>metadata: Dict
+  <color:$inh_color>plot_config: PlotConfig
+  <color:$inh_color>figure_spec: FigureSpec
+  <color:$inh_color>figure_maker: FigureMaker
+  data_source: DataSource
+  context: Dict
+  --
+  Orchestrates the entire plotting process.
+  Can run FigureTasks in parallel.
+}
+
+abstract class DataSource {
+  <color:$res_color>metadata: Dict
+  <color:$inh_color>plot_config: PlotConfig
+  <color:$inh_color>figure_spec: FigureSpec
+  <color:$res_color>figure_maker: FigureMaker
+  context: Dict
+  --
+  Loads and prepares data for plotting by turning it 
+  into PlotData objects. 
+  Can be a group (a list) of multiple data sources.
+}
+
+class RecipeDataSource {
+  recipe_path
+  data_path
+  cache_dir
+  color_aliases
+  input_order
+}
+
+class RawDataSource {
+  data_path
+  output_column
+  input_columns
+  input_names
+  output_name
+  file_order
+}
+
+class DBSource {
+  network_query
+  color_aliases
+  input_order
+  root_path
+  db_path
+}
+
+abstract class FigureMaker {
+  <color:$inh_color>plot_config: PlotConfig
+  <color:$inh_color>figure_spec: FigureSpec
+  context: Dict
+  --
+  context:
+  + figure_makers: List[str]
+  --
+  Generates FigureTasks and links them with PlotData
+  Some FigureMaker don't generate figures themselves, but
+  instead call other FigureMakers to do so.
+}
+
+class SingleFigure {
+  --
+  Creates a single figure for each data group
+}
+
+class ForEachData {
+  --
+  Calls another figure maker for each data item
+}
+
+class SwitchFigure {
+  --
+  Selects between different figure makers based on condition
+}
+
+class MultiFigure {
+  --
+  context:
+  multifigure_index: int
+  multifigure_n_repeats: int
+  --
+  Calls multiple figure makers from the same data
+}
+
+class UORFMatrixFigure {
+  --
+  Creates a matrix of figures for uORF data
+}
+
+class FigureTask {
+  data: List[PlotData]
+  flat_data: List[PlotData] - flattened list of data
+  <color:$res_color>figure_spec: FigureSpec
+  <color:$inh_color>plot_config: PlotConfig
+  plot_tasks: List[PlotTask]
+  context: Dict
+  --
+  context:
+  figure_task: FigureTask
+  plot_task_index: int
+  figure: FigAx
+  --
+  Represents a single figure to be plotted
+}
+
+class PlotTask {
+  <color:$res_color>plot_config: PlotConfig
+  plot_method: PartialFunction
+  raw_method: PartialFunction
+  context: Dict
+  --
+  Represents a single plotting operation
+}
+
+class PlotData {
+  x: NdArray
+  y: NdArray
+  input_names: List[str]
+  output_name: str
+  metadata: Dict
+  --
+  Holds the actual data to be plotted
+}
+
+PlotJob -right-> DataSource : declares
+DataSource -right-> FigureMaker : declares
+FigureMaker -right-> FigureTask : generates
+FigureTask -right-> PlotTask : generates
+
+/'PlotJob -right-> FigureMaker : runs'/
+
+DataSource <|-- RecipeDataSource
+DataSource <|-- RawDataSource
+DataSource <|-- DBSource
+
+FigureMaker <|-- SingleFigure
+FigureMaker <|-- ForEachData
+FigureMaker <|-- SwitchFigure
+FigureMaker <|-- MultiFigure
+FigureMaker <|-- UORFMatrixFigure
+
+FigureTask *-- PlotData
+
+/'DataSources produce one or more PlotData objects'/
+DataSource --> PlotData
+
+
+
+legend right
+    |Color| Type |
+	|<#0000FF>| Passed down to child|
+	|<#00FF00>| Resolved at this level |
+endlegend
+
+
+@enduml
+

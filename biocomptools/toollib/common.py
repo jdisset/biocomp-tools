@@ -90,21 +90,6 @@ class ArbitraryTargetModel(ArbitraryModel):
         )
         super().model_post_init(*a)
 
-    # # more thorough "exclude_default" implementation:
-    # def model_dump(self, *args, exclude_defaults=False, **kwargs):
-    # print('arbitrarytargetmodel dump')
-    # if not exclude_defaults:
-    # return super().model_dump(exclude_defaults=False, *args, **kwargs)
-    # else:
-    # print('excluding default in a targetmodel')
-    # # we try to build the object first, dump it, then dump this one,
-    # # and manually remove the fields that are the same
-    # dmp = super().model_dump(exclude_defaults=True, *args, **kwargs)
-    # default_dmp = self.__class__().model_dump(*args, **kwargs)
-    # res_dump = {k: v for k, v in dmp.items() if default_dmp[k] != v}
-    # print(f'{dmp=}, {default_dmp=}, {res_dump=}')
-    # return res_dump
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 

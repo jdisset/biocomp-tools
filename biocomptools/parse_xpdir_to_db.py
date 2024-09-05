@@ -37,14 +37,13 @@ from pydantic import BaseModel
 import logging
 from biocomptools.toollib import common as cm
 from biocomptools.toollib import plot as pl
+from biocomptools.toollib.common import config
 
 from omegaconf import OmegaConf
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-config = cm.load_config()
 
-config.db.sqlite
 prog = cm.CLIProgram()
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
@@ -53,13 +52,15 @@ logging.getLogger('biocomp').setLevel(logging.ERROR)
 DEFAULT_CALIB_PATHS = list(config.calib.paths)
 DEFAULT_CALIB_NAMES = list(config.calib.names)
 
-DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
-DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
 DEFAULT_XP_CACHE_DIR = config.paths.cache.xp
 
-BIOCOMP_ROOT = config.paths.root
+BIOCOMP_ROOT = Path(config.paths.root).expanduser().resolve()
 
-config.paths.cache
+# DEFAULT_RECIPE_PATH = [(Path(BIOCOMP_ROOT)/'Recipes').expanduser().resolve(), 'recipes']
+DEFAULT_RECIPE_PATH = ['recipes']
+DEFAULT_XP_PATH = (Path(BIOCOMP_ROOT)/'Experiments').expanduser().resolve()
+# DEFAULT_XP_PATH = 'Experiments'
+
 
 ### {{{                --     arg declaration and parsing     --
 
@@ -99,10 +100,10 @@ prog.console = Console()
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                  --     list all xps in experiment folder    --
 
+import time
+
 xp_entries = {}
 xp_objs = {}
-
-import time
 
 xp_folders = sorted([f for f in prog.xp_path.iterdir() if f.is_dir()])
 for xp_dir in tqdm(xp_folders, desc='loading experiments'):
@@ -167,6 +168,8 @@ for new_xp in xp_entries.values():
     new_xp['calibration_version'] = calib_type
     new_xp['has_calibration_diagnostics'] = calib_plot
 
+
+# xp_entries['2024-08-09_BPBRTL']
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{  --     build networks    --
@@ -257,8 +260,8 @@ def get_db_hash(db_path: str | Path) -> str:
 
 
 def backup_db_if_changed(db_path=config.db.sqlite.path, db_backup_dir=config.db.sqlite.backup.dir):
-    db_path = Path(db_path)
-    db_backup_dir = Path(db_backup_dir)
+    db_path = Path(db_path).expanduser().resolve()
+    db_backup_dir = Path(db_backup_dir).expanduser().resolve()
 
     db_backup_dir.mkdir(parents=True, exist_ok=True)
     existing_backups = sorted(db_backup_dir.glob(f'{db_path.stem}_*.sqlite'))
@@ -376,7 +379,6 @@ for col in error_cols:
 all_xps = [md.Experiment.model_validate(row.to_dict()) for i, row in xpdf.iterrows()]
 
 # now we can update all the xps
-backup_db_if_changed()
 update_records(all_xps, merge_keep=['comments'])
 
 

@@ -132,6 +132,10 @@ callstack_params:
       1: smooth
       2: smooth
       3: smooth
+
+  smooth_1d_params:
+    xlims: ${general.xlims}
+    vlims: ${general.vlims}
       
   smooth_2d_params:
     draw_colorbar: true
