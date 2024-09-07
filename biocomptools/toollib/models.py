@@ -1,20 +1,28 @@
 from sqlmodel import Field, SQLModel, create_engine, Relationship, Session
-from typing import List, Optional, Annotated, Any
+from typing import List, Optional, Annotated, Any, TypeAlias, Union, Type, TypeVar, Generator
 import sqlalchemy as sa
 from sqlalchemy import Column, JSON
 import datetime
-from pydantic import BaseModel, BeforeValidator
+from pydantic import BaseModel, BeforeValidator, PrivateAttr
 from pathlib import Path
 import biocomp.utils as ut
 import biocomp as bc
+import logging
+
+logger = logging.getLogger('biocomp.models')
+
 
 def to_str(data: Any) -> Any:
     if not isinstance(data, str) and data is not None:
         return str(data)
     return data
 
+
 ForcedStr = Annotated[str, BeforeValidator(to_str)]
 ForcedOptionalStr = Annotated[Optional[str], BeforeValidator(to_str)]
+
+T = TypeVar("T")
+ListOr = List[T] | T
 
 
 class BiocompDB(SQLModel, registry=sa.orm.registry()):
@@ -28,18 +36,57 @@ class Collection(BiocompDB, table=True):
     networks: List["CollectionNetwork"] = Relationship(back_populates="collection")
 
 
+# for s in xp.content['samples']:
+# if sample_is_control(s):
+# continue
+# recipe_file = Path(xp.path) / RECIPE_RELATIVE_PATH / f"{s['recipe']}{RECIPE_EXT}"
+# recipe = md.Recipe.from_file(recipe_file, xp_name=xp.name, path_prefix=base_dir)
+
+
 class Experiment(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     path: ForcedStr
-    transfection_date: Optional[str] = None
-    recipe_errors: Optional[str] = None
-    network_building_errors: Optional[str] = None
-    data_loading_errors: Optional[str] = None
-    calibration_version: Optional[str] = None
-    has_calibration_diagnostics: Optional[bool] = None
     comments: Optional[str] = None
+    content: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    errors: str = Field(default_factory=str)
+    # _prvt: Optional[dict] = PrivateAttr(default={})
 
-    networks: List["Network"] = Relationship(back_populates="experiment")
+    recipes: List["Recipe"] = Relationship(back_populates="experiment")
+
+    @staticmethod
+    def sample_is_control(sample: dict) -> bool:
+        if 'control' in sample:
+            return sample['control']
+        return False
+
+    def find_recipes(
+        self,
+        path_prefix: Optional[str] = None,
+        recipe_subpath: Optional[str] = None,
+        recipe_ext='.recipe.json5',
+        **kwargs,
+    ) -> List["Recipe"]:
+        """
+        returns a dict of sample_name -> Recipe
+        """
+        recipes = []
+        if not self.content:
+            raise ValueError("Experiment content is empty")
+        for s in self.content['samples']:
+            if self.sample_is_control(s):
+                continue
+            basepath = Path(self.path)
+            basepath = basepath if recipe_subpath is None else basepath / recipe_subpath
+            filepath = basepath / f"{s['recipe']}{recipe_ext}"
+            recipe = Recipe.from_file(
+                filepath, xp_name=self.name, path_prefix=path_prefix, **kwargs
+            )
+            assert (
+                recipe.content.get('name') == s['recipe']
+            ), f"Recipe name mismatch {recipe.content.get('name')} != {s['recipe']}"
+            assert s['recipe'] not in recipes, f"Duplicate recipe name {s['recipe']}"
+            recipes.append(recipe)
+        return recipes
 
 
 class TrainingRun(BiocompDB, table=True):
@@ -64,69 +111,147 @@ class TrainingRun(BiocompDB, table=True):
     predictions: List["Prediction"] = Relationship(back_populates="training_run")
 
 
+class Calibration(BiocompDB, table=True):
+    name: str = Field(primary_key=True)
+    pipeline: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    data_files: List["DataFile"] = Relationship(back_populates="calibration")
+    quality: Optional[float] = 0.0
+
+
+class DataFile(BiocompDB, table=True):
+    file: str = Field(primary_key=True)
+    attrs: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    calibration_name: str = Field(foreign_key="calibration.name")
+    recipe_name: Optional[str] = Field(foreign_key="recipe.name", default=None)
+
+    priority: int = 0  # used to select the best data file for a given recipe
+
+    calibration: Optional[Calibration] = Relationship(back_populates="data_files")
+    recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
+
+
 class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
-    xp: str = Field(foreign_key="experiment.name")
-    sample_name: str
-    data_file: ForcedOptionalStr = None
-    recipe_name: str
-    recipe_file: ForcedOptionalStr = None
+    recipe_name: str = Field(foreign_key="recipe.name")
     network_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
-    data_plot: ForcedOptionalStr = None
-    comments: Optional[str] = None
-    data_quality: Optional[int] = Field(default=-1)
-    plot_error: Optional[str] = None
-
-    experiment: Optional[Experiment] = Relationship(back_populates="networks")
+    recipe: Optional["Recipe"] = Relationship(back_populates="networks")
     collections: List["CollectionNetwork"] = Relationship(back_populates="network")
     predictions: List["Prediction"] = Relationship(back_populates="network")
 
-    def generate_unique_name(self):
-        # n = f'{row["recipe_name"]}_{row["xp"]}_{"-".join(row["network_info"]["markers"].split(", "))}'
-        return f"{self.recipe_name}_{self.xp}_{'-'.join(self.network_info['markers'])}"
+    _network: Optional[bc.network.Network] = PrivateAttr(default=None)
+
+    @property
+    def network(self):
+        return self._network
 
 
-    def get_recipe_content(self, path_prefix=None):
-        if self.recipe_file is None:
-            return None
-        recipe_file = Path(self.recipe_file)
-        if path_prefix is not None:
-            recipe_file = Path(path_prefix) / recipe_file
-        recipe_file = recipe_file.expanduser().resolve()
-        with open(recipe_file, 'r') as f:
-            return f.read()
+class Recipe(BiocompDB, table=True):
+    name: str = Field(primary_key=True)
+    content: dict = Field(sa_column=Column(JSON))
+    hash: str = Field(default=None)
 
+    xp: Optional[str] = Field(foreign_key="experiment.name", default=None)
+    file: ForcedOptionalStr = None
 
-def build(network: Network, path_prefix=None, lib=None, cache_dir=None, overwrite_info=True):
-    lib = lib or ut.load_lib()
-    if network.recipe_file is None:
-        return None
+    errors: str = Field(default_factory=str)
 
-    if path_prefix is not None:
-        recipe_file = Path(path_prefix) / network.recipe_file
-    else:
-        recipe_file = Path(network.recipe_file)
+    # Relationships
+    experiment: Optional[Experiment] = Relationship(back_populates="recipes")
+    networks: List["Network"] = Relationship(back_populates="recipe")
+    data_files: List["DataFile"] = Relationship(back_populates="recipe")
 
-    recipe_file = recipe_file.expanduser().resolve()
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        self.hash = self.generate_hash()
 
-    candidate_networks = bc.recipe.network_from_recipe(
-        recipe_file, lib, inverse='shortest', use_cache=cache_dir
-    )
+    def generate_hash(self):
+        import xxhash
+        import json
+        import base64
 
-    assert isinstance(candidate_networks, list)
-    if len(candidate_networks) == 0:
-        raise ValueError(f'No networks built for recipe {recipe_file}')
-    assert len(candidate_networks) == 1
+        self_json = json.dumps(self.content, sort_keys=True)
+        xxhash_obj = xxhash.xxh128()
+        xxhash_obj.update(str(self_json).encode())
+        return base64.b32encode(xxhash_obj.digest()).decode().rstrip('=')
 
-    net = candidate_networks[0]
+    @staticmethod
+    def from_file(file_path, xp_name=None, path_prefix=None, **kwargs):
+        import json5
 
-    if overwrite_info:
-        network.network_info = bc.network.generate_network_info(net)
-        net.metadata['network_info'] = network.network_info
+        filepath = Path(file_path) if path_prefix is None else Path(path_prefix) / file_path
+        filepath = Path(filepath).expanduser().resolve()
+        with open(filepath, 'r') as f:
+            content = json5.load(f)
 
-    return net
+        name = content.get('name', filepath.stem)
+        if xp_name is not None:
+            name = f"{xp_name}_{name}"
 
+        return Recipe(
+            name=name,
+            content=content,
+            xp=xp_name,
+            file=str(file_path),
+            **kwargs,
+        )
+
+    def build_networks(
+        self,
+        lib=None,
+        use_cache=None,
+        inverse='all',
+        add_to_self=False,
+    ) -> list["Network"]:
+        """
+        Build network models from the recipe content. A single recipe can generate multiple networks
+        (e.g. using different "inversions" i.e. input vs output markers).
+
+        we build directly from the recipe content, without parsing the recipe file.
+        """
+
+        lib = lib or ut.load_lib()
+        assert lib is not None
+
+        errors = []
+
+        def error_handler(msg):
+            errors.append(msg)
+
+        networks: ListOr[bc.network.Network] = bc.recipe.network_from_recipe(
+            None,
+            lib,
+            inverse=inverse,
+            use_cache=use_cache,
+            recipe_object=self.content,
+            error_handler=error_handler,
+        )
+        networks = networks if isinstance(networks, list) else [networks]
+
+        if errors:
+            if add_to_self:
+                self.errors = "\n".join(errors)
+            logger.error(f"Recipe {self.name} has errors: {self.errors}")
+            return []
+
+        network_models = []
+
+        for net in networks:
+            network_info = bc.network.generate_network_info(net)
+            unique_name = f"{self.name}_{'-'.join(network_info['markers'])}"
+            network = Network(
+                name=unique_name,
+                recipe_name=self.name,
+                network_info=network_info,
+                recipe=self,
+            )
+            network._network = net
+            network_models.append(network)
+
+        if add_to_self:
+            self.networks.extend(network_models)
+
+        return network_models
 
 
 class Prediction(BiocompDB, table=True):
@@ -147,12 +272,13 @@ class CollectionNetwork(BiocompDB, table=True):
     collection: Optional[Collection] = Relationship(back_populates="networks")
     network: Optional[Network] = Relationship(back_populates="collections")
 
+
 def get_biocompdb_sqlite_engine(db_path, echo=False):
     print(f"Creating sqlite engine at {db_path}")
     db_path = Path(db_path).expanduser().resolve()
     return create_engine(f"sqlite:///{db_path}", echo=echo)
 
+
 def create_biocompdb_sqlite(db_path, echo=False):
     engine = get_biocompdb_sqlite_engine(db_path, echo=echo)
     BiocompDB.metadata.create_all(engine)
-

@@ -28,7 +28,10 @@ paths:
 
 calib:
   paths:
-    - "./data/calibrated_data_v3"
-    - "./data/calibrated_data_v2"
-    - "./data/calibrated_data"
-  names: ["v3", "v2", "old"]
+    - "./data/calibrated"
+  name_priority:
+    - "regular-*"
+    - "regular*"
+
+
+
