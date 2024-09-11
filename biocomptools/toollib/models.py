@@ -36,12 +36,6 @@ class Collection(BiocompDB, table=True):
     networks: List["CollectionNetwork"] = Relationship(back_populates="collection")
 
 
-# for s in xp.content['samples']:
-# if sample_is_control(s):
-# continue
-# recipe_file = Path(xp.path) / RECIPE_RELATIVE_PATH / f"{s['recipe']}{RECIPE_EXT}"
-# recipe = md.Recipe.from_file(recipe_file, xp_name=xp.name, path_prefix=base_dir)
-
 
 class Experiment(BiocompDB, table=True):
     name: str = Field(primary_key=True)
@@ -129,6 +123,22 @@ class DataFile(BiocompDB, table=True):
     calibration: Optional[Calibration] = Relationship(back_populates="data_files")
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
 
+    def load_data(self, path_prefix=None):
+        import pandas as pd
+
+        filepath = Path(self.file) if path_prefix is None else Path(path_prefix) / self.file
+        filepath = filepath.expanduser().resolve()
+
+        assert filepath.exists(), f"File {filepath} does not exist"
+
+        ext = filepath.suffix
+        if ext == '.csv':
+            return pd.read_csv(filepath)
+        elif ext == '.parquet':
+            return pd.read_parquet(filepath)
+        else:
+            raise ValueError(f"Unsupported file extension {ext}")
+
 
 class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
@@ -196,6 +206,11 @@ class Recipe(BiocompDB, table=True):
             **kwargs,
         )
 
+    def get_best_datafile(self):
+        if not self.data_files:
+            return None
+        return sorted(self.data_files, key=lambda x: x.priority)[0]
+
     def build_networks(
         self,
         lib=None,
@@ -242,7 +257,7 @@ class Recipe(BiocompDB, table=True):
             network = Network(
                 name=unique_name,
                 recipe_name=self.name,
-                network_info=network_info,
+                # network_info=network_info,
                 recipe=self,
             )
             network._network = net
