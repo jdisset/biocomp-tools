@@ -36,7 +36,6 @@ class Collection(BiocompDB, table=True):
     networks: List["CollectionNetwork"] = Relationship(back_populates="collection")
 
 
-
 class Experiment(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     path: ForcedStr
@@ -154,6 +153,23 @@ class Network(BiocompDB, table=True):
     @property
     def network(self):
         return self._network
+
+    def build(self, lib=None, use_cache=None):
+        assert self.recipe is not None
+        recipe_networks = self.recipe.build_networks(
+            lib=lib,
+            use_cache=use_cache,
+            inverse='all',
+            add_to_self=False,
+        )
+        for net in recipe_networks:
+            if net.name == self.name:
+                self._network = net._network
+                return self._network
+        raise ValueError(
+            f"""Network {self.name} not found when built from recipe {self.recipe.name}. 
+            Available networks: {recipe_networks}"""
+        )
 
 
 class Recipe(BiocompDB, table=True):
@@ -297,3 +313,5 @@ def get_biocompdb_sqlite_engine(db_path, echo=False):
 def create_biocompdb_sqlite(db_path, echo=False):
     engine = get_biocompdb_sqlite_engine(db_path, echo=echo)
     BiocompDB.metadata.create_all(engine)
+
+
