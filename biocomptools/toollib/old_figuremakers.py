@@ -1,30 +1,143 @@
+## {{{                          --     imports     --
 from omegaconf import DictConfig, ListConfig
 from typing import Any, Dict, Union, Annotated, Tuple, Optional, List
 
 import biocomp.utils as ut
 from biocomp.plotutils import FigureSpec, PlotData, SimpleLayout
 
-import biocomptools.toollib.plot as pl
-from biocomptools.toollib.resolvable import Resolvable, make_resolvable
-from biocomptools.toollib.inheritable import merged
-from biocomptools.toollib.plot import (
+from biocomp.utils import PartialFunction, flatten, as_list
+import biocomptools.toollib.old_plot as pl
+from biocomptools.toollib.old_resolvable import Resolvable, make_resolvable, resolved
+from biocomptools.toollib.old_inheritable import (
+    merged,
+    InheritableAttrsModel,
+    merged_into,
+    merged_into_container,
+)
+from biocomptools.toollib.old_plot import (
     FigureTask,
     ListOrSingle,
     FigureMaker,
     ArbitraryTargetModel,
     PlotTask,
     ResolvablePlotConfig,
+    ResolvableFigureMaker,
     ResolvableOr,
-    PlotConfig
+    PlotConfig,
+    resolvers,
+    make_resolvers,
+    with_context,
+    INHERIT_ATTRS,
 )
 
-# todo, maybe it should be a plot, not a figure maker?
-# not sure..
-# - Make parallel with multifigure?
-# - Use a after_task + ray.bind to have parallel things + able to compose tasks
-# - Turn into plot file output
+import numpy as np
+import logging
+
+figlog = logging.getLogger('biocomptools.biocomplot.figure')
+figlog.setLevel(logging.INFO)
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
+## {{{                       --     SingleFigure     --
+class SingleFigure(FigureMaker):
+    """A figure maker that will spawn a figure task for each data group"""
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+        # return [self.spawn_figure_task(d, {'figure_makers': ['single']}) for d in as_list(data)]
+        return [self.spawn_figure_task(data, {'figure_makers': ['single']})]
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     ForEachData     --
+class ForEachData(FigureMaker, InheritableAttrsModel):
+    """A figure maker that will call another figure maker for each data item"""
+
+    figure_maker: ResolvableFigureMaker = {}
+
+    _inherit = {'figure_maker': INHERIT_ATTRS['FigureMaker']['FigureMaker']}
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+        tasks = []
+        for d in as_list(data):
+            with resolvers(make_resolvers({'this': self, 'data': d})):
+                tasks += with_context(
+                    resolved(self.figure_maker), {'figure_makers': ['foreach']}
+                ).make_tasks(d)
+        return flatten(tasks)
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                       --     SwitchFigure     --
+class SwitchFigure(FigureMaker):
+    """A figure maker that will select between different figure makers based on condition"""
+
+    condition: Any = 'default'
+    cases: Dict[Any, ResolvableFigureMaker] = {}
+
+    def model_post_init(self, *a):
+        super().model_post_init(*a)
+        self.cases = merged_into_container(
+            self.cases,
+            self,
+            INHERIT_ATTRS['FigureMaker']['FigureMaker'],
+        )
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+
+        cond = self.condition
+        figlog.debug('SwitchFigure: condition is %s', cond)
+        if callable(cond):
+            cond = cond()
+
+        if cond not in self.cases:
+            raise ValueError(f'No case for condition {cond} or default for SwitchFigure')
+
+        with resolvers(make_resolvers({'this': self, 'data': data})):
+            figmaker = with_context(resolved(self.cases[cond]), {'figure_makers': ['switch']})
+
+        try:
+            return figmaker.make_tasks(data)
+        except NotImplementedError:
+            figlog.debug('Case %s in SwitchFigure can\'t make tasks', cond)
+            return []
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     MultiFigure     --
+class MultiFigure(FigureMaker):
+    """A figure maker that will call multiple figure makers from the same data. Either by repeating
+    the same figure maker n times, or by using different figure makers for each figure."""
+
+    figure_makers: ListOrSingle[ResolvableFigureMaker] = []
+    n_repeats: int = 1
+
+    def model_post_init(self, *a):
+        super().model_post_init(*a)
+        self.figure_makers = merged_into_container(
+            as_list(self.figure_makers), self, INHERIT_ATTRS['FigureMaker']['FigureMaker']
+        )
+        assert isinstance(self.figure_makers, list)
+        base_len = len(self.figure_makers)
+        self.figure_makers = self.figure_makers * self.n_repeats
+        assert len(self.figure_makers) == base_len * self.n_repeats
+
+    def make_tasks(self, data: ListOrSingle[PlotData]) -> List[FigureTask]:
+        tasks = []
+        with resolvers(make_resolvers({'this': self, 'data': data})):
+            for i, figmaker in enumerate(self.figure_makers):
+                fmaker = with_context(
+                    resolved(figmaker),
+                    {
+                        'multifigure_index': i,
+                        'figure_makers': ['multi'],
+                        'multifigure_n_repeats': self.n_repeats,
+                    },
+                )
+                try:
+                    tasks += fmaker.make_tasks(data)
+                except NotImplementedError:
+                    figlog.debug('Figure maker %s in MultiFigure can\'t make tasks', i)
+
+        return tasks
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                      --     GridPlotConfig     --
 class GridPlotConfig(ArbitraryTargetModel):
     """simply a plot config with row and col attributes"""
 
@@ -46,9 +159,31 @@ class GridPlotConfig(ArbitraryTargetModel):
 
 
 ResolvableGridPlotConfig = Annotated[ResolvableOr[GridPlotConfig], *pl.resolvable(PlotConfig)]
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                     --     UORFMatrixFigure     --
+
+def get_single_seq_uorf_vals(network_info: dict) -> tuple[int, int]:
+    uorf_vals = network_info.get('uorf_values', None)
+    assert uorf_vals is not None, f"Missing uorf_values"
+    return uorf_vals[0]
 
 
-class uORFMatrixFigure(FigureMaker):
+def get_uorf_grid(network_infos, x_axis=0, y_axis=1, invert_cols=False, invert_rows=True):
+    uorfs = np.array([get_single_seq_uorf_vals(n) for n in network_infos])
+    uorfs_row, uorfs_col = uorfs[:, x_axis], uorfs[:, y_axis]
+    coords_row = {row: i for i, row in enumerate(np.sort(np.unique(uorfs_row)))}
+    coords_col = {col: i for i, col in enumerate(np.sort(np.unique(uorfs_col)))}
+    if invert_cols:
+        coords_col = {k: len(coords_col) - 1 - v for k, v in coords_col.items()}
+    if invert_rows:
+        coords_row = {k: len(coords_row) - 1 - v for k, v in coords_row.items()}
+    network_coords = np.array(
+        [(coords_row[r], coords_col[c]) for r, c in zip(uorfs_row, uorfs_col)]
+    )
+    return network_coords
+
+
+class UORFMatrixFigure(FigureMaker):
 
     uorf_axis_order: tuple[int, int] = (0, 1)
     plot_only: int = -1  # -1 means all plots. For debugging.
@@ -68,10 +203,10 @@ class uORFMatrixFigure(FigureMaker):
 
     plot_func: str = 'biocomp.plotutils.smooth'
 
-    def model_post_init(self, *_):
-        super().model_post_init()
+    def model_post_init(self, *a):
+        super().model_post_init(*a)
 
-        LEGEND_ROW_CONF = GridPlotConfig(
+        LEGEND_ROW_CONF = GridPlotConfig(  # type: ignore
             row=self.legend_row,
             plot_config={
                 'callstack_params': {
@@ -85,7 +220,7 @@ class uORFMatrixFigure(FigureMaker):
             },
         )
 
-        LEGEND_COL_CONF = GridPlotConfig(
+        LEGEND_COL_CONF = GridPlotConfig(  # type: ignore
             col=self.legend_col,
             plot_config={
                 'callstack_params': {
@@ -99,8 +234,7 @@ class uORFMatrixFigure(FigureMaker):
             },
         )
 
-        UORF_COLORBAR_SPECIALIZATION = GridPlotConfig(
-            _target_=None,
+        UORF_COLORBAR_SPECIALIZATION = GridPlotConfig(  # type: ignore
             row=self.colorbar_row,
             col=self.colorbar_col,
             plot_config={
@@ -169,12 +303,11 @@ class uORFMatrixFigure(FigureMaker):
             # merging all the specialized plot configs
             task_plotconf = self.plot_config
             for gpc in self.grid_plotconfigs:
-                resolved_gpc = rs.resolved(gpc)
+                resolved_gpc = resolved(gpc)
                 if resolved_gpc.matches(r, c, grid_size):
-                    # task_plotconf = merged(task_plotconf, resolved_gpc.plot_config)
-                    task_plotconf = merged(resolved_gpc.plot_config, task_plotconf)
+                    task_plotconf = merged(task_plotconf, resolved_gpc.plot_config)
 
-            t = PlotTask(
+            t = PlotTask(  # type: ignore
                 plot_config=task_plotconf,
                 plot_method=ut.PartialFunction(
                     func=self.plot_func,
@@ -269,5 +402,8 @@ class uORFMatrixFigure(FigureMaker):
                     )
 
         ftask = self.spawn_figure_task(data, {'figure_makers': ['uorf_matrix']})
-        ftask.extra_tasks.append(ut.PartialFunction(func=final_touches))
+        ftask.after_plot_tasks.append(ut.PartialFunction(func=final_touches))
         return [ftask]
+
+##────────────────────────────────────────────────────────────────────────────}}}
+

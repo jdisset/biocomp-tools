@@ -1,24 +1,27 @@
+## {{{                           --     TODO     --
 """
 ---
 # TODO:
-- [ ] Figure out question: should Network even exist? Should recipe be tied to xp instead? Maybe Sample?
-- [ ] make Recipe a SQLModel
+- [x] Figure out question: should Network even exist? Should recipe be tied to xp instead? Maybe Sample?
+- [x] make Recipe a SQLModel
 > - [x] it contains the actual recipe in the content field (json) + hash
-> - [ ] it has a unique name of {xp}_{recipe}
+> - [x] it has a unique name of {xp}_{recipe}
 >    that means there can be content duplicates but that's fine, worst case I can merge by hash later
-> - [ ] it can build networks (and returns a md.Network with its _network attribute set)
+> - [x] it can build networks (and returns a md.Network with its _network attribute set)
 >    - make it so that it builds all the networks,
 >      preferably using the content rather than the file (much more portable)
-> - [ ] properly link networks and recipes (a network is linked to a single recipe)
-> - [ ] properly link recipes and data files (a data file is linked to a single recipe)
+> - [x] properly link networks and recipes (a network is linked to a single recipe)
+> - [x] properly link recipes and data files (a data file is linked to a single recipe)
 
-- [ ] finish the find_calibrated_data function (parse all calib data)
+- [x] finish the find_calibrated_data function (parse all calib data)
 ---
 > [!NOTE]
 > Ultimately, we should merge the main db with the parts db, and link recipes to parts
 
 ---
 """
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                          --     imports     --
 

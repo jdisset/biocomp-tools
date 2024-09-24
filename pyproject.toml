@@ -19,21 +19,15 @@ dependencies = [
 
 
 [project.scripts]
-biocomp-plotdata = "biocomptools.plot_data:main"
+biocomp-plotdata = "biocomptools.plot_data:main" # old script, keeping for now
+biocomp-plot= "biocomptools.plot:main"
 biocomp-makevideo = "biocomptools.make_video:main"
 biocomp-training = "biocomptools.run_training:main"
 
 [tool.pyright]
 include = ["src"]
-
 reportMissingImports = true
 reportMissingTypeStubs = false
-
-pythonVersion = "3.11"
-
-venvPath = "/opt/homebrew/Caskroom/miniconda/base/envs"
-venv = "py311"
-
 
 [tool.basedpyright]
 include = ["src"]

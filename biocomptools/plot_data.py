@@ -1,7 +1,7 @@
 # {{{                        --     imports     -
 import ray
 import biocomp.utils as ut
-import biocomptools.toollib.plot as pl
+import biocomptools.toollib.old_plot as pl
 from pathlib import Path
 import hydra
 import rich
@@ -12,20 +12,33 @@ import dracon as dr
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-def setup_logging(loglevel = logging.WARNING):
+
+def setup_logging(loglevel=logging.WARNING):
     import warnings
+
     warnings.filterwarnings("ignore", message=".*Defaults list is missing")
     warnings.filterwarnings("ignore", message=".*fork() was called")
     import logging
+
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=loglevel,
     )
-    for name in ['biocomp', 'matplotlib', 'PIL', 'biocomptools', 'hydra', 'omegaconf', 'jax', 'ray']:
+    for name in [
+        'biocomp',
+        'matplotlib',
+        'PIL',
+        'biocomptools',
+        'hydra',
+        'omegaconf',
+        'jax',
+        'ray',
+    ]:
         ut.set_loglevel(name, loglevel)
 
 
 setup_logging()
+
 
 def get_job_tasks(job_file: Path) -> list[pl.FigureTask]:
     conf = dr.load(job_file, raw_dict=True)
@@ -33,8 +46,10 @@ def get_job_tasks(job_file: Path) -> list[pl.FigureTask]:
     job = pl.PlotJob.model_validate(oconf)
     return job.generate_figure_tasks()
 
+
 def run_task(task: pl.FigureTask):
     task.run()
+
 
 @ray.remote
 class TaskActor:
@@ -59,10 +74,10 @@ def main():
         help='path to a txt file with multiple job files',
     )
     parser.add_argument(
-            '--num_cpus',
-            type=int,
-            default=8,
-            help='number of cpus to use',
+        '--num_cpus',
+        type=int,
+        default=8,
+        help='number of cpus to use',
     )
 
     args = parser.parse_args()
@@ -98,4 +113,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -154,7 +154,7 @@ class Network(BiocompDB, table=True):
     def network(self):
         return self._network
 
-    def build(self, lib=None, use_cache=None):
+    def build(self, lib, use_cache=None):
         assert self.recipe is not None
         recipe_networks = self.recipe.build_networks(
             lib=lib,
@@ -313,5 +313,3 @@ def get_biocompdb_sqlite_engine(db_path, echo=False):
 def create_biocompdb_sqlite(db_path, echo=False):
     engine = get_biocompdb_sqlite_engine(db_path, echo=echo)
     BiocompDB.metadata.create_all(engine)
-
-
