@@ -1,6 +1,6 @@
 figure_spec:
   title: null
-  output_dir: .
+  output_dir: /tmp
   output_file: simple_plot.png
   layout:
     _target_: biocomp.plotutils.SimpleLayout

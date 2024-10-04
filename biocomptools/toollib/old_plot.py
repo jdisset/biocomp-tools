@@ -55,7 +55,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
 import logging
-
 baselog = ut.setup_logger('biocomptools.plot', logging.WARNING)
 utlog = ut.setup_logger('biocomptools.plot.utils', logging.WARNING)
 inhlog = ut.setup_logger('biocomptools.plot.utils.inheritance', logging.WARNING)
@@ -642,7 +641,6 @@ class PlotJob(InheritableAttrsModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 ## {{{                        --     misc utils     --
 

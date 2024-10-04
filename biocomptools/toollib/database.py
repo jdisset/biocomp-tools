@@ -13,7 +13,7 @@ from enum import Enum
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 dblog = logging.getLogger('biocomptools.database')
-dblog.setLevel(logging.DEBUG)
+# dblog.setLevel(logging.DEBUG)
 config = cm.config
 DBType = Enum('DBType', 'sqlite postgres')
 ListOrTuple = Union[List, Tuple]

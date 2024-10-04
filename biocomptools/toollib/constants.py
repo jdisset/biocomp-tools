@@ -10,7 +10,7 @@ import os
 from typing import Union, List, Tuple, Dict, Any, Callable, Collection
 
 tlog = logging.getLogger('biocomp_tools_common')
-tlog.setLevel(logging.DEBUG)
+# tlog.setLevel(logging.DEBUG)
 
 PathLike = Union[str, Path]
 ##────────────────────────────────────────────────────────────────────────────}}}

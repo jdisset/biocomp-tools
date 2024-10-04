@@ -64,7 +64,7 @@ for handler in logging.root.handlers[:]:
 logging.basicConfig(level="NOTSET", format=LOGFORMAT, datefmt="[%X]", handlers=[RichHandler()])
 log = logging.getLogger('biocomptools.biocomplot.utils.resolvable')
 log.setLevel(logging.INFO)
-log.setLevel(logging.DEBUG)
+# log.setLevel(logging.DEBUG)
 
 
 def short_conf(conf: DictLike) -> str:

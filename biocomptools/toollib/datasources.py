@@ -2,29 +2,38 @@
 import glob
 from pydantic.functional_validators import BeforeValidator
 from typing import Any, Dict, Union, Annotated, Optional, List, Callable
+from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector
 
 from functools import partial
 
 import pandas as pd
 import numpy as np
 
+from biocomp.recipe import get_network_XY
+from biocomp.utils import (
+    ArbitraryModel,
+    load_lib,
+    save,
+    EncodedPartialFunction,
+    PartialFunction,
+    PartialFunctionResult,
+)
 from pathlib import Path
 import biocomp as bc
 import biocomp.utils as ut
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
-from biocomp.utils import PartialFunction
+from biocomp.utils import PartialFunction, ArbitraryModel
 import biocomptools.toollib.common as cm
 import biocomptools.toollib.models as md
 from biocomptools.toollib.resolvable import resolved
 
-
-from biocomptools.toollib.plot import (
-    DataSource,
-    SpecializedDataSource,
-    datalog,
-)
+import logging
+from sqlmodel import tuple_
+from sqlmodel import Field, Session, SQLModel, create_engine, select, text
+from sqlalchemy.inspection import inspect
+from sqlalchemy.sql.elements import TextClause
 
 
 def truncated_path(path: str | Path, max_len=50) -> str:
@@ -43,14 +52,26 @@ def to_str(data: Any) -> Any:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                        --     datasource     --
+
+
+class DataSource(ArbitraryModel):
+    metadata: dict = {}
+
+    def get_data(self) -> List[PlotData]:
+        raise NotImplementedError('Subclasses must implement get_data')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     Recipe     --
 
 ForcedStr = Annotated[str, BeforeValidator(to_str)]
 ForcedOptionalStr = Annotated[Optional[str], BeforeValidator(to_str)]
 
+datalog = ut.setup_logger('biocomptools.plot.data', logging.WARNING)
 
-class RecipeDataSource(SpecializedDataSource):
 
+class RecipeDataSource(DataSource):
     recipe_path: ForcedStr
     data_path: ForcedStr
     cache_dir: ForcedOptionalStr = None
@@ -62,7 +83,6 @@ class RecipeDataSource(SpecializedDataSource):
         datalog.debug('Initializing RecipeDataSource with figure_maker: %s', self.figure_maker)
 
     def get_data(self) -> List[PlotData]:
-
         lib = ut.load_lib()
 
         recipe_file = Path(self.recipe_path).expanduser().resolve()
@@ -108,8 +128,7 @@ class RecipeDataSource(SpecializedDataSource):
 ## {{{                            --     Raw     --
 
 
-class RawDataSource(SpecializedDataSource):
-
+class RawDataSource(DataSource):
     data_path: Union[Path, str]
     output_column: Optional[str] = None
     input_columns: Optional[List[str]] = None
@@ -134,7 +153,6 @@ class RawDataSource(SpecializedDataSource):
             )
 
     def load_file(self, data_file) -> List[PlotData]:
-
         extension = data_file.suffix
 
         if extension == '.csv':
@@ -207,19 +225,17 @@ class RawDataSource(SpecializedDataSource):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     DB   --
 
-from sqlmodel import tuple_
-from sqlmodel import Field, Session, SQLModel, create_engine, select, text
-from sqlalchemy.inspection import inspect
-from sqlalchemy.sql.elements import TextClause
 
 config = cm.config
+
 
 def to_text_clause(data: Any) -> TextClause:
     if isinstance(data, str):
         return text(data)
     return data
 
-class DBSource(SpecializedDataSource):
+
+class oldDBSource(DataSource):
     network_query: Annotated[TextClause, BeforeValidator(to_text_clause)] = 'select * from network'
     color_aliases: Optional[Dict[str, str]] = cm.config.protein_aliases
     input_order: Optional[List[int]] = None
@@ -230,9 +246,7 @@ class DBSource(SpecializedDataSource):
     def model_post_init(self, *a):
         super().model_post_init(*a)
 
-
-    def data_from_network(self, network:md.Network) -> PlotData:
-
+    def data_from_network(self, network: md.Network) -> PlotData:
         actual_network = md.build(network, path_prefix=self.root_path, overwrite_info=True)
         assert isinstance(actual_network, bc.network.Network)
 
@@ -254,11 +268,7 @@ class DBSource(SpecializedDataSource):
         if not data_file.exists():
             raise ValueError(f'Data file {data_file} does not exist for network {network.name}')
 
-        X, Y = bc.recipe.get_network_XY(
-            actual_network,
-            data_file,
-            color_aliases=self.color_aliases
-        )
+        X, Y = bc.recipe.get_network_XY(actual_network, data_file, color_aliases=self.color_aliases)
 
         assert isinstance(X, np.ndarray)
         assert isinstance(Y, np.ndarray)
@@ -273,7 +283,6 @@ class DBSource(SpecializedDataSource):
         )
 
         return pdata
-
 
     def get_data(self) -> List[PlotData]:
         engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path, False)
@@ -295,13 +304,81 @@ class DBSource(SpecializedDataSource):
             return all_data
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
 
-    def __repr__(self, indent=0):
-        indentstr = ' ' * indent
-        return f'{indentstr}RecipeDataSource({truncated_path(self.recipe_path)})'
+## {{{                          --     DB   --
+
+config = cm.config
+
+
+def to_text_clause(data: Any) -> TextClause:
+    if isinstance(data, str):
+        return text(data)
+    return data
+
+
+class DBSource(DataSource, NetworkSet):
+    input_order: Optional[List[int]] = None
+
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        self._lib = load_lib()
+        self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
+        with Session(self._engine) as session:
+            self.run_selectors(session)
+
+    @property
+    def db_session(self):
+        return Session(self._engine)
+
+    @property
+    def path_prefix(self):
+        return Path(config.paths.root).expanduser().resolve()
+
+    def data_from_network(self, network: md.Network, data_file: str | Path) -> PlotData:
+        network.build(self._lib)
+        actual_network = network._network
+        assert isinstance(actual_network, bc.network.Network)
+
+        data_file = Path(data_file).expanduser().resolve()
+        metadata = resolved(self.metadata)
+        metadata['built_network'] = actual_network
+        metadata['network'] = network
+        metadata['network_info'] = network.network_info
+        metadata['source_type'] = 'DB'
+        metadata = {**metadata, **network.model_dump()}
+        metadata['file_stem'] = data_file.stem
+
+        if not data_file.exists():
+            raise ValueError(f'Data file {data_file} does not exist for network {network.name}')
+
+        X, Y = bc.recipe.get_network_XY(actual_network, data_file)
+
+        assert isinstance(X, np.ndarray)
+        assert isinstance(Y, np.ndarray)
+
+        pdata = pu.extract_plot_data_from_network(
+            actual_network,
+            X,
+            Y,
+            input_order=self.input_order,
+            metadata=metadata,
+        )
+
+        return pdata
+
+    def get_data(self) -> List[PlotData]:
+        data = self.get_networks_and_data(self.db_session)
+        assert len(data), 'No data returned from query'
+        networks, datafiles = zip(*data)
+        return [
+            self.data_from_network(n, self.path_prefix / f.file)
+            for n, f in zip(networks, datafiles)
+        ]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                            --     XP     --
 
 

@@ -15,7 +15,6 @@ from biocomp.datautils import DataRescaler
 from pydantic import BaseModel, Field, Annotated
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                        --     PlotConfig     --
 
 
@@ -43,7 +42,6 @@ class PlotConfig(BaseModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                         --     PlotTask     --
 
 
@@ -117,8 +115,6 @@ class FigureTask(BaseModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-
 ## {{{                          --     PlotJob     --
 
 

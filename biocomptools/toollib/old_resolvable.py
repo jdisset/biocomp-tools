@@ -58,13 +58,14 @@ T = TypeVar('T')
 U = TypeVar('U')
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     logger utils --
+
 LOGFORMAT = "in %(funcName)s: %(message)s"
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 logging.basicConfig(level="NOTSET", format=LOGFORMAT, datefmt="[%X]", handlers=[RichHandler()])
 log = logging.getLogger('biocomptools.biocomplot.utils.resolvable')
 log.setLevel(logging.INFO)
-log.setLevel(logging.DEBUG)
+# log.setLevel(logging.DEBUG)
 
 
 def short_conf(conf: DictLike) -> str:
