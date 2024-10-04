@@ -6,31 +6,10 @@
     _target_: biocomp.plotutils.SimpleLayout
 
 !noconstruct plot_config: &pc
+  !define plotvars:
+    vlims: [null, null]
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
   rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
-  general:
-    vlims: [null, null]
-  rc_context:
-    figure.subplot.hspace: 0.38
-    figure.subplot.wspace: 0.25
-
-    axes.labelsize: 14
-    axes.titlesize: 16
-
-    xtick.labelsize: 14
-    ytick.labelsize: 14
-
-  callstack_params:
-    smooth_2d_params:
-      zslice: [0.35]
-      heatmap_params:
-        contours: null
-      draw_colorbar: true
-      colorbar_params:
-        size: [0.05, 0.9]
-        position: [1.05, 0.05]
-        tick_props:
-          labelsize: 14
 
 !noconstruct data_sources: &alldata
   - !DBSource &3reg
@@ -41,11 +20,9 @@
       title: 3 regions dual input
 
 figures:
-  - !Figure
-    figure_spec: !include /figure_spec
+  - figure_spec: !include /figure_spec
     plot_tasks:
-      - !PlotTask &plt
-        !define D: ${construct(&3reg).get_data()[0]} # problem is when using define in resolvables, they have to be executed right away...
+      - !define D: ${construct(&3reg).get_data()[0]}
         plot_config: !include pc
         plot_method:
           func: biocomp.plotutils.smooth
@@ -53,6 +30,7 @@ figures:
             force_dim: 2
             plot_data: ${D}
             ax: ${FIG.flat_ax[0]}
-            xtitle: '\begin{center} X\textsubscript{1} (${str(D.input_names[0])}) \\ Csy4\textsubscript{RS}\_mNG + CasE\textsubscript{RS}\_mNG + pgu \end{center}'
+            xtitle: '\begin{center} X\textsubscript{1} (${D.input_names[0]}) \\ Csy4\textsubscript{RS}\_mNG + CasE\textsubscript{RS}\_mNG + pgu \end{center}'
             ytitle: '\begin{center} X\textsubscript{2} (${D.input_names[1]}) \\ Csy4\textsubscript{RS}\_mNG + pgu\textsubscript{RS}\_mNG + CasE \end{center}'
             vtitle: "mNeonGreen"
+            zslice: [0.35]

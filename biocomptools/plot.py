@@ -34,7 +34,6 @@ datalog = ut.setup_logger('biocomptools.plot.data', logging.WARNING)
 class PlotConfig(BaseModel):
     rc_context: Dict[str, Any] = {}  # rc_params for matplotlib
     callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
-    general: Dict[str, Any] = {}  # general purpose parameters
     rescaler: DataRescaler = Field(default_factory=DataRescaler)
 
     def prepare_func(self, plot_method: PartialFunction, auto_callstack_bind: bool = True):
@@ -91,11 +90,12 @@ class Figure(ArbitraryModel):
 
     def run(self):
         figax = self.figure_spec.make_figure()  # type: ignore
-        print(f'Running {len(self.plot_tasks)} plot tasks, figure {figax.flat_ax[0]}')
-        plot_tasks = [t.construct(context={"FIG": figax}) for t in self.plot_tasks]
-        for task in plot_tasks:
-            resolve_all_lazy(task)
-            task.run()
+        for t in self.plot_tasks:
+            pt = t.construct(context={"FIG": figax})
+            if isinstance(pt, dict):
+                pt = PlotTask(**pt)
+            resolve_all_lazy(pt)
+            pt.run()
 
         self.figure_spec.finalize(figax)  # type: ignore
 
@@ -111,13 +111,32 @@ class PlotJob(LazyDraconModel):
 
     def run(self):
         self._context = {}
-        print([type(f) for f in self.figures])
-        figures = [f.construct(deferred_paths=['/figures.*.plot_tasks.*']) for f in self.figures]
+        figures = []
+        for f in self.figures:
+            f = f.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+            if isinstance(f, dict):
+                f = Figure(**f)
+            figures.append(f)
+
         results = [f.run() for f in figures]
-        print(results)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+class profile:
+    def __init__(self, output_file='profile_output.prof'):
+        self.output_file = output_file
+
+    def __enter__(self):
+        import cProfile
+
+        self.pr = cProfile.Profile()
+        self.pr.enable()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.pr.disable()
+        self.pr.dump_stats(self.output_file)
 
 
 def main():
@@ -125,15 +144,18 @@ def main():
         PlotJob,
         name='biocomp-plot',
         description='Make plots.',
+        context={'DBSource': DBSource},
     )
     pj, args = prog.parse_args(
         sys.argv[1:],
         deferred_paths=[
             '/figures.*',
         ],
+        context={'DBSource': DBSource},
     )
     pj.run()
 
 
 if __name__ == '__main__':
-    main()
+    with profile():
+        main()

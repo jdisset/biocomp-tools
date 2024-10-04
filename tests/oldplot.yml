@@ -23,7 +23,7 @@ plot_config:
 
   callstack_params:
     smooth_2d_params:
-      zslice: [0.09]
+      zslice: [0.35]
       heatmap_params:
         contours: null
       draw_colorbar: true
@@ -38,8 +38,8 @@ data_source:
     data_source:
     - _target_: DBSource
       network_query : |
-        SELECT * from network WHERE recipe_name = "2I3Nv1_3"
-        AND xp = "2024-04-09_BPv7_recombCIR"
+        SELECT * from network WHERE recipe_name = "BPv4_3"
+        AND xp = "2024-02-18_BPv4_BPv5"
       metadata:
         title: 3 regions dual input
 
