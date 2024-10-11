@@ -148,6 +148,7 @@ class NetworkPrediction(DBSource):
     seed: int = 0
 
     def get_data(self) -> List[PlotData]:
+        ...
 
         
 
