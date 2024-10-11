@@ -3,28 +3,28 @@ protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
 
 db:
   postgre:
-    name: ${oc.env:BIOCOMP_DB_NAME, 'biocomp'}
-    user: ${oc.env:BIOCOMP_DB_USER, 'biocomp'}
-    port: ${oc.env:BIOCOMP_DB_PORT, 5432}
-    pass: ${oc.env:BIOCOMP_DB_PASS, ???}
-    host: ${oc.env:BIOCOMP_DB_HOST, ???}
+    name: ${getenv('BIOCOMP_DB_NAME', 'biocomp')}
+    user: ${getenv('BIOCOMP_DB_USER', 'biocomp')}
+    port: ${getenv('BIOCOMP_DB_PORT', 5432)}
+    pass: ${getenv('BIOCOMP_DB_PASS')}
+    host: ${getenv('BIOCOMP_DB_HOST')}
 
   sqlite:
-    path: ${oc.env:BIOCOMP_SQLITE_DB_PATH, ${...paths.root}/biocompdb.sqlite}
+    path: ${getenv('BIOCOMP_SQLITE_DB_PATH', '${&/paths.root}/biocompdb.sqlite')}
     backup:
-      dir: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_DIR, ${....paths.root}/db_backups/}
-      keep_n: ${oc.env:BIOCOMP_SQLITE_DB_BACKUP_KEEP_N, 50}
+      dir: ${getenv('BIOCOMP_SQLITE_DB_BACKUP_DIR', '${&/paths.root}/db_backups/')}
+      keep_n: ${getenv('BIOCOMP_SQLITE_DB_BACKUP_KEEP_N', 50)}
 
   gsheet:
-    google_app_credentials_path: ${oc.env:BIOCOMP_GOOGLE_APP_CREDENTIALS_PATH, '/Users/jeandisset/.google/biocomp/key.json'}
+    google_app_credentials_path: ${getenv('BIOCOMP_GOOGLE_APP_CREDENTIALS_PATH', '/Users/jeandisset/.google/biocomp/key.json')}
     parts_sheet_key: "1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME"
 
 paths:
-  root: ${oc.env:BIOCOMP_ROOT, '~/Dropbox (MIT)/Biocomp'}
+  root: ${getenv('BIOCOMP_ROOT', '~/Dropbox (MIT)/Biocomp')}
   cache:
-    base_dir: ${oc.env:BIOCOMP_CACHE_DIR, '${paths.root}/__cache'}
-    networks: ${oc.env:BIOCOMP_NETWORK_CACHE_DIR, '${.base_dir}/networks'}
-    xp: ${oc.env:BIOCOMP_NETWORK_CACHE_DIR, '${.base_dir}/xp'}
+    base_dir: ${getenv('BIOCOMP_CACHE_DIR', '${&/paths.root}/__cache')}
+    networks: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/networks')}
+    xp: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/xp')}
 
 calib:
   paths:
@@ -32,6 +32,3 @@ calib:
   name_priority:
     - "regular-*"
     - "regular*"
-
-
-

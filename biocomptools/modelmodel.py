@@ -11,7 +11,8 @@ from functools import partial
 import numpy as np
 import biocomp.datautils as du
 from biocomp import nodes
-from pydantic import Field, BaseModel, BeforeValidator
+from pydantic import Field, BaseModel, BeforeValidator, ConfigDict
+from biocomp.utils import ArbitraryModel
 
 import dracon as dr
 from sqlmodel import Session, select
@@ -40,27 +41,88 @@ lib = ut.load_lib()
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-# load train_results.pkl
-fpath = Path('tmp/train_results.pkl')
-train_results = bc.utils.load(fpath)
-params = train_results['params']
+def random_split_like_tree(rng_key, target=None, treedef=None):
+    import jax
+
+    if treedef is None:
+        treedef = jax.tree_structure(target)
+    keys = jax.random.split(rng_key, treedef.num_leaves)
+    return jax.tree.unflatten(treedef, keys)
+
+
+def tree_random_normal_like(rng_key, target):
+    import jax
+
+    keys_tree = random_split_like_tree(rng_key, target)
+    return jax.tree.map(
+        lambda x, k: jax.random.normal(k, shape=x.shape),
+        target,
+        keys_tree,
+    )
 
 
 def get_shared_params(params):
-    _, shared = params.filter_by_tag(['local'])
+    shared, _ = params.filter_by_tag(['shared'])
     return shared
 
 
-def get_local_params(params):
-    local, _ = params.filter_by_tag(['local'])
-    return local
+def get_nonshared_params(params):
+    _, nonshared = params.filter_by_tag(['shared'])
+    return nonshared
 
 
-class BiocompModel(BaseModel):
+def load_params(maybe_path):
+    import pickle
+
+    if isinstance(maybe_path, pr.ParameterTree):
+        # already loaded
+        return maybe_path
+
+    if isinstance(maybe_path, str):
+        maybe_path = Path(maybe_path)
+
+    with open(maybe_path, 'rb') as f:
+        return pickle.load(f)
+
+
+class BiocompModel(ArbitraryModel):
     compute_config: cmp.ComputeConfig
-    network: md.Network
+    shared_params: Annotated[
+        pr.ParameterTree,
+        BeforeValidator(get_shared_params),
+        BeforeValidator(load_params),
+    ]
 
-    shared_params: Annotated[pr.ParameterTree, BeforeValidator(get_shared_params)]
+    def save(self, path):
+        import pickle
+
+        with open(path, 'wb') as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, path):
+        import pickle
+
+        with open(path, 'rb') as f:
+            m = pickle.load(f)
+            assert isinstance(m, cls)
+            return m
+
+
+def load_model(maybe_path):
+    if isinstance(maybe_path, BiocompModel):
+        # already loaded
+        return maybe_path
+
+    if isinstance(maybe_path, str):
+        maybe_path = Path(maybe_path)
+
+    return BiocompModel.load(maybe_path)
+
+
+class SingleNetworkModel(ArbitraryModel):
+    model: Annotated[BiocompModel, BeforeValidator(load_model)]
+    network: md.Network
 
     def model_post_init(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -69,44 +131,13 @@ class BiocompModel(BaseModel):
         assert self.network.network is not None
 
         self._stack: cmp.ComputeStack = cmp.ComputeStack([self.network.network])
-        self._stack.build(self.compute_config)
-        self._local_params = get_local_params(self._stack.init(PRNGKey(0)))
+        self._stack.build(self.model.compute_config)
+        self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
 
-        self._params = pr.ParameterTree.merge(self.shared_params, self._local_params)
+        self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
 
-    def run_prediction(self, X: np.ndarray, Q: np.ndarray, key) -> np.ndarray:
+    def predict(self, X: np.ndarray, key) -> np.ndarray:
         assert isinstance(self._stack, cmp.ComputeStack)
-        res, _ = jax.jit(self._stack.apply)(self._params, X, Q, key)
-        return res
+        Z = jax.random.uniform(key, ybatches.shape)
 
-# TODO: 
-# merge with the plot stuff so that it uses the same visualization
-
-##
-
-import asteval
-a=2
-
-
-aeval = asteval.Interpreter()
-aeval.symtable['a'] = a
-aeval.symtable['symtable'] = aeval.symtable
-
-def getval(varname, default=None):
-    try:
-        varname = varname.lstrip().rstrip()
-        if not varname.isidentifier():
-            raise ValueError(f'Invalid identifier: {varname}')
-        return eval(varname)
-    except NameError:
-        return default
-
-aeval.symtable['getval'] = getval
-aeval.eval('getval("b ", -1)')
-
-
-# del b
-##
-
-aeval.eval('[i for i in range(10)]')
-
+        batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))

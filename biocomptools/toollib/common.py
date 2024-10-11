@@ -44,9 +44,12 @@ PathLike = Union[str, Path]
 tlog = logging.getLogger('biocomptools.common')
 tlog.setLevel(logging.WARNING)
 
-config = dr.load('pkg:biocomptools:configs/default.yaml', raw_dict=True)
-config = OmegaConf.create(config)
-OmegaConf.resolve(config)
+config = dr.load('pkg:biocomptools:configs/default.yaml', enable_interpolation=True)
+dr.draconstructor.resolve_all_lazy(config)
+print(f'Loaded config: {config}')
+# config = OmegaConf.create(config)
+# OmegaConf.resolve(config)
+
 
 def get_logger(subname):
     return logging.getLogger(f'biocomptools.{subname}')
@@ -215,7 +218,6 @@ def load_network_and_data_from_row(
     error_handler=None,
     cache_dir: Optional[PathLike] = config.paths.cache.networks,
 ):
-
     if error_handler is None:
 
         def __raise_on_error(name, e):
@@ -407,8 +409,6 @@ import subprocess
 # print(f'Running command: {cmd}')
 # os.system(cmd)
 # print(f'Video created at {output_file}')
-
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

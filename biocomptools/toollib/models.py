@@ -155,8 +155,10 @@ class Network(BiocompDB, table=True):
         return self._network
 
     def build(self, lib, use_cache=None):
-        assert self.recipe is not None
-        recipe_networks = self.recipe.build_networks(
+        recipe = self.recipe # should lazy load
+        assert recipe is not None
+
+        recipe_networks = recipe.build_networks(
             lib=lib,
             use_cache=use_cache,
             inverse='all',
@@ -273,8 +275,6 @@ class Recipe(BiocompDB, table=True):
             network = Network(
                 name=unique_name,
                 recipe_name=self.name,
-                # network_info=network_info,
-                recipe=self,
             )
             network._network = net
             network_models.append(network)

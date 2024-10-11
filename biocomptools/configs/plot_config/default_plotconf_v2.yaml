@@ -9,6 +9,8 @@
     grey: "#777777"
     red: "#FF0000"
 
+rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
+
 rc_context:
   savefig.pad_inches: 0.2
   savefig.dpi: 300
@@ -55,8 +57,6 @@ rc_context:
   ytick.minor.size: 2
   ytick.minor.width: 0.2
   ytick.right: false
-
-  # x axis title font should be smaller than the label font
 
   font.family: sans-serif
   font.monospace: Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono,

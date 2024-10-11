@@ -1,15 +1,12 @@
 !noconstruct figure_spec:
   title: null
   output_dir: /tmp
-  output_file: simple_plot.png
-  layout:
-    _target_: biocomp.plotutils.SimpleLayout
+  output_file: newplot.png
 
-!noconstruct plot_config: &pc
+!noconstruct plot_config:
   !define plotvars:
     vlims: [null, null]
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
-  rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
 !noconstruct data_sources: &alldata
   - !DBSource &3reg
@@ -23,7 +20,7 @@ figures:
   - figure_spec: !include /figure_spec
     plot_tasks:
       - !define D: ${construct(&3reg).get_data()[0]}
-        plot_config: !include pc
+        plot_config: !include /plot_config
         plot_method:
           func: biocomp.plotutils.smooth
           kwargs:

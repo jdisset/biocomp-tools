@@ -3,6 +3,7 @@ from biocomp.recipe import get_network_XY
 from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
 from pydantic import BaseModel, Field, BeforeValidator, model_validator
+from sqlalchemy.orm import selectinload
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
@@ -48,7 +49,12 @@ class NetworkSelector(BaseModel):
     output_name: Optional[str] = None
 
     def get_networkdata_ids(self, session) -> List[NetworkDataId]:
-        query = select(md.Network).join(md.Recipe).join(md.Experiment)
+        query = (
+            select(md.Network)
+            .join(md.Recipe)
+            .join(md.Experiment)
+            .options(selectinload(md.Network.recipe).selectinload(md.Recipe.data_files))
+        )
 
         if self.experiment_name:
             query = query.where(col(md.Experiment.name).regexp_match(self.experiment_name))
@@ -77,7 +83,8 @@ class NetworkSelector(BaseModel):
                 )
                 datafile = session.exec(datafile_query).first()
             else:
-                datafile = network.recipe.get_best_datafile()
+                with session.no_autoflush:
+                    datafile = network.recipe.get_best_datafile()
 
             assert datafile, f"No datafile found for {network.recipe_name}"
             network_and_data.append(
@@ -181,13 +188,15 @@ def build_data_manager(
 ) -> DataManager:
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
     data = []
+    actual_networks = []
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
         n.build(lib, use_cache=use_cache)
         data.append(get_network_XY(n._network, path_prefix / f.file))
+        actual_networks.append(n._network)
 
     X, Y = zip(*data)
 
-    return DataManager(X, Y, networks, data_cfg=data_conf)
+    return DataManager(X, Y, actual_networks, data_cfg=data_conf)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
