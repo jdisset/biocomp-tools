@@ -39,10 +39,12 @@ from typing import (
 
 from pydantic import BaseModel, Field
 
+from biocomptools.logging_config import get_logger
+tlog = get_logger(__name__)
+
+
 PathLike = Union[str, Path]
 
-tlog = logging.getLogger('biocomptools.common')
-tlog.setLevel(logging.WARNING)
 
 config = dr.load('pkg:biocomptools:configs/default.yaml', enable_interpolation=True)
 dr.draconstructor.resolve_all_lazy(config)
@@ -51,8 +53,15 @@ print(f'Loaded config: {config}')
 # OmegaConf.resolve(config)
 
 
-def get_logger(subname):
-    return logging.getLogger(f'biocomptools.{subname}')
+def maybetqdm(x, min_len=1, **kw):
+    # check if it's a zip
+    if isinstance(x, zip):
+        x = list(x)
+    if len(x) > min_len:
+        return ut.tqdm(x, **kw)
+    return x
+
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

@@ -1,32 +1,18 @@
 ## {{{                          --     imports     --
 from biocomp import utils as ut
-import biocomp as bc
-import optax
-from labellines import labelLines, labelLine
-from biocomp.recipe import get_network_XY
 import jax
 import biocomp.compute as cmp
 from pathlib import Path
-from functools import partial
 import numpy as np
-import biocomp.datautils as du
-from biocomp import nodes
-from pydantic import Field, BaseModel, BeforeValidator, ConfigDict
+from pydantic import BeforeValidator
 from biocomp.utils import ArbitraryModel
 
-import dracon as dr
-from sqlmodel import Session, select
-import time
-import pandas as pd
-from typing import Optional, List, Tuple, TypeVar, Dict, Any, Callable, Annotated
-from tqdm import tqdm
-from biocomp.utils import EncodedPartialFunction
+from typing import  Callable, Annotated
 from jax.random import PRNGKey
 
 import logging
 from biocomptools.toollib.common import config
 import biocomptools.toollib.models as md
-from rich.console import Console
 import biocomp.parameters as pr
 
 logger = logging.getLogger('build_xp_table')
@@ -82,7 +68,7 @@ def load_params(maybe_path):
         maybe_path = Path(maybe_path)
 
     with open(maybe_path, 'rb') as f:
-        return pickle.load(f)
+        return ut.tree_to_np(pickle.load(f))
 
 
 class BiocompModel(ArbitraryModel):
@@ -125,7 +111,7 @@ class SingleNetworkModel(ArbitraryModel):
     network: md.Network
 
     def model_post_init(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().model_post_init(*args, **kwargs)
 
         self.network.build(lib=lib, use_cache=config.paths.cache.networks)
         assert self.network.network is not None
@@ -136,8 +122,20 @@ class SingleNetworkModel(ArbitraryModel):
 
         self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
 
-    def predict(self, X: np.ndarray, key) -> np.ndarray:
         assert isinstance(self._stack, cmp.ComputeStack)
-        Z = jax.random.uniform(key, ybatches.shape)
+        assert isinstance(self._stack.apply, Callable)
+        self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0)))
 
-        batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    def predict(self, X: np.ndarray, key=None) -> np.ndarray:
+        if key is None:
+            key = PRNGKey(0)
+        if isinstance(key, int):
+            key = PRNGKey(key)
+
+        num_z = self._params["global/number_of_quantile_variables"]
+        Z = jax.random.uniform(key, (X.shape[0], num_z))
+        keys = jax.random.split(key, X.shape[0])
+
+        yhat, grads = self._batch_apply(self._params, X, Z, keys)
+
+        return yhat

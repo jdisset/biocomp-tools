@@ -9,7 +9,9 @@ import biocomp.utils as ut
 import biocomp as bc
 import logging
 
-logger = logging.getLogger('biocomp.models')
+from biocomptools.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def to_str(data: Any) -> Any:
@@ -152,10 +154,14 @@ class Network(BiocompDB, table=True):
 
     @property
     def network(self):
+        if self._network is None:
+            logger.debug(f"Building network {self.name}")
+            self.build(lib=ut.load_lib())
+        assert self._network is not None
         return self._network
 
     def build(self, lib, use_cache=None):
-        recipe = self.recipe # should lazy load
+        recipe = self.recipe  # should lazy load
         assert recipe is not None
 
         recipe_networks = recipe.build_networks(

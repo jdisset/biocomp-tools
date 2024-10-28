@@ -1,124 +1,72 @@
 ## {{{                          --     imports     --
-
-import logging
+import logging.config
+from pydantic import BaseModel, Field, BeforeValidator
+import sys
+import ray
+import matplotlib as mpl
+from typing import List, Annotated, Dict, Any, Optional
 
 import dracon as dr
 from dracon.lazy import LazyDraconModel
-from dracon.draconstructor import resolve_all_lazy
-from typing import List, Annotated, Dict, Any, Optional
 from dracon.commandline import make_program, Arg
 from dracon.deferred import DeferredNode
-import sys
+
+
 from biocomp.utils import PartialFunction, ArbitraryModel
 from biocomp.datautils import DataRescaler
-from biocomp.plotutils import FigureSpec
-from pydantic import BaseModel, Field
+from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
 from biocomp import utils as ut
-import matplotlib as mpl
-from biocomptools.toollib.datasources import DataSource, DBSource
-
-logging.basicConfig(level=logging.WARNING)
-baselog = ut.setup_logger('biocomptools.plot', logging.WARNING)
-utlog = ut.setup_logger('biocomptools.plot.utils', logging.WARNING)
-inhlog = ut.setup_logger('biocomptools.plot.utils.inheritance', logging.WARNING)
-reslog = ut.setup_logger('biocomptools.plot.utils.resolvable', logging.WARNING)
-figlog = ut.setup_logger('biocomptools.plot.figure', logging.WARNING)
-logging.getLogger('matplotlib').setLevel(logging.WARNING)
-datalog = ut.setup_logger('biocomptools.plot.data', logging.WARNING)
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                        --     plot config     --
 
 
-class PlotConfig(BaseModel):
-    rc_context: Dict[str, Any] = {}  # rc_params for matplotlib
-    callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
-    rescaler: DataRescaler = Field(default_factory=DataRescaler)
+from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
+from biocomptools.toollib.common import maybetqdm
+from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.toollib.networkselector import NetworkSelector, Regex
 
-    def prepare_func(self, plot_method: PartialFunction, auto_callstack_bind: bool = True):
-        callstack_conf = {}
-        if auto_callstack_bind:
-            callstack_conf = ut.generate_full_nested_config(
-                self.callstack_params, namespace='biocomp.plotting'
-            ).get(f'{plot_method.get_name()}_params', {})
+from biocomptools.logging_config import get_logger, setup_logging
 
-        def prepared_func(
-            *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
-        ):
-            full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
-
-            with mpl.rc_context(rc=rc):
-                return plot_method(*args, **full_kwargs)
-
-        return prepared_func
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                         --     plot task     --
-
-
-class PlotTask(ArbitraryModel):
-    context: Dict = {}
-    plot_config: PlotConfig = Field(default_factory=PlotConfig)
-    plot_method: Optional[PartialFunction] = None
-    raw_method: Optional[PartialFunction] = None
-    auto_callstack_bind: bool = True  # whether to automatically bind callstack params
-    plot_data: Any = None
-
-    def model_post_init(self, *a):
-        super().model_post_init(*a)
-
-    def run(self):
-        if self.plot_method:
-            self.plot_config.prepare_func(self.plot_method, self.auto_callstack_bind)()
-        if self.raw_method:
-            self.raw_method()
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                          --     figure     --
-
-
-class Figure(ArbitraryModel):
-    figure_spec: FigureSpec
-    plot_tasks: List[DeferredNode[PlotTask]] = []
-    after_plot_tasks: List[PartialFunction] = []
-
-    def run(self):
-        figax = self.figure_spec.make_figure()  # type: ignore
-        for t in self.plot_tasks:
-            pt = t.construct(context={"FIG": figax})
-            if isinstance(pt, dict):
-                pt = PlotTask(**pt)
-            resolve_all_lazy(pt)
-            pt.run()
-
-        self.figure_spec.finalize(figax)  # type: ignore
-
+log = get_logger(__name__)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                          --     PlotJob     --
 
+DEFAULT_CONTEXT = {
+    'Figure': Figure,
+    'DBSource': DBSource,
+    'NetworkPrediction': NetworkPrediction,
+    'SimpleLayout': SimpleLayout,
+    'Regex': Regex,
+}
+
+
+def _construct_and_run(figure):
+    f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+    if isinstance(f, dict):
+        f = Figure(**f)
+    f.run()
+
+
+@ray.remote
+def _ray_construct_and_run(f):
+    """Ray remote version of the construct and run function"""
+    return _construct_and_run(f)
+
 
 class PlotJob(LazyDraconModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
 
     def run(self):
-        self._context = {}
-        figures = []
-        for f in self.figures:
-            f = f.construct(deferred_paths=['/figures.*.plot_tasks.*'])
-            if isinstance(f, dict):
-                f = Figure(**f)
-            figures.append(f)
+        # Initialize Ray if it hasn't been started
+        if not ray.is_initialized():
+            ray.init()
 
-        results = [f.run() for f in figures]
+        # Create remote tasks for each figure
+        remote_tasks = [_ray_construct_and_run.remote(fig) for fig in self.figures]
+
+        # Wait for all tasks to complete
+        ray.get(remote_tasks)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -144,7 +92,7 @@ def main():
         PlotJob,
         name='biocomp-plot',
         description='Make plots.',
-        context={'DBSource': DBSource},
+        context=DEFAULT_CONTEXT,
     )
     pj, args = prog.parse_args(
         sys.argv[1:],
@@ -153,8 +101,10 @@ def main():
         ],
         context={'DBSource': DBSource},
     )
+
     pj.run()
 
 
 if __name__ == '__main__':
+    setup_logging(default_level=logging.INFO)
     main()

@@ -281,7 +281,12 @@ class DBSource(SpecializedDataSource):
             result = session.exec(self.network_query)
             data = result.fetchall()
             if len(data) == 0:
-                raise ValueError(f'No data returned for query {self.network_query}')
+                # raise ValueError(f'No data returned for query {self.network_query}') <-- old msg
+                # let's try to add more info to the error message:
+                msg = f'In db {self.db_path}, query {self.network_query} returned no data'
+                msg += f' from table {inspect(md.Network).table.name}'
+                raise ValueError(msg)
+                
             columns = result.keys()
             datalog.info(
                 'Loaded %d rows with %d columns from query %s',

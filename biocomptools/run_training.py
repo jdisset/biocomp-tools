@@ -105,12 +105,8 @@ class TrainingProgram(BaseModel):
         with open(training_dir / 'training_program_dump.yaml', 'w') as f:
             f.write(self._fulldump)
 
-        # Initialize loggers
-        for logger in self.loggers:
-            logger.initialize(self)
-
         # Build data manager from data_conf
-        training_dman = build_data_manager(
+        self._training_dman = build_data_manager(
             lib=self.parts_library,
             db_session=self.db_session,
             path_prefix=self.path_prefix,
@@ -118,6 +114,10 @@ class TrainingProgram(BaseModel):
             dataset=self.training_set,
             use_cache=config.paths.cache.networks,
         )
+
+        # Initialize loggers
+        for logger in self.loggers:
+            logger.initialize(self)
 
         # Set up logging to file
         log_file = training_dir / 'output.log.txt'
@@ -132,7 +132,7 @@ class TrainingProgram(BaseModel):
 
         # Start training
         params, loss_history, step_history = bc.train.start(
-            training_dman,
+            self._training_dman,
             self.training_conf,
             self.compute_conf,
             loggers=logger_callbacks,
@@ -177,6 +177,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-

@@ -14,13 +14,14 @@ dependencies = [
 	"psycopg2-binary",
 	"ray",
 	"sqlmodel",
-	"pydantic"
+	"pydantic",
+	"xxhash",
 ]
 
 
 [project.scripts]
 biocomp-plotdata = "biocomptools.plot_data:main" # old script, keeping for now
-biocomp-plot= "biocomptools.plot:main"
+biocomp-plot= "biocomptools.plot:main" # new plot tool
 biocomp-makevideo = "biocomptools.make_video:main"
 biocomp-training = "biocomptools.run_training:main"
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
-
+from biocomp.utils import ArbitraryModel
 ## {{{                       --     Network Sets     --
 
 
@@ -37,15 +37,29 @@ class NetworkDataId(BaseModel):
         return network, datafile
 
 
-class NetworkSelector(BaseModel):
+class Regex(str):
+    def __new__(cls, string):
+        return super().__new__(cls, string)
+
+
+def maybe_regex(s: str) -> str:
+    if isinstance(s, Regex):
+        return s
+    else:
+        import re
+
+        return re.escape(s)
+
+
+class NetworkSelector(ArbitraryModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
     This class allows to batch select networks based on their names, recipes, experiments, etc.
     """
 
-    experiment_name: Optional[str]
-    recipe_name: Optional[str] = None
-    calibration_name: Optional[str] = None
+    experiment_name: Optional[str | Regex] = None
+    recipe_name: Optional[str | Regex] = None
+    calibration_name: Optional[str | Regex] = None
     output_name: Optional[str] = None
 
     def get_networkdata_ids(self, session) -> List[NetworkDataId]:
@@ -53,15 +67,27 @@ class NetworkSelector(BaseModel):
             select(md.Network)
             .join(md.Recipe)
             .join(md.Experiment)
-            .options(selectinload(md.Network.recipe).selectinload(md.Recipe.data_files))
+            .options(
+                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
+                selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
+                selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
+            )
         )
 
         if self.experiment_name:
-            query = query.where(col(md.Experiment.name).regexp_match(self.experiment_name))
+            query = query.where(
+                col(md.Experiment.name).regexp_match(maybe_regex(self.experiment_name))
+            )
         if self.recipe_name:
-            query = query.where(col(md.Recipe.name).regexp_match(self.recipe_name))
+            query = query.where(col(md.Recipe.name).regexp_match(maybe_regex(self.recipe_name)))
 
         networks = session.exec(query).all()
+
+        if not networks:
+            msg = f"No networks found for xp {self.experiment_name}, recipe {self.recipe_name}"
+            msg += f". Query: {query}"
+            raise ValueError(msg)
+
 
         if self.output_name is not None:
             networks = [
@@ -77,7 +103,9 @@ class NetworkSelector(BaseModel):
                     select(md.DataFile)
                     .where(
                         md.DataFile.recipe_name == network.recipe_name,
-                        col(md.DataFile.calibration_name).regexp_match(self.calibration_name),
+                        col(md.DataFile.calibration_name).regexp_match(
+                            maybe_regex(self.calibration_name)
+                        ),
                     )
                     .order_by(col(md.DataFile.priority).desc())
                 )
@@ -94,7 +122,7 @@ class NetworkSelector(BaseModel):
         return network_and_data
 
 
-class NetworkSet(BaseModel):
+class NetworkSet(ArbitraryModel):
     content: List[NetworkDataId | NetworkSelector] = []
 
     def run_selectors(self, session):

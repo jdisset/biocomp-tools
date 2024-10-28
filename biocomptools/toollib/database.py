@@ -10,9 +10,12 @@ from typing import Optional, Union
 from enum import Enum
 
 
+from biocomptools.logging_config import get_logger
+
+dblog = get_logger(__name__)
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-dblog = logging.getLogger('biocomptools.database')
 # dblog.setLevel(logging.DEBUG)
 config = cm.config
 DBType = Enum('DBType', 'sqlite postgres')
@@ -36,7 +39,6 @@ def connect_postgres():
     return conn
 
 
-
 def connect_to_db(which_db: DBType = DBType.sqlite):
     # list or tuple type:
     if which_db == DBType.sqlite:
@@ -46,7 +48,6 @@ def connect_to_db(which_db: DBType = DBType.sqlite):
         return connect_postgres()
     else:
         raise ValueError(f'Invalid db type: {which_db}')
-
 
 
 def execute_query(
@@ -147,7 +148,6 @@ def convert_types_to_sql(df):
 def update_table(
     df, table_name, key_column, conn=None, dry_run=False, columns=None, update_only=False
 ):
-
     df = convert_types_to_sql(df)
     assert key_column in df.columns
 

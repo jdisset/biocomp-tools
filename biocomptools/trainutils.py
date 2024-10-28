@@ -1,8 +1,10 @@
 ## {{{                          --     imports     --
 
 import dracon as dr
+from dracon.deferred import DeferredNode
 import logging
 from scipy.ndimage import gaussian_filter1d
+from labellines import labelLine, labelLines
 import matplotlib.pyplot as plt
 import wandb as wb
 from pathlib import Path
@@ -14,6 +16,7 @@ from biocomptools.toollib.common import config
 from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, build_data_manager
 import matplotlib.pyplot as plt
 import wandb
+from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
 from tqdm import tqdm
 from dracon.lazy import LazyDraconModel
 import pandas as pd
@@ -62,6 +65,27 @@ class Logger(BaseModel):
     def finalize(self):
         """Optional cleanup after training ends."""
         pass
+
+
+class PredictionLogger(Logger):
+    figure_template: DeferredNode[Figure]
+
+    def initialize(self, training_program):
+        self._dman = training_program._training_dman
+
+    def run(self, params):
+        # TODO:
+        # [ ] get stack from training_dman
+        # [ ] generate (batched) predictions (c.f. biocomp/trainutils.py:wandb_plot_pred)
+        # [ ] repeatedly construct figure_template with ground_truth and predicted as context
+
+        networks = self._dman.get_networks()
+        stack = self._dman.get_compute_stack()
+
+    
+
+        # figure = self.figure_template.construct(context={"D": ...})
+        # figure.run()
 
 
 class WandBLogger(Logger):
@@ -167,7 +191,6 @@ class WandBLogger(Logger):
     def generate_and_save_predictions(self, params, data_manager, predictions_dir):
         # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 
-
         images = []
         networks = data_manager.get_networks()
 
@@ -195,6 +218,96 @@ class WandBLogger(Logger):
     def finalize(self):
         if self._wandb_run:
             self._wandb_run.finish()
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{              --     saving and plotting best model     --
+
+
+def get_best_smoothed_loss_id(all_losses: ndArray, sigma: float = 12.0) -> Tuple[int, np.ndarray]:
+    smoothed_losses = gaussian_filter1d(all_losses, sigma=sigma, mode='nearest')
+    endval = smoothed_losses[:, -1]
+    endval[np.isnan(endval)] = np.inf
+    best_loss_id = int(np.argmin(endval))
+    return best_loss_id, smoothed_losses
+
+
+def ffill(arr, mask=None):
+    if mask is None:
+        mask = np.isnan(arr)
+    idx = np.where(~mask, np.arange(mask.shape[1]), 0)
+    np.maximum.accumulate(idx, axis=1, out=idx)
+    return arr[np.arange(idx.shape[0])[:, None], idx]
+
+
+def plot_loss(loss_history: List[np.ndarray]):
+    all_losses = np.hstack(loss_history)
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+
+    nan_mask = np.isnan(all_losses)
+    filled_losses = ffill(all_losses)
+    best_loss_id, smoothed_losses = get_best_smoothed_loss_id(filled_losses)
+
+    yrange = np.nanmax(all_losses) - np.nanmin(all_losses)
+
+    # Plot non-nan values as blue solid lines
+    for i in range(all_losses.shape[0]):
+        non_nan_indices = ~nan_mask[i]
+        ax.plot(
+            np.arange(all_losses.shape[1])[non_nan_indices],
+            all_losses[i, non_nan_indices],
+            color='#AAA',
+            linestyle='-',
+            linewidth=1,
+            alpha=0.5,
+        )
+
+        nan_boundaries = np.where(np.diff(non_nan_indices))[0]
+        # plot red cross
+        for boundary in nan_boundaries:
+            ax.plot(
+                boundary,
+                all_losses[i, boundary],
+                'x',
+                linewidth=2,
+                color='red',
+                alpha=0.5,
+                markersize=5,
+            )
+            offsetx = 0.01 * all_losses.shape[1]
+            offsety = 0.00 * yrange
+            ax.text(
+                boundary + offsetx,
+                all_losses[i, boundary] + offsety,
+                f'rep {i}',
+                fontsize=7,
+                color='red',
+                ha='left',
+                va='center',
+            )
+
+        valid_propotion = non_nan_indices.sum() / all_losses.shape[1]
+
+        if valid_propotion > 0.2:
+            ax.plot(
+                np.arange(all_losses.shape[1])[non_nan_indices],
+                smoothed_losses[i, non_nan_indices],
+                linewidth=1,
+                label=f'rep {i}',
+            )
+        # only plot smoothed for the valid
+
+    try:
+        labelLines(ax.get_lines(), zorder=2.5)
+    except Exception as e:
+        pass
+
+    ax.set_yscale('log')
+    ax.set_xlabel('Training step')
+    ax.set_ylabel('Loss')
+
+    return fig, ax
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

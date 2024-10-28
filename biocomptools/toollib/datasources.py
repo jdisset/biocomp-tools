@@ -24,8 +24,8 @@ import biocomp.utils as ut
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
-from biocomp.utils import PartialFunction, ArbitraryModel
 import biocomptools.toollib.common as cm
+from biocomptools.toollib.common import maybetqdm
 import biocomptools.toollib.models as md
 from biocomptools.toollib.resolvable import resolved
 from biocomptools.modelmodel import SingleNetworkModel
@@ -49,6 +49,7 @@ def to_str(data: Any) -> Any:
     if not isinstance(data, str) and data is not None:
         return str(data)
     return data
+
 
 config = cm.config
 
@@ -95,32 +96,33 @@ class DBSource(DataSource, NetworkSet):
     def path_prefix(self):
         return Path(config.paths.root).expanduser().resolve()
 
-    def data_from_network(self, network: md.Network, data_file: str | Path) -> PlotData:
+    def data_from_network(self, network: md.Network, datafile: md.DataFile) -> PlotData:
         network.build(self._lib)
         actual_network = network._network
         assert isinstance(actual_network, bc.network.Network)
 
-        data_file = Path(data_file).expanduser().resolve()
+        datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
         metadata = resolved(self.metadata)
-        metadata['built_network'] = actual_network
         metadata['network'] = network
+        metadata['built_network'] = actual_network
         metadata['network_info'] = network.network_info
         metadata['source_type'] = 'DB'
         metadata = {**metadata, **network.model_dump()}
-        metadata['file_stem'] = data_file.stem
+        metadata['datafile'] = datafile.model_dump()
+        metadata['file_stem'] = datafile_path.stem
 
-        if not data_file.exists():
-            raise ValueError(f'Data file {data_file} does not exist for network {network.name}')
+        if not datafile_path.exists():
+            raise ValueError(f'Data file {datafile_path} does not exist for network {network.name}')
 
-        X, Y = bc.recipe.get_network_XY(actual_network, data_file)
+        def get_XY(_):
+            X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
+            assert isinstance(X, np.ndarray)
+            assert isinstance(Y, np.ndarray)
+            return X, Y
 
-        assert isinstance(X, np.ndarray)
-        assert isinstance(Y, np.ndarray)
-
-        pdata = pu.extract_plot_data_from_network(
+        pdata = pu.extract_lazy_plot_data_from_network(
             actual_network,
-            X,
-            Y,
+            get_XY,
             input_order=self.input_order,
             metadata=metadata,
         )
@@ -128,36 +130,74 @@ class DBSource(DataSource, NetworkSet):
         return pdata
 
     def get_data(self) -> List[PlotData]:
-        data = self.get_networks_and_data(self.db_session)
-        assert len(data), 'No data returned from query'
-        networks, datafiles = zip(*data)
-        return [
-            self.data_from_network(n, self.path_prefix / f.file)
-            for n, f in zip(networks, datafiles)
-        ]
+        with self.db_session as session:
+            data = self.get_networks_and_data(session)
+            if not data:
+                msg = f'No data found for {self.content}'
+                raise ValueError(msg)
+            networks, datafiles = zip(*data)
+
+            # res = [self.data_from_network(n, f) for n, f in zip(networks, datafiles)]
+            import tqdm
+
+            res = []
+
+            for n, f in maybetqdm(zip(networks, datafiles), desc='Loading data'):
+                res.append(self.data_from_network(n, f))
+
+            return res
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                     --     NetworkPrediction     --
+
 
 class NetworkPrediction(DBSource):
-
     predict_at: np.ndarray
     network_model: SingleNetworkModel
 
+    ground_truth: Optional[np.ndarray] = None
+
     seed: int = 0
 
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+
     def get_data(self) -> List[PlotData]:
-        ...
+        import time
 
-        
+        def get_XY(pdata):
+            t0 = time.time()
+            yhat = self.network_model.predict(self.predict_at, self.seed)
+            t1 = time.time()
+            pdata.metadata['prediction_time'] = t1 - t0
+            if self.ground_truth is not None:
+                assert len(yhat) == len(self.ground_truth)
+                mse = np.mean((yhat - self.ground_truth) ** 2)
+                pdata.metadata['mse'] = mse
+            return self.predict_at, yhat
 
-    
+        metadata = self.metadata
+        metadata['source_type'] = 'prediction'
+        metadata['seed'] = self.seed
+        metadata['model'] = self.network_model.model
+        metadata['network'] = self.network_model.network
+        metadata['network_info'] = self.network_model.network.network_info
+        metadata['built_network'] = self.network_model.network.network
+        metadata['n_predictions'] = len(self.predict_at)
+
+        plot_data = pu.extract_lazy_plot_data_from_network(
+            self.network_model.network.network,
+            get_XY,
+            input_order=self.input_order,
+            metadata=metadata,
+        )
+
+        return [plot_data]
 
 
-
-
-
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                            --     XP     --
 

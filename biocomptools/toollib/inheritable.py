@@ -1,29 +1,28 @@
 ## {{{                         --     docstring     --
 """
-    Classes can declare some attributes as being inheritable by some designated
-    children objects. The idea is that you want things like metadata, context,
-    or plot_config to be resolved at the last minute, and to able to be
-    modified at any level of the hierarchy (for example PlotJob -> DataSource
-    -> FigureTask -> PlotTask).
+Classes can declare some attributes as being inheritable by some designated
+children objects. The idea is that you want things like metadata, context,
+or plot_config to be resolved at the last minute, and to able to be
+modified at any level of the hierarchy (for example PlotJob -> DataSource
+-> FigureTask -> PlotTask).
 
-    So let's say we create a PlotJob from a config file, and in it we have a
-    little bit of metadata information (like the name of the job, the author,
-    etc.). We also have a PlotConfig object that contains the default rc_params
-    for matplotlib, and a figure_maker that uses the default FigureMaker. We
-    then have data_sources that are created and that can override all these
-    attributes.
+So let's say we create a PlotJob from a config file, and in it we have a
+little bit of metadata information (like the name of the job, the author,
+etc.). We also have a PlotConfig object that contains the default rc_params
+for matplotlib, and a figure_maker that uses the default FigureMaker. We
+then have data_sources that are created and that can override all these
+attributes.
 
-    When accessing an attribute, let's say job.data_source, we are going to
-    trigger its resolution. Before calling resolve() and therefore losing the
-    DictConfig representation of the data_source attribute, we want to *check if
-    it's been flagged as child that should inherit some attributes from the
-    parent*.
+When accessing an attribute, let's say job.data_source, we are going to
+trigger its resolution. Before calling resolve() and therefore losing the
+DictConfig representation of the data_source attribute, we want to *check if
+it's been flagged as child that should inherit some attributes from the
+parent*.
 
-    If yes, we want - prior to resolution - to merge the parent's attribute
-    (metadata, context, etc.) with the config of the child attribute. Then we
-    can resolve it.
+If yes, we want - prior to resolution - to merge the parent's attribute
+(metadata, context, etc.) with the config of the child attribute. Then we
+can resolve it.
 """
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     imports     --
@@ -51,18 +50,15 @@ from biocomptools.toollib.resolvable import (
     dump_type,
 )
 
+from biocomptools.logging_config import get_logger
+
+log = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 T = TypeVar('T')
 U = TypeVar('U')
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     logger utils --
-LOGFORMAT = "in %(funcName)s: %(message)s"
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-logging.basicConfig(level="NOTSET", format=LOGFORMAT, datefmt="[%X]", handlers=[RichHandler()])
-log = logging.getLogger('biocomptools.biocomplot.utils.inheritable')
-log.setLevel(logging.INFO)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -190,7 +186,6 @@ def merged_into_container(target: T, parent: Any, attr_names: ListOrSingle[str],
 
 
 class InheritableAttrsModel(cm.ArbitraryModel):
-
     _inherit: dict[str, list[str] | str] = {}
 
     def model_post_init(self, *a):
@@ -199,5 +194,6 @@ class InheritableAttrsModel(cm.ArbitraryModel):
                 v = [v]
             setattr(self, k, merged_into(getattr(self, k), self, v))
         super().model_post_init(*a)
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
