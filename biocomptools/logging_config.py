@@ -1,28 +1,54 @@
 import logging
 from rich.logging import RichHandler
-from typing import Optional
+from typing import Optional, Dict
 from pathlib import Path
 
 DEFAULT_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Configure default levels for various loggers
+DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
+    # External libraries
+    'matplotlib': logging.WARNING,
+    'matplotlib.font_manager': logging.ERROR,  # Suppress font debug messages
+    'PIL': logging.WARNING,
+    'jax': logging.WARNING,
+    'ray': logging.WARNING,
+    'fontTools': logging.WARNING,
+    'h5py': logging.WARNING,
+    'numba': logging.WARNING,
+    'parso': logging.WARNING,
+    
+    # Project-specific default levels
+    'biocomp': logging.ERROR,
+    'biocomptools': logging.INFO,
+    'biocomptools.plot': logging.INFO,
+    'dracon': logging.INFO
+}
 
-def setup_logging(default_level: int = logging.INFO, log_file: Optional[Path] = None) -> None:
+def setup_logging(
+    default_level: int = logging.INFO,
+    log_file: Optional[Path] = None,
+    logger_levels: Optional[Dict[str, int]] = None
+) -> None:
     """Configure logging for the biocomptools project.
-
+    
     Args:
         default_level: Default logging level for all loggers
         log_file: Optional file path to write logs to
+        logger_levels: Optional dict to override default logger levels
     """
     # Remove existing handlers
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-
+    
     # Setup handlers
     handlers = []
     console_handler = RichHandler(
-        show_path=True, omit_repeated_times=False, log_time_format=DEFAULT_DATE_FORMAT
+        show_path=True,
+        omit_repeated_times=False,
+        log_time_format=DEFAULT_DATE_FORMAT
     )
     handlers.append(console_handler)
 
@@ -36,11 +62,13 @@ def setup_logging(default_level: int = logging.INFO, log_file: Optional[Path] = 
     for handler in handlers:
         root_logger.addHandler(handler)
 
-    # Set default levels for specific loggers
-    logging.getLogger('biocomp').setLevel(logging.ERROR)
-    logging.getLogger('jax').setLevel(logging.WARNING)
-    logging.getLogger('ray').setLevel(logging.WARNING)
-
+    # Apply logger-specific levels
+    levels_to_apply = DEFAULT_LOGGER_LEVELS.copy()
+    if logger_levels:
+        levels_to_apply.update(logger_levels)
+    
+    for logger_name, level in levels_to_apply.items():
+        logging.getLogger(logger_name).setLevel(level)
 
 def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
     """Get a logger with the specified name and optional level."""

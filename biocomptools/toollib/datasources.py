@@ -142,7 +142,7 @@ class DBSource(DataSource, NetworkSet):
 
             res = []
 
-            for n, f in maybetqdm(zip(networks, datafiles), desc='Loading data'):
+            for n, f in maybetqdm(zip(networks, datafiles), desc='Loading recipes'):
                 res.append(self.data_from_network(n, f))
 
             return res
@@ -195,23 +195,6 @@ class NetworkPrediction(DBSource):
         )
 
         return [plot_data]
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                            --     XP     --
-
-
-class XPDataSource(DataSource):
-    # TODO
-
-    xp_path: str
-    recipe_names: Optional[List[str]] = None
-    source_type: str = 'xp'
-
-    def __repr__(self, indent=0):
-        indentstr = ' ' * indent
-        return f'{indentstr}XPDataSource({truncated_path(self.xp_path)})'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

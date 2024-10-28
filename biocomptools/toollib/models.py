@@ -311,7 +311,7 @@ class CollectionNetwork(BiocompDB, table=True):
 
 
 def get_biocompdb_sqlite_engine(db_path, echo=False):
-    print(f"Creating sqlite engine at {db_path}")
+    logger.debug(f"Sqlite engine from {db_path}")
     db_path = Path(db_path).expanduser().resolve()
     return create_engine(f"sqlite:///{db_path}", echo=echo)
 

@@ -1,13 +1,12 @@
 ### {{{                          --     import     --
 from biocomp import utils as ut
 import argparse
-import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 import pandas as pd
 import xxhash
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, ListConfig, open_dict
 
 # using base58 instead of base64 because it's url-safe
 import base58
@@ -16,10 +15,6 @@ import biocomp.utils as ut
 from biocomp.utils import ArbitraryModel
 import biocomp as bc
 
-import psycopg2
-from psycopg2.extras import execute_values
-import logging
-from tqdm import tqdm
 
 import dracon as dr
 
@@ -30,16 +25,14 @@ from typing import (
     Type,
     Dict,
     Any,
-    Callable,
-    Collection,
     TypeVar,
     Optional,
-    Collection,
 )
 
 from pydantic import BaseModel, Field
 
 from biocomptools.logging_config import get_logger
+
 tlog = get_logger(__name__)
 
 
@@ -48,20 +41,14 @@ PathLike = Union[str, Path]
 
 config = dr.load('pkg:biocomptools:configs/default.yaml', enable_interpolation=True)
 dr.draconstructor.resolve_all_lazy(config)
-print(f'Loaded config: {config}')
-# config = OmegaConf.create(config)
-# OmegaConf.resolve(config)
 
 
-def maybetqdm(x, min_len=1, **kw):
-    # check if it's a zip
+def maybetqdm(x, min_len=5, **kw):
     if isinstance(x, zip):
         x = list(x)
     if len(x) > min_len:
         return ut.tqdm(x, **kw)
     return x
-
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -403,21 +390,6 @@ def reorder_columns_back(df, columns):
     """
     columns = list(columns)
     return df[[col for col in df.columns if col not in columns] + columns]
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                        --     misc utils     --
-
-# import os
-import subprocess
-
-# def make_video(input_file_pattern, output_file, fps=30, crf=17, vcodec='libx264'):
-# cmd = f'ffmpeg -y -r {fps} -i "{input_file_pattern}" -crf {crf} -vcodec {vcodec} -vf "scale=iw:ih,format=yuv420p,crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_file}"'
-# print(f'Running command: {cmd}')
-# os.system(cmd)
-# print(f'Video created at {output_file}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

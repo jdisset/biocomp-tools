@@ -68,7 +68,6 @@ class PlotTask(ArbitraryModel):
     def run(self):
         if self.plot_method:
             kw = {'ax': self.ax} if self.ax else {}
-            print('kw:', kw)
             self.plot_config.prepare_func(
                 plot_method=self.plot_method,
                 auto_callstack_bind=self.auto_callstack_bind,
@@ -88,6 +87,10 @@ def resolve(obj):
     return obj
 
 
+def is_dict_like(obj):
+    return hasattr(obj, 'items') and hasattr(obj, 'keys')
+
+
 class Figure(ArbitraryModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
     plot_tasks: List[DeferredNode[PlotTask]] = []
@@ -96,7 +99,7 @@ class Figure(ArbitraryModel):
         figax = self.figure_spec.make_figure()  # type: ignore
         for i, t in enumerate(self.plot_tasks):
             pt = t.construct(context={"FIG": figax})
-            if isinstance(pt, dict):
+            if is_dict_like(pt):
                 pt = PlotTask(**pt)
             pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
             resolve_all_lazy(pt)
