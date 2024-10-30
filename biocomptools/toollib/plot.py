@@ -8,7 +8,7 @@ from dracon.deferred import DeferredNode
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomp import utils as ut
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
-import dracon as dr
+from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -87,10 +87,6 @@ def resolve(obj):
     return obj
 
 
-def is_dict_like(obj):
-    return hasattr(obj, 'items') and hasattr(obj, 'keys')
-
-
 class Figure(ArbitraryModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
     plot_tasks: List[DeferredNode[PlotTask]] = []
@@ -99,8 +95,8 @@ class Figure(ArbitraryModel):
         figax = self.figure_spec.make_figure()  # type: ignore
         for i, t in enumerate(self.plot_tasks):
             pt = t.construct(context={"FIG": figax})
-            if is_dict_like(pt):
-                pt = PlotTask(**pt)
+            if dict_like(pt):
+                pt = PlotTask(**pt)  # type: ignore
             pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
             resolve_all_lazy(pt)
             pt.run()

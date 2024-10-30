@@ -7,6 +7,7 @@ import sys
 import time
 import ray
 from typing import List, Annotated, Dict, Any, Optional
+import dracon as dr
 from dracon.lazy import LazyDraconModel
 from dracon.commandline import make_program, Arg
 from dracon.deferred import DeferredNode
@@ -26,6 +27,7 @@ from biocomptools.toollib.networkselector import (
     NetworkSetDifference,
 )
 
+from dracon.utils import dict_like
 from biocomptools.logging_config import get_logger, setup_logging
 
 import warnings
@@ -61,32 +63,43 @@ def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
 
-def _construct_and_run(figure: DeferredNode[Figure], i, total):
+def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
     t0 = time.time()
     f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
-    if isinstance(f, dict):
-        f = Figure(**f)
+    if dict_like(f):
+        f = Figure(**f)  # type: ignore
     f.run()
     t1 = time.time()
+
     opath = f.figure_spec._output_path
-    print(f"[{i}/{total}] Completed: {opath} in {t1 - t0:.2f}s")
+    print(f"[{i}/{total}] Completed {opath} in {t1 - t0:.2f}s")
 
 
 @ray.remote
-def make_figure(f, i, total):
+def make_figure(figure: DeferredNode[Figure], i: int, total: int):
     setup_logging(default_level=logging.INFO)
-    _construct_and_run(f, i, total)
+    _make_figure(figure, i, total)
 
 
 class PlotJob(LazyDraconModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
-    nworker: Annotated[int, Arg(help='Number of Ray workers to use')] = 8
+    nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
 
     def run(self):
-        if not ray.is_initialized():
-            ray.init(num_cpus=self.nworker)
-
         total_figures = len(self.figures)
+
+        if total_figures == 0:
+            log.warning("No figures to create")
+            return
+
+        if len(self.figures) == 1 or self.nworkers == 1:
+            for i, fig in enumerate(self.figures):
+                _make_figure(fig, i + 1, total_figures)
+            return
+
+        if not ray.is_initialized():
+            ray.init(num_cpus=self.nworkers)
+
         remote_tasks = [
             make_figure.remote(fig, i + 1, total_figures) for i, fig in enumerate(self.figures)
         ]
@@ -110,6 +123,8 @@ def main():
         ],
         context=make_context_from_types(DEFAULT_TYPES),
     )
+
+    # print(dr.dump(pj))
 
     pj.run()
 

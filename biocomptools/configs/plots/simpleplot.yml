@@ -1,0 +1,44 @@
+!noconstruct plot_config: &pconf
+  !define plotvars:
+    vlims: [null, null]
+  <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+!noconstruct sources: &alldata
+  - !DBSource &data
+    content:
+      - experiment_name: 2024-02-18_BPv4_BPv5
+        recipe_name: BPv4_3
+
+  - !NetworkPrediction &pred
+    predict_at: ${D.x}
+    ground_truth: ${D.y}
+    network_model:
+      model: ${"$DIR"}/example_model.pkl
+      network: ${D.metadata['network']}
+
+figures: # a list of figures to plot (can be run in parallel)
+  - !define D: ${construct(&data).get_data()[0]} # define a variable D that will contain the base data
+    figure_spec:
+      title: null
+      output_dir: /tmp
+      output_file: plot.png
+      layout: !SimpleLayout
+        cols: 2
+
+    plot_tasks:
+      - &base_dataplot
+        plot_config: *pconf
+        plot_method:
+          func: biocomp.plotutils.smooth
+          kwargs:
+            plot_data: ${D}
+            force_dim: 2
+            zslice: [0.35]
+            title: ${D.metadata['file_stem']} data
+
+      #- !define D: ${construct(&pred:D=D).get_data()[0]}
+      #<<: *base_dataplot
+      #<<{+<}:
+      #plot_method:
+      #kwargs:
+      #title: ${D.metadata['network'].name} predictions

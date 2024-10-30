@@ -108,7 +108,7 @@ class DBSource(DataSource, NetworkSet):
         metadata['network_info'] = network.network_info
         metadata['source_type'] = 'DB'
         metadata = {**metadata, **network.model_dump()}
-        metadata['datafile'] = datafile.model_dump()
+        metadata['datafile'] = datafile
         metadata['file_stem'] = datafile_path.stem
 
         if not datafile_path.exists():
@@ -136,9 +136,6 @@ class DBSource(DataSource, NetworkSet):
                 msg = f'No data found for {self.content}'
                 raise ValueError(msg)
             networks, datafiles = zip(*data)
-
-            # res = [self.data_from_network(n, f) for n, f in zip(networks, datafiles)]
-            import tqdm
 
             res = []
 

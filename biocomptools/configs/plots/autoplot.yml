@@ -1,0 +1,14 @@
+!noconstruct plot_config: &pconf
+  !define plotvars:
+    vlims: [null, null]
+  <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+!noconstruct sources: &alldata
+  - !DBSource &data
+    content:
+      - experiment_name: "2023-11-26_MatrixPgu"
+        recipe_name: "(Pgu)+(PguR_Y+B)"
+
+!define D: ${construct(&data).get_data()[0]}
+figures:
+  - !include file:$DIR/autofig

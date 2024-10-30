@@ -8,6 +8,9 @@ from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
 from biocomp.utils import ArbitraryModel
+from biocomptools.logging_config import get_logger
+
+logger = get_logger(__name__)
 ## {{{                       --     Network Sets     --
 
 
@@ -81,13 +84,13 @@ class NetworkSelector(ArbitraryModel):
         if self.recipe_name:
             query = query.where(col(md.Recipe.name).regexp_match(maybe_regex(self.recipe_name)))
 
+        logger.debug(f"Network query: {query}")
         networks = session.exec(query).all()
 
         if not networks:
             msg = f"No networks found for xp {self.experiment_name}, recipe {self.recipe_name}"
             msg += f". Query: {query}"
             raise ValueError(msg)
-
 
         if self.output_name is not None:
             networks = [
@@ -109,15 +112,18 @@ class NetworkSelector(ArbitraryModel):
                     )
                     .order_by(col(md.DataFile.priority).desc())
                 )
-                datafile = session.exec(datafile_query).first()
+                datafiles = list(session.exec(datafile_query).all())
+                logger.debug(f"Datafile query: {datafile_query}")
             else:
                 with session.no_autoflush:
-                    datafile = network.recipe.get_best_datafile()
+                    datafiles = [network.recipe.get_best_datafile()]
 
-            assert datafile, f"No datafile found for {network.recipe_name}"
-            network_and_data.append(
-                NetworkDataId(network_name=network.name, file_path=datafile.file)
-            )
+            assert datafiles, f"No datafile found for {network.recipe_name}"
+            logger.debug(f"Selected {len(datafiles)} datafiles for {network.recipe_name}")
+            for datafile in datafiles:
+                network_and_data.append(
+                    NetworkDataId(network_name=network.name, file_path=datafile.file)
+                )
 
         return network_and_data
 
