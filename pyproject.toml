@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "biocomptools"
-version = "0.1.0"
+version = "0.2.0"
 description = "A set of tools and utils for the biocompiler."
 authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
@@ -16,6 +16,7 @@ dependencies = [
 	"sqlmodel",
 	"pydantic",
 	"xxhash",
+	"pyarrow",
 ]
 
 

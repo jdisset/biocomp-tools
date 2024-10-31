@@ -58,29 +58,27 @@ rc_context:
   ytick.minor.width: 0.2
   ytick.right: false
 
-  font.family: sans-serif
-  font.monospace: Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono,
-    Courier New, Courier, Fixed, Terminal, monospace
-  font.sans-serif:
-    Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif,
-    Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif
-  font.size: 10
-  font.stretch: normal
-  font.style: normal
-  font.variant: normal
-  font.weight: normal
-
-  mathtext.bf: sans:bold
-  mathtext.bfit: sans:italic:bold
-  mathtext.cal: cursive
-  mathtext.fallback: stixsans
-  mathtext.fontset: custom
-  mathtext.it: sans:italic
-  mathtext.rm: sans
-  mathtext.sf: sans
-  mathtext.tt: monospace
-
-  text.latex.preamble: \usepackage{cmbright}
+  #font.family: sans-serif
+  #font.monospace: Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono,
+    #Courier New, Courier, Fixed, Terminal, monospace
+  #font.sans-serif:
+    #Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif,
+    #Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif
+  #font.size: 10
+  #font.stretch: normal
+  #font.style: normal
+  #font.variant: normal
+  #font.weight: normal
+  #mathtext.bf: sans:bold
+  #mathtext.bfit: sans:italic:bold
+  #mathtext.cal: cursive
+  #mathtext.fallback: stixsans
+  #mathtext.fontset: custom
+  #mathtext.it: sans:italic
+  #mathtext.rm: sans
+  #mathtext.sf: sans
+  #mathtext.tt: monospace
+  #text.latex.preamble: \usepackage{cmbright}
   text.usetex: true
 
 callstack_params:
