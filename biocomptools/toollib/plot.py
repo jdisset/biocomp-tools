@@ -11,6 +11,9 @@ from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
 from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator
 
+from biocomptools.logging_config import get_logger
+
+logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                        --     plot config     --
@@ -40,6 +43,8 @@ class PlotConfig(BaseModel):
             *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
         ):
             full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
+
+            logger.debug(f'Plotting with kwargs: {full_kwargs} + {plot_method.kwargs}')
 
             with mpl.rc_context(rc=rc):
                 return plot_method(*args, **full_kwargs)

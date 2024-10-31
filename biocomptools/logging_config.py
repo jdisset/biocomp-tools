@@ -73,7 +73,11 @@ def setup_logging(
     for env_var, level in os.environ.items():
         if env_var.startswith('BIOCOMP_LOGLEVEL_'):
             logger_name = env_var.split('BIOCOMP_LOGLEVEL_')[1].replace('_', '.')
-            levels_to_apply[logger_name] = getattr(logging, level.upper())
+            # update all loggers that start with the specified name
+            for logger in logging.Logger.manager.loggerDict:
+                if logger.startswith(logger_name):
+                    levels_to_apply[logger] = getattr(logging, level.upper())
+            # levels_to_apply[logger_name] = getattr(logging, level.upper())
 
     for logger_name, level in levels_to_apply.items():
         logging.getLogger(logger_name).setLevel(level)

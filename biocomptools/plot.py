@@ -64,8 +64,12 @@ def make_context_from_types(types):
 
 
 def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
+
     t0 = time.time()
     f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+
+    log.debug(f"Creating figure {dr.dump(f)}")
+
     if dict_like(f):
         f = Figure(**f)  # type: ignore
     f.run()
@@ -124,7 +128,10 @@ def main():
         context=make_context_from_types(DEFAULT_TYPES),
     )
 
-    # print(dr.dump(pj))
+    dmp = dr.dump(pj)
+
+    # print(dmp)
+    log.debug(dmp)
 
     pj.run()
 
