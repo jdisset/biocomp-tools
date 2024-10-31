@@ -64,6 +64,8 @@ def make_context_from_types(types):
 
 
 def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
+    import matplotlib as mpl
+    mpl.set_loglevel("debug")
 
     t0 = time.time()
     f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
@@ -81,7 +83,8 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
 
 @ray.remote
 def make_figure(figure: DeferredNode[Figure], i: int, total: int):
-    setup_logging(default_level=logging.INFO)
+
+    setup_logging(default_level=logging.DEBUG)
     _make_figure(figure, i, total)
 
 
@@ -112,7 +115,7 @@ class PlotJob(LazyDraconModel):
 
 
 def main():
-    setup_logging(default_level=logging.INFO)
+    setup_logging(default_level=logging.DEBUG)
 
     prog = make_program(
         PlotJob,
