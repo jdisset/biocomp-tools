@@ -9,21 +9,18 @@ DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Configure default levels for various loggers
 DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
-    # External libraries
-    'matplotlib': logging.WARNING,
-    'matplotlib.font_manager': logging.ERROR,  # Suppress font debug messages
-    'PIL': logging.WARNING,
-    'jax': logging.WARNING,
-    'ray': logging.WARNING,
-    'fontTools': logging.WARNING,
-    'h5py': logging.WARNING,
-    'numba': logging.WARNING,
-    'parso': logging.WARNING,
-    # Project-specific default levels
-    'biocomp': logging.ERROR,
+    'matplotlib': logging.INFO,
+    'matplotlib.font_manager': logging.INFO,  # Suppress font debug messages
+    'fontTools': logging.INFO,
+    'biocomp': logging.INFO,
     'biocomptools': logging.INFO,
     'biocomptools.plot': logging.INFO,
     'dracon': logging.INFO,
+    'PIL': logging.WARNING,
+    'jax': logging.WARNING,
+    'ray': logging.WARNING,
+    'h5py': logging.WARNING,
+    'parso': logging.WARNING,
 }
 
 

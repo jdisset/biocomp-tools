@@ -281,6 +281,7 @@ class Recipe(BiocompDB, table=True):
             network = Network(
                 name=unique_name,
                 recipe_name=self.name,
+                network_info=network_info,
             )
             network._network = net
             network_models.append(network)

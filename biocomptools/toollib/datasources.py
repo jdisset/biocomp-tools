@@ -72,6 +72,26 @@ class DataSource(ArbitraryModel):
 config = cm.config
 
 
+def make_pretty_input_names(ratios, ordered_input_names):
+    fluo_markers = [p[0][-1].upper() for p in ratios]
+
+    names = []
+
+    for _, p in enumerate(ordered_input_names):
+        # x = rf"$X_{i+1}$ ({p})"
+        x = ''
+        if p.upper() in fluo_markers:
+            idx = fluo_markers.index(p.upper())
+            content = ' + '.join(ratios[idx][0][:-1])
+            x += rf"${content}$"
+        else:
+            print(f"Fluo marker: {p}, not found in ratios {fluo_markers}")
+
+        names.append(x)
+
+    return names
+
+
 def to_text_clause(data: Any) -> TextClause:
     if isinstance(data, str):
         return text(data)
@@ -107,6 +127,7 @@ class DBSource(DataSource, NetworkSet):
         metadata['built_network'] = actual_network
         metadata['network_info'] = network.network_info
         metadata['source_type'] = 'DB'
+
         metadata = {**metadata, **network.model_dump()}
         metadata['datafile'] = datafile
         metadata['file_stem'] = datafile_path.stem
@@ -125,6 +146,11 @@ class DBSource(DataSource, NetworkSet):
             get_XY,
             input_order=self.input_order,
             metadata=metadata,
+        )
+
+        pdata.metadata['pretty_inputs'] = make_pretty_input_names(
+            metadata['network_info']['cotx'],
+            pdata.input_names,
         )
 
         return pdata

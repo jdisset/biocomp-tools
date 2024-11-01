@@ -1,0 +1,202 @@
+figure.autolayout: false
+figure.constrained_layout.h_pad: 0.04167
+figure.constrained_layout.hspace: 0.02
+figure.constrained_layout.use: false
+figure.constrained_layout.w_pad: 0.0 # 4167
+figure.constrained_layout.wspace: 0.02
+figure.dpi: 300.0
+figure.edgecolor: "white"
+figure.facecolor: "white"
+figure.figsize: [4.25, 4.25] # I suggest changing this first before tweaking fontsize everywhere
+figure.frameon: true
+figure.hooks: []
+figure.labelsize: "large"
+figure.labelweight: "normal"
+figure.max_open_warning: 20
+figure.subplot.bottom: 0.1
+figure.subplot.hspace: 0.01
+figure.subplot.left: 0.125
+figure.subplot.right: 0.9
+figure.subplot.top: 0.7
+figure.subplot.wspace: 0.01
+figure.titlesize: 10.0
+figure.titleweight: "bold"
+
+font.family: ["roboto"]
+font.sans-serif: ["roboto"]
+font.serif: ["roboto"]
+
+axes.facecolor: white # axes background color
+axes.edgecolor: black # axes edge color
+axes.linewidth: 0.8 # edge line width
+axes.grid: False # display grid or not
+axes.grid.axis: both # which axis the grid should apply to
+axes.grid.which: major # grid lines at {major, minor, both} ticks
+axes.titlelocation: center # alignment of the title: {left, right, center}
+axes.titlesize: 10 # font size of the axes title
+axes.titleweight: normal # font weight of title
+axes.titlecolor: auto # color of the axes title, auto falls back to
+axes.titley: None # position title (axes relative units).  None implies auto
+axes.titlepad: 15 # pad between axes and title in points
+axes.labelsize: medium # font size of the x and y labels
+axes.labelpad: 5.0 # space between label and axis
+axes.labelweight: normal # weight of the x and y labels
+axes.labelcolor: black
+
+# draw axis gridlines and ticks:
+#  - below patches (True)
+#  - above patches but below lines ('line')
+#  - above all (False)
+axes.axisbelow: line
+
+axes.formatter.limits: -5, 6
+axes.formatter.use_locale: False
+axes.formatter.use_mathtext: False
+axes.formatter.min_exponent: 0
+axes.formatter.useoffset: True
+axes.formatter.offset_threshold: 4
+
+axes.spines.left: True
+axes.spines.bottom: True
+axes.spines.top: False
+axes.spines.right: False
+axes.prop_cycle: cycler('color', ['1f77b4', 'ff7f0e', '2ca02c', 'd62728', '9467bd', '8c564b', 'e377c2', '7f7f7f', 'bcbd22', '17becf'])
+axes.xmargin: .05
+axes.ymargin: .05
+axes.zmargin: .05
+axes.autolimit_mode: data
+
+# or with Arial:
+#font.family: ["Arial"]
+#font.monospace: ["Arial"]
+#font.sans-serif: ["Arial"]
+#font.serif: ["Arial"]
+
+# or with Helvetica Neue:
+#font.family: ["Helvetica Neue"]
+#font.monospace: ["Helvetica Neue"]
+#font.sans-serif: ["Helvetica Neue"]
+#font.serif: ["Helvetica Neue"]
+
+## avenir:
+#font.family: ["avenir"]
+#font.monospace: ["avenir"]
+#font.sans-serif: ["avenir"]
+#font.serif: ["avenir"]
+
+font.size: 10.0
+font.stretch: "normal"
+font.style: "normal"
+font.variant: "normal"
+font.weight: "normal"
+
+legend.borderaxespad: 0.5
+legend.borderpad: 0.4
+legend.columnspacing: 2.0
+#legend.edgecolor: "#333333"
+legend.edgecolor: "#FF3333"
+legend.facecolor: "inherit"
+legend.fancybox: true
+legend.fontsize: "medium"
+legend.framealpha: 0.8
+legend.frameon: true
+legend.handleheight: 0.7
+legend.handlelength: 2.0
+legend.handletextpad: 0.8
+legend.labelcolor: null
+legend.labelspacing: 0.5
+legend.loc: "best"
+legend.markerscale: 1.0
+legend.numpoints: 1
+legend.scatterpoints: 1
+legend.shadow: false
+legend.title_fontsize: "medium"
+
+lines.antialiased: true
+lines.color: "C0"
+lines.dashdot_pattern: [6.4, 1.6, 1.0, 1.6]
+lines.dashed_pattern: [3.7, 1.6]
+lines.dotted_pattern: [1.0, 1.65]
+lines.linestyle: "-"
+lines.linewidth: 1.5
+lines.markeredgecolor: "auto"
+lines.markeredgewidth: 1.0
+lines.markerfacecolor: "auto"
+lines.markersize: 6.0
+lines.scale_dashes: true
+
+mathtext.bf: "sans:bold"
+mathtext.bfit: "sans:italic:bold"
+mathtext.cal: "cursive"
+mathtext.default: "regular"
+mathtext.fallback: "stixsans"
+mathtext.fontset: "custom"
+mathtext.it: "sans:italic"
+mathtext.rm: "sans"
+mathtext.sf: "sans"
+mathtext.tt: "monospace"
+
+savefig.bbox: null
+savefig.dpi: 300.0
+savefig.edgecolor: "auto"
+savefig.facecolor: "auto"
+savefig.format: "png"
+savefig.orientation: "portrait"
+savefig.pad_inches: 0.2
+savefig.transparent: false
+
+text.antialiased: true
+text.color: "black"
+text.hinting: "force_autohint"
+text.hinting_factor: 8
+text.kerning_factor: 0
+
+text.latex.preamble: '\usepackage{cmbright}'
+text.parse_math: true
+text.usetex: false
+
+xaxis.labellocation: "center"
+xtick.alignment: "center"
+xtick.bottom: true
+xtick.color: "black"
+xtick.direction: "out"
+xtick.labelbottom: true
+xtick.labelcolor: "inherit"
+xtick.labelsize: 11.0
+xtick.labeltop: false
+xtick.major.bottom: true
+xtick.major.pad: 3.5
+xtick.major.size: 5.0
+xtick.major.top: true
+xtick.major.width: 0.4
+xtick.minor.bottom: true
+xtick.minor.ndivs: "auto"
+xtick.minor.pad: 3.4
+xtick.minor.size: 2.0
+xtick.minor.top: true
+xtick.minor.visible: false
+xtick.minor.width: 0.2
+xtick.top: false
+
+yaxis.labellocation: "center"
+ytick.alignment: "center_baseline"
+ytick.color: "black"
+ytick.direction: "out"
+ytick.labelcolor: "inherit"
+ytick.labelleft: true
+ytick.labelright: false
+ytick.labelsize: 11.0
+ytick.left: true
+ytick.major.left: true
+ytick.major.pad: 3.5
+ytick.major.right: true
+ytick.major.size: 5.0
+ytick.major.width: 0.4
+ytick.minor.left: true
+ytick.minor.ndivs: "auto"
+ytick.minor.pad: 3.4
+ytick.minor.right: true
+ytick.minor.size: 2.0
+ytick.minor.visible: false
+ytick.minor.width: 0.2
+ytick.right: false

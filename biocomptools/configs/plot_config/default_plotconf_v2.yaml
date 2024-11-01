@@ -12,74 +12,7 @@
 rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
 rc_context:
-  savefig.pad_inches: 0.2
-  savefig.dpi: 300
-
-  figure.dpi: 300
-  figure.facecolor: white
-
-  axes.labelcolor: ${plotvars['colors']['grey']}
-  axes.labelsize: 14
-  axes.labelweight: normal
-  axes.spines.bottom: true
-  axes.spines.left: true
-  axes.spines.right: false
-  axes.spines.top: false
-  axes.titlecolor: ${plotvars['colors']['grey']}
-  axes.titleweight: normal
-  axes.titlesize: 16
-
-  figure.subplot.hspace: 0.38
-  figure.subplot.wspace: 0.25
-
-  # thin grey spines:
-  axes.edgecolor: ${plotvars['colors']['grey']}
-  axes.linewidth: 0.5
-
-  xtick.color: ${plotvars['colors']['grey']}
-  xtick.labelsize: 14
-  xtick.bottom: true
-  xtick.labelbottom: true
-  xtick.labeltop: false
-  xtick.major.size: 5
-  xtick.major.width: 0.4
-  xtick.minor.size: 2
-  xtick.minor.width: 0.2
-  xtick.top: false
-
-  ytick.color: ${plotvars['colors']['grey']}
-  ytick.labelsize: 14
-  ytick.labelleft: true
-  ytick.labelright: false
-  ytick.left: true
-  ytick.major.size: 5
-  ytick.major.width: 0.4
-  ytick.minor.size: 2
-  ytick.minor.width: 0.2
-  ytick.right: false
-
-  #font.family: sans-serif
-  #font.monospace: Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono,
-    #Courier New, Courier, Fixed, Terminal, monospace
-  #font.sans-serif:
-    #Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif,
-    #Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif
-  #font.size: 10
-  #font.stretch: normal
-  #font.style: normal
-  #font.variant: normal
-  #font.weight: normal
-  #mathtext.bf: sans:bold
-  #mathtext.bfit: sans:italic:bold
-  #mathtext.cal: cursive
-  #mathtext.fallback: stixsans
-  #mathtext.fontset: custom
-  #mathtext.it: sans:italic
-  #mathtext.rm: sans
-  #mathtext.sf: sans
-  #mathtext.tt: monospace
-  #text.latex.preamble: \usepackage{cmbright}
-  text.usetex: true
+  !include pkg:biocomptools:configs/plot_config/default_rcparams
 
 callstack_params:
   heatmap_params:
@@ -100,16 +33,16 @@ callstack_params:
 
   knn_avg_params:
     avg_method: mean
-    k: 500
+    k: 700
     min_points: 20
 
   knn_grid_params:
-    grid_resolution: 200
+    grid_resolution: 250
     is_density_plot: false
 
   mkfig_params:
     dpi: 300
-    size: [4, 4]
+    size: [30, 3]
 
   plot_network_params:
     density_quantile_threshold: 0.05
@@ -135,10 +68,12 @@ callstack_params:
     ylims: ${plotvars['ylims']}
     vlims: ${plotvars['vlims']}
     colorbar_params:
-      size: [0.05, 0.9]
-      position: [1.05, 0.05]
+      size: [0.06, 0.85]
+      position: [1.05, 0.075]
       tick_props:
-        labelsize: 14
+        labelsize: 9
+        pad: 3
+        length: 4
 
   smooth_3d_params:
     smooth_2d_params:
@@ -152,7 +87,7 @@ callstack_params:
     zslices: [0.05, 0.25, 0.4, 0.55]
     draw_colorbar: null
     colorbar_position: [1.05, 0.4]
-    colorbar_size: [0.04, 0.5]
+    colorbar_size: [0.045, 0.5]
     projection_angle: 45.0
     projection_diag_coef: 0.5
     xaxis_labelpad: 22

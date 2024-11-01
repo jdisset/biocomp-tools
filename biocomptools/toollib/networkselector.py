@@ -11,7 +11,8 @@ from biocomp.utils import ArbitraryModel
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
-## {{{                       --     Network Sets     --
+
+## {{{                           --     utils     --
 
 
 class NetworkDataId(BaseModel):
@@ -52,6 +53,11 @@ def maybe_regex(s: str) -> str:
         import re
 
         return re.escape(s)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                         --     selector     --
 
 
 class NetworkSelector(ArbitraryModel):
@@ -126,6 +132,11 @@ class NetworkSelector(ArbitraryModel):
                 )
 
         return network_and_data
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                       --     network sets     --
 
 
 class NetworkSet(ArbitraryModel):
@@ -212,6 +223,9 @@ class NetworkSetDifference(NetworkSet):
         self.content = new_content
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
 def build_data_manager(
     lib: PartsLibrary,
     db_session,
@@ -231,6 +245,3 @@ def build_data_manager(
     X, Y = zip(*data)
 
     return DataManager(X, Y, actual_networks, data_cfg=data_conf)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}##

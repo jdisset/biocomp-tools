@@ -19,8 +19,17 @@ logger = get_logger(__name__)
 ## {{{                        --     plot config     --
 
 
+def load_default_plotconf():
+    import dracon as dr
+    from dracon.lazy import resolve_all_lazy
+
+    plcontent = dr.load('pkg:biocomptools:configs/plot_config/default_plotconf_v2', raw_dict=True)
+    resolve_all_lazy(plcontent)
+    return PlotConfig(**plcontent)
+
+
 class PlotConfig(BaseModel):
-    rc_context: Dict[str, Any] = {}  # rc_params for matplotlib
+    rc_context: Dict[str, Any] = {}
     callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
     rescaler: DataRescaler = Field(default_factory=DataRescaler)
 
@@ -59,7 +68,7 @@ class PlotConfig(BaseModel):
 
 class PlotTask(ArbitraryModel):
     context: Dict = {}
-    plot_config: PlotConfig = Field(default_factory=PlotConfig)
+    plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_method: Optional[PartialFunction] = None
     raw_method: Optional[PartialFunction] = None
     auto_callstack_bind: bool = True  # whether to automatically bind callstack params
@@ -94,19 +103,21 @@ def resolve(obj):
 
 class Figure(ArbitraryModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
+    plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_tasks: List[DeferredNode[PlotTask]] = []
 
     def run(self):
-        figax = self.figure_spec.make_figure()  # type: ignore
-        for i, t in enumerate(self.plot_tasks):
-            pt = t.construct(context={"FIG": figax})
-            if dict_like(pt):
-                pt = PlotTask(**pt)  # type: ignore
-            pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
-            resolve_all_lazy(pt)
-            pt.run()
+        with mpl.rc_context(rc=self.plot_config.rc_context):
+            figax = self.figure_spec.make_figure()  # type: ignore
+            for i, t in enumerate(self.plot_tasks):
+                pt = t.construct(context={"FIG": figax})
+                if dict_like(pt):
+                    pt = PlotTask(**pt)  # type: ignore
+                pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                resolve_all_lazy(pt)
+                pt.run()
 
-        self.figure_spec.finalize(figax)  # type: ignore
+            self.figure_spec.finalize(figax)  # type: ignore
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
