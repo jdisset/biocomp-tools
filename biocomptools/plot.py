@@ -8,7 +8,7 @@ import time
 import ray
 from typing import List, Annotated, Dict, Any, Optional
 import dracon as dr
-from dracon.lazy import LazyDraconModel
+from dracon.lazy import LazyDraconModel, resolve_all_lazy
 from dracon.commandline import make_program, Arg
 from dracon.deferred import DeferredNode
 
@@ -67,7 +67,7 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
     t0 = time.time()
     f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
 
-    log.debug(f"Creating figure {dr.dump(f)}")
+    # resolve_all_lazy(f)
 
     if dict_like(f):
         f = Figure(**f)  # type: ignore

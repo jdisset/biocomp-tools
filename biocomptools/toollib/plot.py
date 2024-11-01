@@ -67,17 +67,13 @@ class PlotConfig(BaseModel):
 
 
 class PlotTask(ArbitraryModel):
-    context: Dict = {}
-    plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
+    plot_config: PlotConfig = Field(default_factory=PlotConfig)
     plot_method: Optional[PartialFunction] = None
     raw_method: Optional[PartialFunction] = None
     auto_callstack_bind: bool = True  # whether to automatically bind callstack params
 
     # used as default if plot_method has an "ax" parameter that is not bound:
     ax: Optional[mpl.axes.Axes] = None
-
-    def model_post_init(self, *a):
-        super().model_post_init(*a)
 
     def run(self):
         if self.plot_method:
@@ -107,6 +103,8 @@ class Figure(ArbitraryModel):
     plot_tasks: List[DeferredNode[PlotTask]] = []
 
     def run(self):
+        import dracon as dr
+
         with mpl.rc_context(rc=self.plot_config.rc_context):
             figax = self.figure_spec.make_figure()  # type: ignore
             for i, t in enumerate(self.plot_tasks):
@@ -114,7 +112,23 @@ class Figure(ArbitraryModel):
                 if dict_like(pt):
                     pt = PlotTask(**pt)  # type: ignore
                 pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                # merge the plot config with the task's plot config
+
+                # k = dr.merge.MergeKey(raw='<<')
+
+                # print(f"figure Plot config: {self.plot_config.model_dump()}")
+                # print(f"task Plot config: {pt.plot_config.model_dump()}")
+
+                # blank_dump = PlotConfig().model_dump()
+                # new_plot_config = dr.merge.merged(blank_dump, self.plot_config.model_dump(), k)
+                # print(f"new Plot config: {new_plot_config}")
+
+                # pt.plot_config = PlotConfig(**new_plot_config)
+                # print(f"merged Plot config: {pt.plot_config.model_dump()}")
+
                 resolve_all_lazy(pt)
+                # print(f"Plot config after resolve: {pt.plot_config.model_dump()}")
+
                 pt.run()
 
             self.figure_spec.finalize(figax)  # type: ignore
