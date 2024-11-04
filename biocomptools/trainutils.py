@@ -53,7 +53,7 @@ logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 ## {{{                          --     Loggers     --
 
 
-class Logger(BaseModel):
+class Logger(ArbitraryModel):
     periods: Union[int, List[int]] = 1  # Number of steps between logs or list of periods
 
     def initialize(self, training_program):
