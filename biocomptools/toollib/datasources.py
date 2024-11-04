@@ -1,39 +1,26 @@
 ## {{{                          --     imports     --
-import glob
 from pydantic.functional_validators import BeforeValidator
-from typing import Any, Dict, Union, Annotated, Optional, List, Callable
+from typing import Any, Optional, List
 from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector
 
-from functools import partial
-
-import pandas as pd
 import numpy as np
 
-from biocomp.recipe import get_network_XY
 from biocomp.utils import (
     ArbitraryModel,
     load_lib,
-    save,
-    EncodedPartialFunction,
-    PartialFunction,
-    PartialFunctionResult,
 )
 from pathlib import Path
 import biocomp as bc
-import biocomp.utils as ut
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
 import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm
 import biocomptools.toollib.models as md
-from biocomptools.toollib.resolvable import resolved
 from biocomptools.modelmodel import SingleNetworkModel
 
-import logging
-from sqlmodel import tuple_
-from sqlmodel import Field, Session, SQLModel, create_engine, select, text
-from sqlalchemy.inspection import inspect
+from biocomptools.logging_config import get_logger
+from sqlmodel import Session, text
 from sqlalchemy.sql.elements import TextClause
 
 
@@ -51,6 +38,7 @@ def to_str(data: Any) -> Any:
     return data
 
 
+logger = get_logger(__name__)
 config = cm.config
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -83,7 +71,8 @@ def make_pretty_input_names(ratios, ordered_input_names):
         if p.upper() in fluo_markers:
             idx = fluo_markers.index(p.upper())
             content = ' + '.join(ratios[idx][0][:-1])
-            x += rf"${content}$"
+            if content:
+                x += rf"${content}$"
         else:
             print(f"Fluo marker: {p}, not found in ratios {fluo_markers}")
 
@@ -116,13 +105,18 @@ class DBSource(DataSource, NetworkSet):
     def path_prefix(self):
         return Path(config.paths.root).expanduser().resolve()
 
-    def data_from_network(self, network: md.Network, datafile: md.DataFile) -> PlotData:
-        network.build(self._lib)
+    def data_from_network(self, network: md.Network, datafile: md.DataFile) -> Optional[PlotData]:
+        try:
+            network.build(self._lib)
+        except Exception as e:
+            logger.error(f"Error building network {network.name}: {e}")
+            return None
+
         actual_network = network._network
         assert isinstance(actual_network, bc.network.Network)
 
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
-        metadata = resolved(self.metadata)
+        metadata = self.metadata
         metadata['network'] = network
         metadata['built_network'] = actual_network
         metadata['network_info'] = network.network_info
@@ -136,17 +130,25 @@ class DBSource(DataSource, NetworkSet):
             raise ValueError(f'Data file {datafile_path} does not exist for network {network.name}')
 
         def get_XY(_):
-            X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
+            try:
+                X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
+            except Exception as e:
+                logger.error(f"Error getting XY data for network {network.name}: {e}")
+                return None
             assert isinstance(X, np.ndarray)
             assert isinstance(Y, np.ndarray)
             return X, Y
 
-        pdata = pu.extract_lazy_plot_data_from_network(
-            actual_network,
-            get_XY,
-            input_order=self.input_order,
-            metadata=metadata,
-        )
+        try:
+            pdata = pu.extract_lazy_plot_data_from_network(
+                actual_network,
+                get_XY,
+                input_order=self.input_order,
+                metadata=metadata,
+            )
+        except Exception as e:
+            logger.error(f"Error extracting data from network {network.name}: {e}")
+            return None
 
         pdata.metadata['pretty_inputs'] = make_pretty_input_names(
             metadata['network_info']['cotx'],
@@ -166,7 +168,14 @@ class DBSource(DataSource, NetworkSet):
             res = []
 
             for n, f in maybetqdm(zip(networks, datafiles), desc='Loading recipes'):
-                res.append(self.data_from_network(n, f))
+                try:
+                    d = self.data_from_network(n, f)
+                except Exception as e:
+                    logger.error(f"Error loading data for {n.name}: {e}")
+                    d = None
+
+                if d is not None:
+                    res.append(d)
 
             return res
 

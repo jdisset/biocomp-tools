@@ -11,8 +11,8 @@
 
 figure_spec:
   title: null
-  output_dir: /tmp
-  output_file: ${D.metadata['file_stem']}.png
+  output_dir: # TODO
+  output_file: # TODO
 
 !if ${D.dimensions.input <= 2}:
   <<{+<}@figure_spec:
@@ -25,7 +25,7 @@ figure_spec:
         func: biocomp.plotutils.smooth
         kwargs:
           plot_data: ${D}
-          title: ${D.metadata['file_stem']}
+          title: # TODO
 
 !if ${D.dimensions.input == 3}:
   <<{+<}@figure_spec:
@@ -39,5 +39,7 @@ figure_spec:
         kwargs:
           plot_data: ${D}
           zslices: ${linspace(zmin, zmax, nslices)}
-          title: ${D.metadata['file_stem']}
-          ax: ${FIG.flat_ax}
+          title: # TODO
+          ax: ${FIG.flat_ax} # passing all axes to the plot method
+
+# data is never > 3D

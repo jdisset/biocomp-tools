@@ -12,6 +12,7 @@ from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator
 
 from biocomptools.logging_config import get_logger
+from memory_profiler import profile
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -94,6 +95,7 @@ class PlotTask(ArbitraryModel):
 
 def resolve(obj):
     resolve_all_lazy(obj)
+    print(f"resolved: {obj}")
     return obj
 
 
@@ -102,16 +104,30 @@ class Figure(ArbitraryModel):
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_tasks: List[DeferredNode[PlotTask]] = []
 
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        self.figure_spec = resolve(self.figure_spec)
+        self.plot_config = resolve(self.plot_config)
+
     def run(self):
         import dracon as dr
 
         with mpl.rc_context(rc=self.plot_config.rc_context):
-            figax = self.figure_spec.make_figure()  # type: ignore
+            try:
+                figax = self.figure_spec.make_figure()
+            except Exception as e:
+                logger.error(f"Error making figure: {e}")
+                return
+
             for i, t in enumerate(self.plot_tasks):
-                pt = t.construct(context={"FIG": figax})
-                if dict_like(pt):
-                    pt = PlotTask(**pt)  # type: ignore
-                pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                try:
+                    pt = t.construct(context={"FIG": figax})
+                    if dict_like(pt):
+                        pt = PlotTask(**pt)  # type: ignore
+                    pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                except Exception as e:
+                    logger.error(f"Error constructing plot task {i}: {e}")
+                    continue
                 # merge the plot config with the task's plot config
 
                 # k = dr.merge.MergeKey(raw='<<')
@@ -126,10 +142,18 @@ class Figure(ArbitraryModel):
                 # pt.plot_config = PlotConfig(**new_plot_config)
                 # print(f"merged Plot config: {pt.plot_config.model_dump()}")
 
-                resolve_all_lazy(pt)
                 # print(f"Plot config after resolve: {pt.plot_config.model_dump()}")
 
-                pt.run()
+                try:
+                    resolve_all_lazy(pt)
+                    pt.run()
+                except Exception as e:
+                    import traceback
+
+                    traceback_msg = traceback.format_exc()
+                    logger.error(f"Error running plot task {i}: {e}")
+                    logger.error(traceback_msg)
+                    continue
 
             self.figure_spec.finalize(figax)  # type: ignore
 

@@ -179,6 +179,13 @@ class Network(BiocompDB, table=True):
             Available networks: {recipe_networks}"""
         )
 
+    def title(self):
+        if self._network is None:
+            return f"{self.name}"
+        fresh_info = bc.network.generate_network_info(self._network)
+        uorfstr = '\n'.join(fresh_info['uorf_names'])
+        return f"{fresh_info['architecture']} ({', '.join(fresh_info['ern_names'])})\n{uorfstr}"
+
 
 class Recipe(BiocompDB, table=True):
     name: str = Field(primary_key=True)

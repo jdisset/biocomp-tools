@@ -2,6 +2,9 @@
 import os
 
 os.environ['RAY_DEDUP_LOGS'] = '0'
+
+from memory_profiler import profile
+
 import logging.config
 import sys
 import time
@@ -63,25 +66,43 @@ def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
 
+def get_pretty_axis_label(i: int, d: DataSource) -> str:
+    if "pretty_inputs" in d.metadata:
+        return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})\n{d.metadata["pretty_inputs"][i]}'
+    return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
+
+
 def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
     t0 = time.time()
-    f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+    try:
+        f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
 
-    # resolve_all_lazy(f)
+        if dict_like(f):
+            f = Figure(**f)  # type: ignore
+        f.run()
+    except Exception as e:
+        log.error(f"Error making figure: {e}")
+        return
 
-    if dict_like(f):
-        f = Figure(**f)  # type: ignore
-    f.run()
+    import matplotlib.pyplot as plt
+    import gc
+
+    plt.close('all')
+    gc.collect()
+
     t1 = time.time()
-
     opath = f.figure_spec._output_path
     print(f"[{i}/{total}] Completed {opath} in {t1 - t0:.2f}s")
 
 
 @ray.remote
-def make_figure(figure: DeferredNode[Figure], i: int, total: int):
-    setup_logging(default_level=logging.DEBUG)
-    _make_figure(figure, i, total)
+class PlotWorker:
+    def __init__(self):
+        setup_logging(default_level=logging.DEBUG)
+
+    def process_figure(self, figure: DeferredNode[Figure], i: int, total: int):
+        _make_figure(figure, i, total)
+        return i
 
 
 class PlotJob(LazyDraconModel):
@@ -90,12 +111,14 @@ class PlotJob(LazyDraconModel):
 
     def run(self):
         total_figures = len(self.figures)
+        log.info(f"Going to create {total_figures} figures using {self.nworkers} workers")
 
         if total_figures == 0:
             log.warning("No figures to create")
             return
 
-        if len(self.figures) == 1 or self.nworkers == 1:
+        # Single figure or single worker case
+        if total_figures == 1 or self.nworkers <= 1:
             for i, fig in enumerate(self.figures):
                 _make_figure(fig, i + 1, total_figures)
             return
@@ -103,11 +126,38 @@ class PlotJob(LazyDraconModel):
         if not ray.is_initialized():
             ray.init(num_cpus=self.nworkers)
 
-        remote_tasks = [
-            make_figure.remote(fig, i + 1, total_figures) for i, fig in enumerate(self.figures)
-        ]
+        workers = [PlotWorker.remote() for _ in range(self.nworkers)]
 
-        ray.get(remote_tasks)
+        pending_tasks = []
+        unassigned_figures = list(enumerate(self.figures))
+
+        # Initially fill the worker pool
+        while workers and unassigned_figures:
+            worker = workers.pop(0)
+            idx, figure = unassigned_figures.pop(0)
+            pending_tasks.append(
+                (worker, worker.process_figure.remote(figure, idx + 1, total_figures))
+            )
+
+        while pending_tasks:
+            # Wait for the next task to complete
+            done_refs = [task_ref for _, task_ref in pending_tasks]
+            done_id, _ = ray.wait(done_refs, num_returns=1)
+
+            # Find which worker completed
+            for i, (worker, task_ref) in enumerate(pending_tasks):
+                if task_ref in done_id:
+                    pending_tasks.pop(i)
+
+                    # Assign new work to the freed worker if any remains
+                    if unassigned_figures:
+                        idx, figure = unassigned_figures.pop(0)
+                        pending_tasks.append(
+                            (worker, worker.process_figure.remote(figure, idx + 1, total_figures))
+                        )
+                    break
+
+        ray.shutdown()
 
 
 def main():
@@ -124,12 +174,14 @@ def main():
         deferred_paths=[
             '/figures.*',
         ],
-        context=make_context_from_types(DEFAULT_TYPES),
+        context={
+            **make_context_from_types(DEFAULT_TYPES),
+            'get_pretty_axis_label': get_pretty_axis_label,
+        },
     )
 
     dmp = dr.dump(pj)
 
-    # print(dmp)
     log.debug(dmp)
 
     pj.run()

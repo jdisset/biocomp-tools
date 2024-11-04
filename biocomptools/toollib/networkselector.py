@@ -29,10 +29,18 @@ class NetworkDataId(BaseModel):
 
     def fetch_network_and_datafile(self, session) -> Tuple[md.Network, md.DataFile]:
         network = session.exec(
-            select(md.Network).where(md.Network.name == self.network_name)
+            select(md.Network)
+            .where(md.Network.name == self.network_name)
+            .options(
+                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
+                selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
+                selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
+            )
         ).first()
         datafile = session.exec(
-            select(md.DataFile).where(md.DataFile.file == self.file_path)
+            select(md.DataFile)
+            .where(md.DataFile.file == self.file_path)
+            .options(selectinload(md.DataFile.calibration))
         ).first()
 
         assert network, f"No network found for {self.network_name}"
@@ -110,6 +118,7 @@ class NetworkSelector(ArbitraryModel):
             if self.calibration_name:
                 datafile_query = (
                     select(md.DataFile)
+                    .options(selectinload(md.DataFile.calibration))
                     .where(
                         md.DataFile.recipe_name == network.recipe_name,
                         col(md.DataFile.calibration_name).regexp_match(
@@ -124,7 +133,11 @@ class NetworkSelector(ArbitraryModel):
                 with session.no_autoflush:
                     datafiles = [network.recipe.get_best_datafile()]
 
-            assert datafiles, f"No datafile found for {network.recipe_name}"
+
+            if not datafiles:
+                logger.warning(f"No datafile found for {network.recipe_name}")
+                continue
+
             logger.debug(f"Selected {len(datafiles)} datafiles for {network.recipe_name}")
             for datafile in datafiles:
                 network_and_data.append(
@@ -158,7 +171,13 @@ class NetworkSet(ArbitraryModel):
         res = []
         for n in self.content:
             assert isinstance(n, NetworkDataId)
-            res.append(n.fetch_network_and_datafile(session))
+
+            try:
+                r = n.fetch_network_and_datafile(session)
+            except AssertionError as e:
+                logger.error(f"Error fetching network and datafile: {e}")
+                continue
+            res.append(r)
         return res
 
 
