@@ -162,7 +162,7 @@ xtick.color: "black"
 xtick.direction: "out"
 xtick.labelbottom: true
 xtick.labelcolor: "inherit"
-xtick.labelsize: 11.0
+xtick.labelsize: 10.0
 xtick.labeltop: false
 xtick.major.bottom: true
 xtick.major.pad: 3.5
@@ -185,7 +185,7 @@ ytick.direction: "out"
 ytick.labelcolor: "inherit"
 ytick.labelleft: true
 ytick.labelright: false
-ytick.labelsize: 11.0
+ytick.labelsize: 10.0
 ytick.left: true
 ytick.major.left: true
 ytick.major.pad: 3.5

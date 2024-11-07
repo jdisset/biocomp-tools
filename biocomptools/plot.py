@@ -68,7 +68,7 @@ def make_context_from_types(types):
 
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
     if "pretty_inputs" in d.metadata:
-        return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})\n{d.metadata["pretty_inputs"][i]}'
+        return f'$\\mathbf{{X_{i+1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
     return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
 
 

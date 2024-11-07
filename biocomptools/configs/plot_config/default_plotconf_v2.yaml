@@ -6,14 +6,12 @@
   vlims: *br
   cmap: bc_blues
   colors:
-    grey: "#777777"
+    grey: "#000000"
     red: "#FF0000"
 
 rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
-
-rc_context:
-  !include pkg:biocomptools:configs/plot_config/default_rcparams
+rc_context: !include pkg:biocomptools:configs/plot_config/default_rcparams
 
 callstack_params:
   heatmap_params:
@@ -34,8 +32,9 @@ callstack_params:
 
   knn_avg_params:
     avg_method: mean
-    k: 700
+    k: 1000
     min_points: 20
+    radius: 0.1
 
   knn_grid_params:
     grid_resolution: 250
@@ -113,7 +112,7 @@ callstack_params:
                 edgecolor: none
                 facecolor: white
                 pad: -0.25
-              fontsize: 8
+              fontsize: 10
               color: ${plotvars['colors']['grey']}
               ha: left
               va: center
@@ -135,7 +134,7 @@ callstack_params:
             [
               {
                 direction: [1, 0, 0],
-                length: 8,
+                length: 6,
                 props:
                   { color: "${plotvars['colors']['grey']}", linewidth: 0.4 },
               },
@@ -164,9 +163,9 @@ callstack_params:
               },
             ]
         zaxis_title:
-          offset: [60, 0]
+          offset: [70, 0]
           props:
-            fontsize: 8
+            fontsize: 10
             rotation: 45
             ha: center
             va: center

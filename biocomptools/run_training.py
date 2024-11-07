@@ -12,6 +12,7 @@ from biocomptools.toollib.common import config
 from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
 import biocomp as bc
+from biocomp.utils import ArbitraryModel
 import sys
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
@@ -38,7 +39,7 @@ logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 DEFAULT_LOGGERS = []
 
 
-class TrainingProgram(BaseModel):
+class TrainingProgram(ArbitraryModel):
     training_conf: Annotated[TrainingConfig, Arg(help='Training config')] = Field(
         default_factory=TrainingConfig
     )
