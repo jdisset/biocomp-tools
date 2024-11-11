@@ -113,7 +113,6 @@ class TrainingProgram(ArbitraryModel):
             path_prefix=self.path_prefix,
             data_conf=self.data_conf,
             dataset=self.training_set,
-            use_cache=config.paths.cache.networks,
         )
 
         # Initialize loggers

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
 from biocomp.utils import ArbitraryModel
 from biocomptools.logging_config import get_logger
+from biocomptools.toollib.common import config
 
 logger = get_logger(__name__)
 
@@ -251,16 +252,19 @@ def build_data_manager(
     path_prefix,
     data_conf: DataConfig,
     dataset: NetworkSet,
-    use_cache=None,
+    network_cache=config.paths.cache.networks,
+    data_cache=config.paths.cache.data,
 ) -> DataManager:
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
     data = []
     actual_networks = []
+
+
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
-        n.build(lib, use_cache=use_cache)
+        n.build(lib, use_cache=network_cache)
         data.append(get_network_XY(n._network, path_prefix / f.file))
         actual_networks.append(n._network)
 
     X, Y = zip(*data)
 
-    return DataManager(X, Y, actual_networks, data_cfg=data_conf)
+    return DataManager(X, Y, actual_networks, data_cfg=data_conf, cache_location=data_cache)

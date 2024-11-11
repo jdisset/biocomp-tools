@@ -94,7 +94,7 @@ class PredictionLogger(Logger):
                 training_program.path_prefix,
                 training_program.data_conf,
                 training_program.validation_set,
-                use_cache=config.paths.cache.networks,
+                network_cache=config.paths.cache.networks,
             )
         elif self.data_source == "custom":
             if not self.custom_dataset:
@@ -105,7 +105,7 @@ class PredictionLogger(Logger):
                 training_program.path_prefix,
                 training_program.data_conf,
                 self.custom_dataset,
-                use_cache=config.paths.cache.networks,
+                network_cache=config.paths.cache.networks,
             )
         else:
             raise ValueError(f"Unknown data_source: {self.data_source}")

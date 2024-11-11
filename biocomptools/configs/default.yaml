@@ -25,6 +25,7 @@ paths:
     base_dir: ${getenv('BIOCOMP_CACHE_DIR', '${&/paths.root}/__cache')}
     networks: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/networks')}
     xp: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/xp')}
+    data: ${getenv('BIOCOMP_DATA_CACHE_DIR', '${&base_dir}/data')}
 
 calib:
   paths:
