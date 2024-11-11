@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from numpy import ndarray as ndArray
 from typing import List, Optional, Tuple, Annotated
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, ConfigDict
 from biocomptools.toollib.common import config
 from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
@@ -39,7 +39,8 @@ logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 DEFAULT_LOGGERS = []
 
 
-class TrainingProgram(ArbitraryModel):
+class TrainingProgram(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     training_conf: Annotated[TrainingConfig, Arg(help='Training config')] = Field(
         default_factory=TrainingConfig
     )
