@@ -89,6 +89,7 @@ class TrainingProgram(BaseModel):
             )
 
         assert self.run_name, "Run name not set"
+        self._save_dir = Path(self.outputdir).expanduser().resolve() / f"__running__{self.run_name}"
 
     def gen_metadata(self):
         import os
@@ -132,10 +133,9 @@ class TrainingProgram(BaseModel):
     def run(self):
         self._fulldump = dr.dump(self)
         # Prepare output directory
-        save_dir = Path(self.outputdir).expanduser().resolve() / f"{self.run_name}"
-        training_dir = save_dir / 'training'
-        training_dir.mkdir(exist_ok=True, parents=True)
-        with open(training_dir / 'training_program_dump.yaml', 'w') as f:
+        self._training_dir = self._save_dir / 'training'
+        self._training_dir.mkdir(exist_ok=True, parents=True)
+        with open(self._training_dir / 'training_program_dump.yaml', 'w') as f:
             f.write(self._fulldump)
 
         # Build data manager from data_conf
@@ -152,7 +152,7 @@ class TrainingProgram(BaseModel):
             logger.initialize(self)
 
         # Set up logging to file
-        log_file = training_dir / 'output.log.txt'
+        log_file = self._training_dir / 'output.log.txt'
         log_file.parent.mkdir(exist_ok=True, parents=True)
         self.setup_logging(log_file)
 
@@ -179,17 +179,16 @@ class TrainingProgram(BaseModel):
 
         self._metadata['end time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Save the model and other outputs
-        self.save_outputs(params, loss_history, training_dir)
+        self.save_outputs(params, loss_history, self._training_dir)
+
+        # rename the directory to indicate that the run is complete
+        self._save_dir.rename(self._save_dir.with_name(self.run_name))
 
     def save_outputs(self, params, loss_history, save_dir: Path):
         save(params, save_dir / 'all_models.pickle')
 
         # Save loss history
         np.save(save_dir / 'loss_history.npy', loss_history)
-
-        # Save the training program configuration
-        with open(save_dir / 'full_training_program.yaml', 'w') as f:
-            f.write(self._fulldump)
 
         fig, ax = plot_loss(loss_history)
         assert self._metadata, "Metadata not set"

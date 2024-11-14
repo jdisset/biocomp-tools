@@ -456,7 +456,7 @@ def plot_loss(loss_history: List[np.ndarray]):
             )
 
     ax.set_title(
-        f'Loss history. Best loss with replicate {best_loss_id}, ~ {smoothed_losses[best_loss_id, -1]:.3f}'
+        f'Loss history. Best loss with replicate {best_loss_id}, ~ {smoothed_losses[best_loss_id, -1]:.4f}'
     )
 
     try:
