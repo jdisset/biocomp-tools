@@ -358,6 +358,22 @@ class WandBLogger(Logger):
 
 ## {{{              --     saving and plotting best model     --
 
+words = dr.load('pkg:biocomptools:configs/funnywords.yaml')
+
+
+def generate_unique_name(directory: Path | str, prefix: str = '', suffix: str = '') -> str:
+    """Generate a unique name for a file or directory in the given directory."""
+    directory = Path(directory)
+    adj = np.random.choice(words['adjectives'])
+    noun = np.random.choice(words['nouns'])
+    name = f'{prefix}{adj}-{noun}{suffix}'
+    # add a number to the name if it already exists
+    i = 1
+    while (directory / name).exists():
+        name = f'{prefix}{adj}-{noun}-{i}{suffix}'
+        i += 1
+    return name
+
 
 def get_best_smoothed_loss_id(all_losses: ndArray, sigma: float = 12.0) -> Tuple[int, np.ndarray]:
     smoothed_losses = gaussian_filter1d(all_losses, sigma=sigma, mode='nearest')
@@ -377,7 +393,11 @@ def ffill(arr, mask=None):
 
 def plot_loss(loss_history: List[np.ndarray]):
     all_losses = np.hstack(loss_history)
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+
+    fig = plt.figure(figsize=(10, 5), dpi=300)
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1])
+
+    ax = fig.add_subplot(gs[0])
 
     nan_mask = np.isnan(all_losses)
     filled_losses = ffill(all_losses)
@@ -385,10 +405,12 @@ def plot_loss(loss_history: List[np.ndarray]):
 
     yrange = np.nanmax(all_losses) - np.nanmin(all_losses)
 
-    # Plot non-nan values as blue solid lines
+    # plot non-nan values as blue solid lines
+    colormap = plt.cm.get_cmap('tab10')
+    lines = []
     for i in range(all_losses.shape[0]):
         non_nan_indices = ~nan_mask[i]
-        ax.plot(
+        l = ax.plot(
             np.arange(all_losses.shape[1])[non_nan_indices],
             all_losses[i, non_nan_indices],
             color='#AAA',
@@ -396,6 +418,7 @@ def plot_loss(loss_history: List[np.ndarray]):
             linewidth=1,
             alpha=0.5,
         )
+        lines.append(l)
 
         nan_boundaries = np.where(np.diff(non_nan_indices))[0]
         # plot red cross
@@ -429,8 +452,12 @@ def plot_loss(loss_history: List[np.ndarray]):
                 smoothed_losses[i, non_nan_indices],
                 linewidth=1,
                 label=f'rep {i}',
+                color=colormap(i % 20),
             )
-        # only plot smoothed for the valid
+
+    ax.set_title(
+        f'Loss history. Best loss with replicate {best_loss_id}, ~ {smoothed_losses[best_loss_id, -1]:.3f}'
+    )
 
     try:
         labelLines(ax.get_lines(), zorder=2.5)
@@ -442,6 +469,21 @@ def plot_loss(loss_history: List[np.ndarray]):
     ax.set_ylabel('Loss')
 
     return fig, ax
+
+
+def add_metadata(fig, ax, metadata: dict, run_name: str):
+    """Add metadata to the figure in a clean, formatted way"""
+    fig.suptitle(f'Run "{run_name}"')
+
+    ax_meta = fig.add_subplot(fig.add_gridspec(1, 2, width_ratios=[3, 1])[1])
+    ax_meta.set_axis_off()
+
+    meta_text = '\n'.join(f'{k}: {v}' for k, v in metadata.items())
+    ax_meta.text(0, 1, meta_text, va='top', ha='left', fontsize=8)
+
+    plt.tight_layout()
+
+    return fig
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

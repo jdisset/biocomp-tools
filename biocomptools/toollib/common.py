@@ -7,6 +7,12 @@ from pathlib import Path
 import pandas as pd
 import xxhash
 from omegaconf import DictConfig, ListConfig, open_dict
+import pkg_resources
+import subprocess
+from typing import Dict, List, Optional
+import os
+import importlib.metadata
+import importlib.util
 
 # using base58 instead of base64 because it's url-safe
 import base58
@@ -93,6 +99,50 @@ class ArbitraryTargetModel(ArbitraryModel):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     general utils     --
+
+
+def get_package_git_hashes(package_names: List[str]) -> Dict[str, Optional[str]]:
+    """
+    Get the git hash for specified locally installed Python packages.
+    """
+
+    from importlib.resources import files, as_file
+
+    results = {}
+    for package_name in package_names:
+        try:
+            pkg = files(package_name)
+            with as_file(pkg) as pkg_path:
+                base_dir = Path(pkg_path).parent.resolve()
+                git_dir = base_dir / ".git"
+                if git_dir.exists():
+                    try:
+                        result = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=base_dir,
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        git_hash = result.stdout.strip()
+                        results[package_name] = git_hash
+                    except (subprocess.SubprocessError, FileNotFoundError):
+                        results[package_name] = None
+                else:
+                    results[package_name] = None
+
+        except Exception as e:
+            results[package_name] = None
+
+    return results
+
+
+def get_git_hash():
+    import git
+
+    repo = git.Repo(search_parent_directories=True)
+    sha = repo.head.object.hexsha
+    return sha
 
 
 def notnull(x):

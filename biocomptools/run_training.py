@@ -2,22 +2,20 @@
 
 import dracon as dr
 import logging
-from scipy.ndimage import gaussian_filter1d
 from pathlib import Path
 import numpy as np
-from numpy import ndarray as ndArray
 from typing import List, Optional, Tuple, Annotated
 from pydantic import Field, BaseModel, ConfigDict
-from biocomptools.toollib.common import config
+from biocomptools.toollib.common import config, get_git_hash, get_package_git_hashes
 from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
 import biocomp as bc
-from biocomp.utils import ArbitraryModel
 import sys
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
-from biocomptools.trainutils import Logger
-from sqlmodel import select, Session, col
+from biocomptools.trainutils import Logger, plot_loss, generate_unique_name, add_metadata
+from sqlmodel import Session
+from datetime import datetime
 
 from biocomp.utils import (
     load_lib,
@@ -29,8 +27,8 @@ from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 
 import biocomptools.toollib.models as md
 
-
 logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -53,8 +51,14 @@ class TrainingProgram(BaseModel):
     validation_set: Annotated[NetworkSet, Arg(help='Networks in validation set')] = Field(
         default_factory=NetworkSet
     )
-    outputdir: Annotated[str, Arg(help='Output directory to save model')] = './training_output'
+    outputdir: Annotated[
+        str, Arg(help='Base directory to save model (will be saved in outputdir/run_name')
+    ] = './training_output'
     loggers: Annotated[List[Logger], Arg(help='Loggers to use')] = DEFAULT_LOGGERS
+
+    run_name: Annotated[
+        Optional[str], Arg(help='Name of the run (automatically generated if None)')
+    ] = None
 
     _lib: Optional[PartsLibrary] = None
 
@@ -78,6 +82,33 @@ class TrainingProgram(BaseModel):
         with self.db_session as session:
             self.training_set.run_selectors(session)
             self.validation_set.run_selectors(session)
+        self.gen_metadata()
+        if not self.run_name:
+            self.run_name = generate_unique_name(
+                self.outputdir,
+            )
+
+        assert self.run_name, "Run name not set"
+
+    def gen_metadata(self):
+        import os
+
+        starttime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        def get_hostmachine():
+            import socket
+
+            return socket.gethostname()
+
+        hashes = get_package_git_hashes(['dracon', 'biocomp', 'biocomptools'])
+
+        self._metadata = {
+            'start time': starttime,
+            'host': f"{os.environ.get('USER')}@{get_hostmachine()}",
+            'biocomp hash': hashes.get('biocomp', 'unknown'),
+            'biocomptools hash': hashes.get('biocomptools', 'unknown'),
+            'dracon hash': hashes.get('dracon', 'unknown'),
+        }
 
     @staticmethod
     def setup_logging(log_file):
@@ -101,7 +132,7 @@ class TrainingProgram(BaseModel):
     def run(self):
         self._fulldump = dr.dump(self)
         # Prepare output directory
-        save_dir = Path(self.outputdir)
+        save_dir = Path(self.outputdir).expanduser().resolve() / f"{self.run_name}"
         training_dir = save_dir / 'training'
         training_dir.mkdir(exist_ok=True, parents=True)
         with open(training_dir / 'training_program_dump.yaml', 'w') as f:
@@ -131,6 +162,9 @@ class TrainingProgram(BaseModel):
             callbacks = logger.get_callbacks(self)
             logger_callbacks.extend(callbacks)
 
+        print(f"Starting training run {self.run_name}")
+        print(f"{self._metadata}")
+
         # Start training
         params, loss_history, step_history = bc.train.start(
             self._training_dman,
@@ -143,19 +177,34 @@ class TrainingProgram(BaseModel):
         for logger in self.loggers:
             logger.finalize()
 
+        self._metadata['end time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Save the model and other outputs
-        self.save_outputs(params, loss_history, save_dir)
+        self.save_outputs(params, loss_history, training_dir)
 
-    def save_outputs(self, params, loss_history, save_dir):
-        save(params, save_dir / 'training' / 'all_models.pickle')
+    def save_outputs(self, params, loss_history, save_dir: Path):
+        save(params, save_dir / 'all_models.pickle')
 
         # Save loss history
-        np.save(save_dir / 'training' / 'loss_history.npy', loss_history)
-
-        # Generate and save loss plots
-        # plot_losses(loss_history, save_dir / 'training' / 'losses.png')
+        np.save(save_dir / 'loss_history.npy', loss_history)
 
         # Save the training program configuration
+        with open(save_dir / 'full_training_program.yaml', 'w') as f:
+            f.write(self._fulldump)
+
+        fig, ax = plot_loss(loss_history)
+        assert self._metadata, "Metadata not set"
+        assert self.run_name, "Run name not set"
+
+        fig = add_metadata(fig, ax, self._metadata, run_name=self.run_name)
+
+        fig.savefig(save_dir / 'summary_plot.pdf')
+        # save metadata as json
+        with open(save_dir / 'metadata.json', 'w') as f:
+            import json
+
+            json.dump(self._metadata, f)
+
+        print(f"Saved summary plot to {save_dir / 'summary_plot.pdf'}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
