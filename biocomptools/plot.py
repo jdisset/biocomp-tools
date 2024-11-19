@@ -20,6 +20,7 @@ from biocomp.datautils import DataRescaler
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.toollib.figuremakers_.uorfmatrixfigure import uORFMatrixFigure
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
     Regex,
@@ -57,6 +58,7 @@ DEFAULT_TYPES = [
     NetworkSetDifference,
     PartialFunction,
     DataRescaler,
+    uORFMatrixFigure,
 ]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -72,16 +74,18 @@ def get_pretty_axis_label(i: int, d: DataSource) -> str:
     return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
 
 
-def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
+def _make_figure(figure: DeferredNode[Figure], i: int, total: int, **kw):
     t0 = time.time()
     try:
         f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
 
         if dict_like(f):
             f = Figure(**f)  # type: ignore
-        f.run()
+        f.run(**kw)
     except Exception as e:
         log.error(f"Error making figure: {e}")
+        # show the traceback
+        log.exception(e)
         return
 
     import matplotlib.pyplot as plt
@@ -91,7 +95,7 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int):
     gc.collect()
 
     t1 = time.time()
-    opath = f.figure_spec._output_path
+    opath = f.figure_spec.output_path
     print(f"[{i}/{total}] Completed {opath} in {t1 - t0:.2f}s")
 
 
@@ -100,16 +104,18 @@ class PlotWorker:
     def __init__(self):
         setup_logging(default_level=logging.DEBUG)
 
-    def process_figure(self, figure: DeferredNode[Figure], i: int, total: int):
-        _make_figure(figure, i, total)
+    def process_figure(self, figure: DeferredNode[Figure], i: int, total: int, **kw):
+        _make_figure(figure, i, total, **kw)
         return i
 
 
 class PlotJob(LazyDraconModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
+    skip_existing: Annotated[bool, Arg(help='Overwrite existing figures')] = False
 
     def run(self):
+        self._overwrite = not self.skip_existing
         total_figures = len(self.figures)
         log.info(f"Going to create {total_figures} figures using {self.nworkers} workers")
 
@@ -119,8 +125,9 @@ class PlotJob(LazyDraconModel):
 
         # Single figure or single worker case
         if total_figures == 1 or self.nworkers <= 1:
+            log.info("Running in single-threaded mode")
             for i, fig in enumerate(self.figures):
-                _make_figure(fig, i + 1, total_figures)
+                _make_figure(fig, i + 1, total_figures, overwrite=self._overwrite)
             return
 
         if not ray.is_initialized():
@@ -136,7 +143,12 @@ class PlotJob(LazyDraconModel):
             worker = workers.pop(0)
             idx, figure = unassigned_figures.pop(0)
             pending_tasks.append(
-                (worker, worker.process_figure.remote(figure, idx + 1, total_figures))
+                (
+                    worker,
+                    worker.process_figure.remote(
+                        figure, idx + 1, total_figures, overwrite=self._overwrite
+                    ),
+                )
             )
 
         while pending_tasks:
@@ -153,7 +165,12 @@ class PlotJob(LazyDraconModel):
                     if unassigned_figures:
                         idx, figure = unassigned_figures.pop(0)
                         pending_tasks.append(
-                            (worker, worker.process_figure.remote(figure, idx + 1, total_figures))
+                            (
+                                worker,
+                                worker.process_figure.remote(
+                                    figure, idx + 1, total_figures, overwrite=self._overwrite
+                                ),
+                            )
                         )
                     break
 

@@ -1,0 +1,18 @@
+!set_default ax: null
+
+plot_config:
+  <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+  callstack_params:
+    histogram_params:
+      xlims: [-0.001, 0.7]
+      ylims: [-0.001, 0.7]
+      vlims: [0.01, null]
+
+plot_method:
+  func: biocomp.plotutils.histogram
+  kwargs:
+    plot_data: ${D}
+    ax: ${FIG.flat_ax[0] if ax is None else ax}
+    xtitle: ${D.input_names[0]}
+    ytitle: ${D.output_name}

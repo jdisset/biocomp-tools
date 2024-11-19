@@ -4,7 +4,7 @@
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
 
 !noconstruct sources: &alldata
-  - !DBSource &data
+  - !DBSource &3reg
     content:
       - experiment_name: 2024-02-18_BPv4_BPv5
         recipe_name: BPv4_3
@@ -17,11 +17,13 @@
       network: ${D.metadata['network']}
 
 figures: # a list of figures to plot (can be run in parallel)
-  - !define D: ${construct(&data).get_data()[0]} # define a variable D that will contain the base data
+  - # this is just a single figure
+    !define D: ${construct(&3reg).get_data()[0]} # define a variable D that will contain the base data
+
     figure_spec:
       title: null
       output_dir: /tmp
-      output_file: plot.png
+      output_file: predplot.png
       layout: !SimpleLayout
         cols: 2
 
@@ -36,9 +38,9 @@ figures: # a list of figures to plot (can be run in parallel)
             zslice: [0.35]
             title: ${D.metadata['file_stem']} data
 
-      #- !define D: ${construct(&pred:D=D).get_data()[0]}
-      #<<: *base_dataplot
-      #<<{+<}:
-      #plot_method:
-      #kwargs:
-      #title: ${D.metadata['network'].name} predictions
+      - !define D: ${construct(&pred:D=D).get_data()[0]}
+        <<: *base_dataplot
+        <<{+<}:
+          plot_method:
+            kwargs:
+              title: ${D.metadata['network'].name} predictions

@@ -26,6 +26,17 @@ font.family: ["roboto"]
 font.sans-serif: ["roboto"]
 font.serif: ["roboto"]
 
+# or with Helvetica Neue:
+#font.family: ["Helvetica Neue"]
+#font.monospace: ["Helvetica Neue"]
+#font.sans-serif: ["Helvetica Neue"]
+#font.serif: ["Helvetica Neue"]
+## avenir:
+#font.family: ["avenir"]
+#font.monospace: ["avenir"]
+#font.sans-serif: ["avenir"]
+#font.serif: ["avenir"]
+
 axes.facecolor: white # axes background color
 axes.edgecolor: black # axes edge color
 axes.linewidth: 0.8 # edge line width
@@ -66,23 +77,6 @@ axes.ymargin: .05
 axes.zmargin: .05
 axes.autolimit_mode: data
 
-# or with Arial:
-#font.family: ["Arial"]
-#font.monospace: ["Arial"]
-#font.sans-serif: ["Arial"]
-#font.serif: ["Arial"]
-
-# or with Helvetica Neue:
-#font.family: ["Helvetica Neue"]
-#font.monospace: ["Helvetica Neue"]
-#font.sans-serif: ["Helvetica Neue"]
-#font.serif: ["Helvetica Neue"]
-
-## avenir:
-#font.family: ["avenir"]
-#font.monospace: ["avenir"]
-#font.sans-serif: ["avenir"]
-#font.serif: ["avenir"]
 
 font.size: 10.0
 font.stretch: "normal"

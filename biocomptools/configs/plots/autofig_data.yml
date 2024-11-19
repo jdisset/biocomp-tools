@@ -1,0 +1,15 @@
+# REQUIRED VARS: plot_data
+!Figure
+!set_default output_dir: ./figures
+!set_default file_prefix: ""
+
+plot_config: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+figure_spec:
+  output_dir: ${output_dir}
+  output_file: ${file_prefix + plot_data.metadata['file_stem'] + '.pdf'}
+  title: ${plot_data.metadata['file_stem']} ${plot_data.metadata['datafile'].calibration_name}
+
+plot_tasks:
+  - !define D: ${plot_data}
+    <<: !include pkg:biocomptools:configs/plots/tasks/auto

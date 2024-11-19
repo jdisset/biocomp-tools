@@ -5,14 +5,11 @@ from dracon.draconstructor import resolve_all_lazy
 from biocomp.datautils import DataRescaler
 from biocomp.utils import PartialFunction, ArbitraryModel
 from dracon.deferred import DeferredNode
-from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomp import utils as ut
-from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
+from biocomp.plotutils import FigureSpec
 from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator
-
 from biocomptools.logging_config import get_logger
-from memory_profiler import profile
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -32,7 +29,7 @@ def load_default_plotconf():
 class PlotConfig(BaseModel):
     rc_context: Dict[str, Any] = {}
     callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
-    rescaler: DataRescaler = Field(default_factory=DataRescaler)
+    rescaler: Optional[DataRescaler] = None
 
     def prepare_func(
         self,
@@ -60,6 +57,17 @@ class PlotConfig(BaseModel):
                 return plot_method(*args, **full_kwargs)
 
         return prepared_func
+
+    def inherit_from(self, other: 'PlotConfig', keep_rescaler: bool = True, key:str = '<<{+<}'):
+        from dracon.merge import MergeKey, merged
+
+        k = MergeKey(raw=key)
+
+        if not keep_rescaler or not self.rescaler:
+            self.rescaler = other.rescaler
+
+        self.callstack_params = merged(other.callstack_params, self.callstack_params, k)  # type: ignore
+        self.rc_context = merged(other.rc_context, self.rc_context, k)  # type: ignore
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -95,7 +103,6 @@ class PlotTask(ArbitraryModel):
 
 def resolve(obj):
     resolve_all_lazy(obj)
-    print(f"resolved: {obj}")
     return obj
 
 
@@ -109,10 +116,13 @@ class Figure(ArbitraryModel):
         self.figure_spec = resolve(self.figure_spec)
         self.plot_config = resolve(self.plot_config)
 
-    def run(self):
-        import dracon as dr
+    def run(self, overwrite: bool = True):
+        if not overwrite and self.figure_spec.output_path.exists():
+            logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
+            return
 
         with mpl.rc_context(rc=self.plot_config.rc_context):
+
             try:
                 figax = self.figure_spec.make_figure()
             except Exception as e:
@@ -122,30 +132,21 @@ class Figure(ArbitraryModel):
             for i, t in enumerate(self.plot_tasks):
                 try:
                     pt = t.construct(context={"FIG": figax})
+
                     if dict_like(pt):
                         pt = PlotTask(**pt)  # type: ignore
+
+                    pt.plot_config.inherit_from(self.plot_config)
+
                     pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
                     continue
-                # merge the plot config with the task's plot config
-
-                # k = dr.merge.MergeKey(raw='<<')
-
-                # print(f"figure Plot config: {self.plot_config.model_dump()}")
-                # print(f"task Plot config: {pt.plot_config.model_dump()}")
-
-                # blank_dump = PlotConfig().model_dump()
-                # new_plot_config = dr.merge.merged(blank_dump, self.plot_config.model_dump(), k)
-                # print(f"new Plot config: {new_plot_config}")
-
-                # pt.plot_config = PlotConfig(**new_plot_config)
-                # print(f"merged Plot config: {pt.plot_config.model_dump()}")
-
-                # print(f"Plot config after resolve: {pt.plot_config.model_dump()}")
 
                 try:
                     resolve_all_lazy(pt)
+
                     pt.run()
                 except Exception as e:
                     import traceback

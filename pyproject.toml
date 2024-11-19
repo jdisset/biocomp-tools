@@ -27,18 +27,3 @@ biocomp-plot= "biocomptools.plot:main" # new plot tool
 biocomp-makevideo = "biocomptools.make_video:main"
 biocomp-training = "biocomptools.run_training:main"
 
-[tool.pyright]
-include = ["src"]
-reportMissingImports = true
-reportMissingTypeStubs = false
-
-[tool.basedpyright]
-include = ["src"]
-
-reportMissingImports = true
-reportMissingTypeStubs = false
-
-pythonVersion = "3.11"
-
-typeCheckingMode = "standard"
-

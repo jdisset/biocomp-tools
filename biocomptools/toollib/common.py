@@ -23,6 +23,7 @@ import biocomp as bc
 
 
 import dracon as dr
+from dracon.lazy import resolve_all_lazy
 
 from typing import (
     Union,
@@ -46,7 +47,7 @@ PathLike = Union[str, Path]
 
 
 config = dr.load('pkg:biocomptools:configs/default.yaml', enable_interpolation=True)
-dr.draconstructor.resolve_all_lazy(config)
+resolve_all_lazy(config)
 
 
 def maybetqdm(x, min_len=5, **kw):
@@ -78,22 +79,6 @@ def dict_like(obj) -> bool:
         and hasattr(obj, '__contains__')
         and hasattr(obj, '__iter__')
     )
-
-
-class ArbitraryTargetModel(ArbitraryModel):
-    """A pydantic model that has a _target_ set to the name of the class
-    for easy (de)serialization"""
-
-    target_: Optional[str | Type] = Field(None, alias='_target_')
-
-    def model_post_init(self, *a) -> None:
-        # if target_ is None, we set the target attribute to the name of the class
-        self.target_ = (
-            self.__class__.__module__ + '.' + self.__class__.__name__
-            if self.target_ is None
-            else self.target_
-        )
-        super().model_post_init(*a)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

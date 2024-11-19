@@ -1,0 +1,43 @@
+# plots the data and predictions from a network model side by side
+#
+# REQUIRED VARIABLES:
+# - model
+# - plot_data : the ground truth plot_data object
+
+!Figure
+!set_default output_dir: ./prediction_figures
+!set_default file_prefix: ""
+
+plot_config: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+__dracon__:
+  - !NetworkPrediction &pred
+    predict_at: ${plot_data.x}
+    ground_truth: ${plot_data.y}
+    network_model:
+      model: ${model}
+      network: ${plot_data.metadata['network']}
+
+figure_spec:
+  output_dir: ${output_dir}
+  output_file: ${'file_prefix + plot_data.metadata['file_stem'] + '_combined_pred.pdf'}
+  title: "${plot_data.metadata['file_stem']}\nD.metadata['network'].title())"
+  layout: !SimpleLayout
+    cols: 2
+
+plot_tasks:
+  - !define D: ${plot_data}
+    !define ax: ${FIG.flat_ax[0]}
+    <<: !include pkg:biocomptools:configs/plots/tasks/auto
+    <<{+<}:
+      plot_method:
+        kwargs:
+          title: "Ground Truth"
+
+  - !define D: ${construct(&pred).get_data()[0]}
+    !define ax: ${FIG.flat_ax[1]}
+    <<: !include pkg:biocomptools:configs/plots/tasks/auto
+    <<{+<}:
+      plot_method:
+        kwargs:
+          title: "Predictions (Avg. RMSE: ${D.metadata['rmse']:.3f})"

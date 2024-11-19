@@ -16,7 +16,7 @@ rc_context: !include pkg:biocomptools:configs/plot_config/default_rcparams
 callstack_params:
   heatmap_params:
     axtransform: null
-    bad_color: "#EEEEEE00"
+    bad_color: "#EEEEEEff"
     cmap: ${plotvars['cmap']}
     contours: null
     opacities: null
@@ -24,11 +24,19 @@ callstack_params:
 
   histogram_params:
     cmap: ${plotvars['cmap']}
-    draw_colorbar: false
-    nbins: [256, 256]
+    draw_colorbar: true
     noise_smooth: 0
     use_log_density: true
-    vlims: ${plotvars['vlims']}
+    xlims: ${plotvars['xlims']}
+    ylims: ${plotvars['vlims']}
+    vlims: [0, null]
+    colorbar_params:
+      size: [0.06, 0.85]
+      position: [1.05, 0.075]
+      tick_props:
+        labelsize: 9
+        pad: 3
+        length: 4
 
   knn_avg_params:
     avg_method: mean
@@ -67,6 +75,7 @@ callstack_params:
     xlims: ${plotvars['xlims']}
     ylims: ${plotvars['ylims']}
     vlims: ${plotvars['vlims']}
+
     colorbar_params:
       size: [0.06, 0.85]
       position: [1.05, 0.075]
@@ -79,7 +88,8 @@ callstack_params:
     smooth_2d_params:
       draw_colorbar: false
       heatmap_params:
-        contours: 0
+        bad_color: "#EEEEEE00"
+        image_interpolation: "bilinear"
     xlims: ${plotvars['xlims']}
     ylims: ${plotvars['ylims']}
     zlims: ${plotvars['zlims']}

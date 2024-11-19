@@ -1,77 +1,30 @@
-### {{{                          --     imports     --
-import ray
-
-from typing import List, Tuple
-
-import shutil
-from biocomp import utils as ut
-import json
-import biocomp.datautils as du
-import biocomp.plotutils as pu
-import biocomp.utils as ut
-import biocomp.train as train
-import biocomp as bc
-import time
-from matplotlib import pyplot as plt
-from pathlib import Path
-from tqdm import tqdm
+from biocomptools.trainutils import plot_loss, get_best_smoothed_loss_id
+import pickle
 import numpy as np
-
-# pretty print from rich
-import json
+from biocomptools.modelmodel import BiocompModel, get_shared_params
+import biocomp.utils as ut
 from pathlib import Path
-
-from biocomptools.toollib import common as cm
-
-import logging
-
-from omegaconf import OmegaConf
-
-logger = logging.getLogger('biocomp_tools_train')
-logger.setLevel(logging.INFO)
-config = cm.load_config()
+import dracon as dr
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                  --     command line arguments     --
-
-# TODO: switch both this and plot_data to a better config system (cf jeanplot?)
-# or maybe hydra?
-# OMEGACONF IS THE WAY TO GO!!!
-
-prog = cm.CLIProgram()
-
-prog.add_argument(
-    '--model_path',
-    help="""name of the model to load from the database (db://<model_name>)
-    or path to a directory that contains a compute_config.json and [best_]model.pkl""",
+trainingdir = (
+    Path('~/Dropbox (MIT)/Biocomp_v2/Training/Runs/joyful-sashay/training/').expanduser().resolve()
 )
 
-prog.add_argument(
-    '--output_dir',
-    help='Directory to save the results and the model. Can use any of the following placeholders: <model_name>, <timestamp>',
-    default=(f'{cte.BIOCOMP_ROOT}/predictions/<model_name>'),
-)
-
-prog.add_argument(
-    '--network_collection',
-    help='List of collection_names to predict on (from db)',
-    nargs='+',
-    default=[],
-)
-
-# test args, we use training_set and prediction_set as single_uorfs and case_matrix_4_corners:
-prog.parse_args([])
+with open(trainingdir / 'all_models.pickle', 'rb') as f:
+    all_models = pickle.load(f)
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
+loss_history = np.load(trainingdir / 'loss_history.npy')
+plot_loss(loss_history)
 
-### {{{       --     load plot config from ./configs/default.yaml     --
-this_file_path = Path(__file__).resolve()
+all_losses = np.hstack(loss_history)
+best_model_id, _ = get_best_smoothed_loss_id(all_losses)
+best_params = get_shared_params(ut.tree_get(all_models, best_model_id))
 
-plot_config = OmegaConf.load(f'{this_file_path.parent}/configs/default.yaml')
+training_program_file = trainingdir / 'training_program_dump'
+compute_conf = dr.load(f'file:{training_program_file}@training_conf.compute_config')
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
+model = BiocompModel(compute_config=compute_conf, shared_params=ut.tree_to_np(best_params))
+# model.save(trainingdir / 'best_model.pickle')
 

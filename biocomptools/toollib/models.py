@@ -183,8 +183,18 @@ class Network(BiocompDB, table=True):
         if self._network is None:
             return f"{self.name}"
         fresh_info = bc.network.generate_network_info(self._network)
-        uorfstr = '\n'.join(fresh_info['uorf_names'])
-        return f"{fresh_info['architecture']} ({', '.join(fresh_info['ern_names'])})\n{uorfstr}"
+        # uorfstr = '\n'.join(fresh_info['uorf_names'])
+        titlestr = f"{fresh_info['architecture']}"
+        # make sure first letter of each word is capitalized
+        titlestr = " ".join([x.capitalize() for x in titlestr.split()])
+        if len(fresh_info['ern_names']) > 0:
+            titlestr = f"{titlestr} ({', '.join(fresh_info['ern_names'])})"
+
+        for val, name in zip(fresh_info['uorf_values'], fresh_info['uorf_names']):
+            if val[0] > 0 or val[1] > 0:
+                titlestr = f"{titlestr}\n{name}: {val}"
+
+        return titlestr
 
 
 class Recipe(BiocompDB, table=True):
@@ -313,7 +323,6 @@ class Prediction(BiocompDB, table=True):
 class CollectionNetwork(BiocompDB, table=True):
     collection_name: str = Field(foreign_key="collection.name", primary_key=True)
     network_name: str = Field(foreign_key="network.name", primary_key=True)
-
     collection: Optional[Collection] = Relationship(back_populates="networks")
     network: Optional[Network] = Relationship(back_populates="collections")
 

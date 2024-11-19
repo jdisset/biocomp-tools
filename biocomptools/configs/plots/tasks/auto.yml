@@ -1,0 +1,11 @@
+!if ${D.dimensions.input == 1}:
+  <<: !include pkg:biocomptools:configs/plots/tasks/1D
+
+!if ${D.dimensions.input == 2}:
+  <<: !include pkg:biocomptools:configs/plots/tasks/2D
+
+!if ${D.dimensions.input == 3}:
+  <<: !include pkg:biocomptools:configs/plots/tasks/3D_stack
+
+!if ${D.dimensions.input > 3}:
+  throw: ${raise ValueError(f"Cannot plot more than 3 dimensions, but got {D.dimensions.input} dimensions from {D.metadata['file_stem']}")}

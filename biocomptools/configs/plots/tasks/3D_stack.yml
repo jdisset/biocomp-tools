@@ -1,0 +1,48 @@
+!set_default ax: null
+!set_default nslices: 30
+!set_default threshold: 0.225
+!set_default opacity: 0.25
+
+!set_default plotvars:
+  zlims: [0, 0.6]
+  vlims: [0, 0.6]
+
+!set_default slices: ${linspace(plotvars['zlims'][0], plotvars['zlims'][1], int(nslices))}
+!define plot_title: ${D.metadata.get('title', D.metadata["network"].title())}
+
+plot_config:
+  <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+  <<{+<}:
+    callstack_params:
+      knn_avg_params:
+        avg_method: mean
+        k: 1000
+        min_points: 25
+        radius: 0.12
+      smooth_3d_params:
+        draw_colorbar: false
+        show_inner_spines: false
+        show_slice_ticks: false
+        show_front_face_ticks: true
+        smooth_2d_params:
+          knn_grid_params:
+            grid_resolution: 80
+          heatmap_params:
+            opacity: ${float(opacity)}
+            show_image: True
+            clip_to_lowest_contour: True
+            contours:
+              - ${float(threshold)}
+            contours_linewidth: 0.2
+
+plot_method:
+  func: biocomp.plotutils.smooth
+  kwargs:
+    plot_data: ${D}
+    zslices: ${[slices]}
+    ax: ${FIG.flat_ax if ax is None else ax}
+    xtitle: ${get_pretty_axis_label(0, D)}
+    ytitle: ${get_pretty_axis_label(1, D)}
+    ztitle: ${get_pretty_axis_label(2, D)}
+    vtitle: ${D.output_name}
+    title: ${plot_title}

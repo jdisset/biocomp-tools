@@ -358,14 +358,14 @@ class WandBLogger(Logger):
 
 ## {{{              --     saving and plotting best model     --
 
-words = dr.load('pkg:biocomptools:configs/funnywords.yaml')
 
+funny_words = dr.load('pkg:biocomptools:configs/funnywords.yaml')
 
 def generate_unique_name(directory: Path | str, prefix: str = '', suffix: str = '') -> str:
     """Generate a unique name for a file or directory in the given directory."""
     directory = Path(directory)
-    adj = np.random.choice(words['adjectives'])
-    noun = np.random.choice(words['nouns'])
+    adj = np.random.choice(funny_words['adjectives'])
+    noun = np.random.choice(funny_words['nouns'])
     name = f'{prefix}{adj}-{noun}{suffix}'
     # add a number to the name if it already exists
     i = 1

@@ -185,9 +185,10 @@ class DBSource(DataSource, NetworkSet):
 ## {{{                     --     NetworkPrediction     --
 
 
-class NetworkPrediction(DBSource):
+class NetworkPrediction(DataSource):
     predict_at: np.ndarray
     network_model: SingleNetworkModel
+    input_order: Optional[List[int]] = None
 
     ground_truth: Optional[np.ndarray] = None
 
@@ -208,6 +209,7 @@ class NetworkPrediction(DBSource):
                 assert len(yhat) == len(self.ground_truth)
                 mse = np.mean((yhat - self.ground_truth) ** 2)
                 pdata.metadata['mse'] = mse
+                pdata.metadata['rmse'] = np.sqrt(mse)
             return self.predict_at, yhat
 
         metadata = self.metadata

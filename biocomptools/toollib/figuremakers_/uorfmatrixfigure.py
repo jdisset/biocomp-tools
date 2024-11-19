@@ -1,39 +1,29 @@
-from omegaconf import DictConfig, ListConfig
-from typing import Any, Dict, Union, Annotated, Tuple, Optional, List
+import matplotlib as mpl
+from dracon.draconstructor import resolve_all_lazy
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Tuple
+from biocomp.utils import PartialFunction, ArbitraryModel
+from biocomp.plotutils import FigureSpec, SimpleLayout
+from biocomptools.toollib.plot import PlotTask, PlotConfig, Figure, load_default_plotconf
+from biocomp.plotutils import PlotData
+from biocomptools.logging_config import get_logger
+from biocomptools.toollib.datasources import DataSource
+from pydantic import BaseModel, Field, BeforeValidator
+import numpy as np
 
-import biocomp.utils as ut
-from biocomp.plotutils import FigureSpec, PlotData, SimpleLayout
-
-import biocomptools.toollib.plot as pl
-from biocomptools.toollib.resolvable import Resolvable, make_resolvable
-from biocomptools.toollib.inheritable import merged
-from biocomptools.toollib.plot import (
-    FigureTask,
-    ListOrSingle,
-    FigureMaker,
-    ArbitraryTargetModel,
-    PlotTask,
-    ResolvablePlotConfig,
-    ResolvableOr,
-    PlotConfig
-)
-
-# todo, maybe it should be a plot, not a figure maker?
-# not sure..
-# - Make parallel with multifigure?
-# - Use a after_task + ray.bind to have parallel things + able to compose tasks
-# - Turn into plot file output
+logger = get_logger(__name__)
 
 
-class GridPlotConfig(ArbitraryTargetModel):
-    """simply a plot config with row and col attributes"""
+class GridPlotConfig(BaseModel):
+    """Configuration for specific grid positions"""
 
     row: Optional[int] = None  # None means all rows
     col: Optional[int] = None  # None means all columns
+    plot_config: PlotConfig
 
-    plot_config: ResolvablePlotConfig = {}
-
-    def matches(self, r: int, c: int, grid_size: tuple[int, int]):
+    def matches(self, r: int, c: int, grid_size: tuple[int, int]) -> bool:
+        """Check if this config applies to the given grid position"""
         if self.row is not None and self.row < 0:
             row = grid_size[0] + self.row
         else:
@@ -45,229 +35,310 @@ class GridPlotConfig(ArbitraryTargetModel):
         return (row is None or row == r) and (col is None or col == c)
 
 
-ResolvableGridPlotConfig = Annotated[ResolvableOr[GridPlotConfig], *pl.resolvable(PlotConfig)]
+DEFAULT_GRID_PLOTCONFIGS = [
+    GridPlotConfig(
+        plot_config=PlotConfig(
+            callstack_params={
+                "smooth_2d_params": {
+                    "draw_colorbar": False,
+                }
+            }
+        ),
+    ),
+    GridPlotConfig(
+        col=-1,
+        row=-1,
+        plot_config=PlotConfig(
+            callstack_params={
+                "smooth_2d_params": {
+                    "draw_colorbar": True,
+                    "colorbar_params": {
+                        "size": [0.05, 0.85],
+                        "position": [1.05, 0.075],
+                    },
+                }
+            }
+        ),
+    ),
+]
 
 
-class uORFMatrixFigure(FigureMaker):
+class UORFCell:
+    """Represents a cell in the uORF matrix with its data and configuration"""
 
+    def __init__(self, row: int, col: int, uorf_values: Tuple[float, float], data: PlotData):
+        self.row = row
+        self.col = col
+        self.uorf_values = uorf_values
+        self.data = data
+
+    def __repr__(self):
+        return f"UORFCell(row={self.row}, col={self.col}, uorf_values={self.uorf_values})"
+
+
+class uORFMatrixFigure(Figure):
+    """A figure that automatically distributes data across a matrix based on uORF values"""
+
+    # Input data as list of PlotData objects
+    plot_data: List[PlotData]
+
+    # Configuration
     uorf_axis_order: tuple[int, int] = (0, 1)
-    plot_only: int = -1  # -1 means all plots. For debugging.
+    plot_only: int = -1
+    plot_template: Optional[PlotTask] = None
+    grid_plotconfigs: List[GridPlotConfig] = DEFAULT_GRID_PLOTCONFIGS
 
-    grid_plotconfigs: List[ResolvableGridPlotConfig] = []
-
-    legend_row: int = -1
-    legend_col: int = 0
-
-    draw_colorbar: bool = False
-    colorbar_row: int = 0
+    # Layout configuration
+    draw_colorbar: bool = True
     colorbar_col: int = -1
 
-    uorf_label_fontsize: int = 16
-    uorf_label_padding: float = 0.325
-    label_fontweight: int = 1000
+    def get_plot_config_for_cell(
+        self, row: int, col: int, grid_size: tuple[int, int]
+    ) -> PlotConfig:
+        """Get the appropriate plot configuration for a specific grid position"""
+        # Start with base config
 
-    plot_func: str = 'biocomp.plotutils.smooth'
+        resolve_all_lazy(self.plot_config)
+        config = self.plot_config.model_copy()
 
-    def model_post_init(self, *_):
-        super().model_post_init()
+        # Apply grid-specific configs in order
+        for grid_conf in self.grid_plotconfigs:
+            if grid_conf.matches(row, col, grid_size):
+                config.inherit_from(grid_conf.plot_config, key="<<{+>}")
 
-        LEGEND_ROW_CONF = GridPlotConfig(
-            row=self.legend_row,
-            plot_config={
-                'callstack_params': {
-                    'smooth_2d_params': {
-                        'draw_xlabel': True,
-                    }
-                },
-                'rc_context': {
-                    'xtick.labelbottom': True,
-                },
-            },
-        )
+        return config
 
-        LEGEND_COL_CONF = GridPlotConfig(
-            col=self.legend_col,
-            plot_config={
-                'callstack_params': {
-                    'smooth_2d_params': {
-                        'draw_ylabel': True,
-                    }
-                },
-                'rc_context': {
-                    'ytick.labelleft': True,
-                },
-            },
-        )
+    def partition_data(self, data: PlotData) -> Dict[Tuple[float, float], List[int]]:
+        """Group data points by their uORF values"""
+        network_info = data.metadata['network_info']
+        uorf_values = np.array(network_info['uorf_values'])
 
-        UORF_COLORBAR_SPECIALIZATION = GridPlotConfig(
-            _target_=None,
-            row=self.colorbar_row,
-            col=self.colorbar_col,
-            plot_config={
-                'callstack_params': {
-                    'smooth_2d_params': {
-                        'draw_colorbar': True,
-                        'colorbar_params': {
-                            'position': (1.5, -0.5),
-                            'size': (0.1, 1.0),
-                            'label_props': {
-                                'fontsize': 12,
-                                'labelpad': 3,
-                            },
-                            'orientation': 'vertical',
-                            'label_position': 'left',
-                        },
-                    }
-                },
-            },
-        )
+        if len(uorf_values) == 0:
+            raise ValueError("No uORF values found in network info")
 
-        self.grid_plotconfigs = [
-            make_resolvable(value=LEGEND_COL_CONF),
-            make_resolvable(value=LEGEND_ROW_CONF),
-            make_resolvable(value=UORF_COLORBAR_SPECIALIZATION),
-            *self.grid_plotconfigs,
+        value_pairs = [
+            (v[self.uorf_axis_order[0]], v[self.uorf_axis_order[1]]) for v in uorf_values
         ]
+        unique_pairs = list(set(value_pairs))
 
-    def make_grid(self, data: ListOrSingle[PlotData]):
-        dlist = as_list(data)
-        for d in dlist:
-            assert 'network_info' in d.metadata, f"Missing network_info in {d.metadata['name']}"
+        grouped_indices = {pair: [] for pair in unique_pairs}
+        for idx, pair in enumerate(value_pairs):
+            grouped_indices[pair].extend(range(len(data.x)))
 
-        grid_coords = get_uorf_grid(
-            [d.metadata['network_info'] for d in dlist], *self.uorf_axis_order
+        return grouped_indices
+
+    def create_cell_data(
+        self, base_data: PlotData, indices: List[int], uorf_values: Tuple[float, float]
+    ) -> PlotData:
+        """Create a new PlotData object for a specific cell"""
+        x = base_data.x[indices] if indices else base_data.x[[]]
+        y = base_data.y[indices] if indices else base_data.y[[]]
+
+        metadata = base_data.metadata.copy()
+        metadata['uorf_values'] = uorf_values
+
+        return PlotData(
+            xval=x,
+            yval=y,
+            input_names=base_data.input_names,
+            output_name=base_data.output_name,
+            metadata=metadata,
         )
-        grid_size = np.max(grid_coords, axis=0) + 1
 
-        layout = make_resolvable(
-            value=SimpleLayout(
-                rows=grid_size[0],
-                cols=grid_size[1],
-                axes_size=(2.5, 2.5),
-                kwargs={'sharex': 'all', 'sharey': 'all'},
-            )
-        )
+    def create_grid_cells(self) -> List[UORFCell]:
+        """Create matrix cells with their corresponding data"""
 
-        self.figure_spec = merged(
-            self.figure_spec,
-            {'layout': {'_target_': 'biocomp.plotutils.SimpleLayout', **layout.config}},
-        )
+        all_pairs = set()
+        for data in self.plot_data:
+            pairs = self.partition_data(data).keys()
+            all_pairs.update(pairs)
 
-        grid_coords_to_net_info = {
-            (r, c): d.metadata['network_info'] for (r, c), d in zip(grid_coords, dlist)
-        }
+        unique_vals_0 = sorted(set(pair[0] for pair in all_pairs))
+        unique_vals_1 = sorted(set(pair[1] for pair in all_pairs))
 
-        return grid_coords, grid_size, grid_coords_to_net_info
+        cells = []
+        for pair in all_pairs:
+            row = unique_vals_0.index(pair[0])
+            col = unique_vals_1.index(pair[1])
 
-    def make_tasks(self, data: ListOrSingle[PlotData]) -> list[FigureTask]:
+            combined_data = []
+            for data in self.plot_data:
+                grouped = self.partition_data(data)
+                if pair in grouped:
+                    cell_data = self.create_cell_data(data, grouped[pair], pair)
+                    combined_data.append(cell_data)
 
-        grid_coords, grid_size, grid_coords_to_net_info = self.make_grid(data)
+            if combined_data:
+                cells.append(UORFCell(row, col, pair, combined_data[0]))
 
-        self.plot_tasks = []
-        for i, (r, c) in enumerate(grid_coords):
-            # create a plotconfig for these coordinates by
-            # merging all the specialized plot configs
-            task_plotconf = self.plot_config
-            for gpc in self.grid_plotconfigs:
-                resolved_gpc = rs.resolved(gpc)
-                if resolved_gpc.matches(r, c, grid_size):
-                    # task_plotconf = merged(task_plotconf, resolved_gpc.plot_config)
-                    task_plotconf = merged(resolved_gpc.plot_config, task_plotconf)
+        return cells
 
-            t = PlotTask(
-                plot_config=task_plotconf,
-                plot_method=ut.PartialFunction(
-                    func=self.plot_func,
-                    kwargs={
-                        'ax': '${ptask: context.figure.ax.' + f'{r}.{c}' + '}',
-                        'plot_data': '${ftask: flat_data.' + str(i) + '}',
-                    },
+    def create_plot_task_for_cell(self, cell: UORFCell, ax, grid_size: tuple[int, int]) -> PlotTask:
+        """Create a plot task for a specific cell"""
+        if self.plot_template:
+            task = self.plot_template.model_copy(deep=True)
+        else:
+            task = PlotTask(
+                plot_config=self.get_plot_config_for_cell(cell.row, cell.col, grid_size),
+                plot_method=PartialFunction(
+                    func='biocomp.plotutils.smooth', kwargs={'force_dim': 2}
                 ),
             )
 
-            self.plot_tasks.append(t)
+        task.plot_config.inherit_from(
+            self.get_plot_config_for_cell(cell.row, cell.col, grid_size), key="<<{+>}"
+        )
 
-        if self.plot_only > 0:
-            self.plot_tasks = self.plot_tasks[: self.plot_only]
+        task.ax = ax
+        task.plot_method.kwargs['plot_data'] = cell.data
 
-        self.n_plot_tasks = len(self.plot_tasks)
+        return task
 
-        def uorf_legend(s):
-            value = s.split(': ')[1].split(' ')[0]
-            side = s.split(':')[0].split(' ')[1]
-            if side == 'REC':
-                side = 'target'
-            if value == 'No':
-                value = 'none'
-            return side, value
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        print(f"uORFMatrixFigure initialized with {len(self.plot_data)} data sets")
 
-        legend_row = self.legend_row if self.legend_row >= 0 else grid_size[0] - 1
-        legend_col = self.legend_col if self.legend_col >= 0 else grid_size[1] - 1
+    def run(self, overwrite=True):
+        """Execute the figure creation"""
+        print(f"Running uORF matrix figure with {len(self.plot_data)} data sets")
+        if not overwrite and self.figure_spec.output_path.exists():
+            logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
+            return
 
-        # now we add an extra_task to write legend on the sides
-        def final_touches(
-            figure_task,
-            figax,
-            grid_size=grid_size,
-            grid_coords_to_net_info=grid_coords_to_net_info,
-            legend_row=legend_row,
-            legend_col=legend_col,
-        ):
-            fig = figax.figure
-            # column legend:
-            for r in range(grid_size[0]):
-                ax = figax.ax[r][legend_col]
-                net_info = grid_coords_to_net_info.get((r, legend_col), None)
-                side, u_value = uorf_legend(net_info['uorf_names'][self.uorf_axis_order[0]])
-                if net_info is not None:
-                    ax.text(
-                        -self.uorf_label_padding,
-                        0.4,
-                        u_value,
-                        fontsize=self.uorf_label_fontsize,
-                        ha='right',
-                        va='center',
-                    )
+        with mpl.rc_context(rc=self.plot_config.rc_context):
+            # Take first dataset as example
+            d = self.plot_data[0]
+            print(f"Shape of data: x={d.x.shape}, y={d.y.shape}")
+            print(f"Data range: x=[{d.x.min()}, {d.x.max()}], y=[{d.y.min()}, {d.y.max()}]")
+            print(f"uORF values: {d.metadata['network_info']['uorf_values']}")
 
-                if r == grid_size[0] - 1:
-                    ax.text(
-                        -self.uorf_label_padding,
-                        0.025,
-                        f'x uORFs\n{side} side\n→',  # ↑
-                        fontsize=self.uorf_label_fontsize * 1.0,
-                        ha='right',
-                        va='center',
-                        fontweight=self.label_fontweight,
-                        color='black',
-                        rotation=90,
-                    )
+            cells = self.create_grid_cells()
 
-            for c in range(grid_size[1]):
-                ax = figax.ax[legend_row][c]
-                net_info = grid_coords_to_net_info.get((legend_row, c), None)
-                side, u_value = uorf_legend(net_info['uorf_names'][self.uorf_axis_order[1]])
-                if net_info is not None:
-                    ax.text(
-                        0.4,
-                        -self.uorf_label_padding,
-                        u_value,
-                        fontsize=self.uorf_label_fontsize,
-                        ha='center',
-                        va='center',
-                    )
+            rows = max(cell.row for cell in cells) + 1
+            cols = max(cell.col for cell in cells) + 1
+            grid_size = (rows, cols)
 
-                if c == 0:
-                    ax.text(
-                        0.1,
-                        -self.uorf_label_padding,
-                        f'→\nx uORFs\n{side} side',
-                        fontsize=self.uorf_label_fontsize * 1.0,
-                        ha='right',
-                        va='center',
-                        fontweight=self.label_fontweight,
-                        color='black',
-                    )
+            print(f"Grid size: {grid_size}")
 
-        ftask = self.spawn_figure_task(data, {'figure_makers': ['uorf_matrix']})
-        ftask.extra_tasks.append(ut.PartialFunction(func=final_touches))
-        return [ftask]
+            self.figure_spec.layout = SimpleLayout(rows=rows, cols=cols)
+
+            figax = self.figure_spec.make_figure()
+
+            for i, cell in enumerate(cells):
+                if self.plot_only > 0 and i >= self.plot_only:
+                    break
+
+                ax = figax.ax[cell.row][cell.col]
+                task = self.create_plot_task_for_cell(cell, ax, grid_size)
+
+                try:
+                    task.run()
+                    print(f"Executed plot task for cell {cell} ({i + 1}/{len(cells)})")
+                except Exception as e:
+                    logger.error(f"Error executing plot task {task} for cell {cell}: {e}")
+                    logger.exception(e)
+                    continue
+
+        self.figure_spec.finalize(figax)
+
+
+## {{{                    --     uorf bundle helper     --
+
+
+def bundle_uorf_data(
+    plot_data: List[PlotData],
+    uorf_values: List[float] = [0, 5, 10, 20, 30, 40, 50, 60, 80],
+    same_xp: bool = True,
+) -> List[List[PlotData]]:
+    """
+    Analyze a list of PlotData and create bundles for uORF matrix figures.
+    Each bundle contains data for a complete matrix of uORF combinations.
+
+    Args:
+        plot_data: List of PlotData objects to analyze
+        uorf_values: Required uORF values to consider a matrix complete
+        same_xp: If True, only bundle data from the same experiment
+
+    Returns:
+        List of PlotData bundles, where each bundle can be used to create a uORF matrix figure
+    """
+    # Convert uorf_values to set for faster lookup
+    required_values = set(uorf_values)
+
+    # Group data by experiment if needed
+    if same_xp:
+        xp_groups = defaultdict(list)
+        for data in plot_data:
+            xp_name = data.metadata.get('experiment', {}).get('name')
+            if xp_name:
+                xp_groups[xp_name].append(data)
+        data_groups = list(xp_groups.values())
+    else:
+        data_groups = [plot_data]
+
+    bundles = []
+
+    for group in data_groups:
+        # Find ERNs and their associated data
+        ern_groups = defaultdict(list)
+
+        for data in group:
+            network_info = data.metadata.get('network_info', {})
+            ern_names = network_info.get('ern_names', [])
+
+            if not ern_names:
+                continue
+
+            # Group by first ERN name for now
+            ern_name = ern_names[0]
+            ern_groups[ern_name].append(data)
+
+        # Process each ERN group
+        for ern_name, ern_data in ern_groups.items():
+            # Check the uORF values for this group
+            value_sets = set()
+            for data in ern_data:
+                uorf_vals = data.metadata['network_info'].get('uorf_values', [])
+                for vals in uorf_vals:
+                    value_sets.add(tuple(sorted(vals)))
+
+            # Check if we have all combinations of required values
+            required_combinations = {(v1, v2) for v1 in required_values for v2 in required_values}
+
+            # Identify missing combinations
+            missing = required_combinations - value_sets
+            if missing:
+                logger.debug(
+                    f"ERN {ern_name} missing uORF combinations: {missing}"
+                    f" (from {'same experiment' if same_xp else 'any experiment'})"
+                )
+                continue
+
+            # This is a complete set - let's add it to our bundles
+            bundles.append(ern_data)
+
+    logger.info(
+        f"Found {len(bundles)} complete uORF matrices"
+        f" (from {'same experiment' if same_xp else 'any experiment'})"
+    )
+
+    return bundles
+
+
+def get_ern_info(bundle: List[PlotData]) -> Dict[str, str]:
+    """Helper to get ERN information from a bundle"""
+    if not bundle:
+        return {}
+
+    network_info = bundle[0].metadata.get('network_info', {})
+    ern_names = network_info.get('ern_names', [])
+    if not ern_names:
+        return {}
+
+    return {
+        'ern_name': ern_names[0],
+        'experiment': bundle[0].metadata.get('experiment', {}).get('name', 'unknown'),
+    }
+
+
+##────────────────────────────────────────────────────────────────────────────}}}

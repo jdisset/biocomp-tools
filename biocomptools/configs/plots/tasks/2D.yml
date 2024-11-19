@@ -1,0 +1,10 @@
+!set_default ax: null
+
+plot_method:
+  func: biocomp.plotutils.smooth
+  kwargs:
+    plot_data: ${D}
+    ax: ${FIG.flat_ax if ax is None else ax}
+    xtitle: ${get_pretty_axis_label(0, D)}
+    ytitle: ${get_pretty_axis_label(1, D)}
+    vtitle: ${D.output_name}
