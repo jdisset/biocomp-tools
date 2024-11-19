@@ -10,6 +10,8 @@ import biocomptools.toollib.models as md
 from biocomp.utils import ArbitraryModel
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
+from sqlalchemy.exc import SQLAlchemyError
+
 
 logger = get_logger(__name__)
 
@@ -81,71 +83,149 @@ class NetworkSelector(ArbitraryModel):
     output_name: Optional[str] = None
 
     def get_networkdata_ids(self, session) -> List[NetworkDataId]:
-        query = (
-            select(md.Network)
-            .join(md.Recipe)
-            .join(md.Experiment)
-            .options(
-                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
-                selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
-                selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
-            )
+        """
+        Retrieve network data IDs based on specified filters.
+
+        Args:
+            session: The database session
+
+        Returns:
+            List[NetworkDataId]: List of network data identifiers
+
+        Raises:
+            ValueError: If no networks are found or if query execution fails
+            SQLAlchemyError: For database-related errors
+        """
+        logger.info(
+            f"Starting network data retrieval - Experiment: {self.experiment_name}, Recipe: {self.recipe_name}"
         )
 
-        if self.experiment_name:
-            query = query.where(
-                col(md.Experiment.name).regexp_match(maybe_regex(self.experiment_name))
+        try:
+            # Build the base query
+            query = (
+                select(md.Network)
+                .join(md.Recipe)
+                .join(md.Experiment)
+                .options(
+                    selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
+                    selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
+                    selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
+                )
             )
-        if self.recipe_name:
-            query = query.where(col(md.Recipe.name).regexp_match(maybe_regex(self.recipe_name)))
+            logger.info("Base query constructed successfully")
 
-        logger.debug(f"Network query: {query}")
-        networks = session.exec(query).all()
-
-        if not networks:
-            msg = f"No networks found for xp {self.experiment_name}, recipe {self.recipe_name}"
-            msg += f". Query: {query}"
-            raise ValueError(msg)
-
-        if self.output_name is not None:
-            networks = [
-                network
-                for network in networks
-                if network.network_info['dependent_outputs'][0].upper() == self.output_name.upper()
-            ]
-
-        network_and_data = []
-        for network in networks:
-            if self.calibration_name:
-                datafile_query = (
-                    select(md.DataFile)
-                    .options(selectinload(md.DataFile.calibration))
-                    .where(
-                        md.DataFile.recipe_name == network.recipe_name,
-                        col(md.DataFile.calibration_name).regexp_match(
-                            maybe_regex(self.calibration_name)
-                        ),
-                    )
-                    .order_by(col(md.DataFile.priority).desc())
-                )
-                datafiles = list(session.exec(datafile_query).all())
-                logger.debug(f"Datafile query: {datafile_query}")
-            else:
-                with session.no_autoflush:
-                    datafiles = [network.recipe.get_best_datafile()]
-
-
-            if not datafiles:
-                logger.warning(f"No datafile found for {network.recipe_name}")
-                continue
-
-            logger.debug(f"Selected {len(datafiles)} datafiles for {network.recipe_name}")
-            for datafile in datafiles:
-                network_and_data.append(
-                    NetworkDataId(network_name=network.name, file_path=datafile.file)
+            # Apply filters
+            if self.experiment_name:
+                logger.info(f"Applying experiment filter: {self.experiment_name}")
+                query = query.where(
+                    col(md.Experiment.name).regexp_match(maybe_regex(self.experiment_name))
                 )
 
-        return network_and_data
+            if self.recipe_name:
+                logger.info(f"Applying recipe filter: {self.recipe_name}")
+                query = query.where(col(md.Recipe.name).regexp_match(maybe_regex(self.recipe_name)))
+
+            logger.debug(f"Final network query: {query}")
+
+            # Execute query
+            try:
+                networks = session.exec(query).all()
+                logger.info(f"Query executed successfully. Found {len(networks)} networks")
+            except SQLAlchemyError as e:
+                logger.error(f"Database error while executing network query: {str(e)}")
+                raise ValueError(f"Failed to execute network query: {str(e)}") from e
+
+            if not networks:
+                msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}'"
+                logger.error(msg)
+                raise ValueError(msg)
+
+            # Filter by output name if specified
+            if self.output_name is not None:
+                logger.info(f"Filtering networks by output name: {self.output_name}")
+                original_count = len(networks)
+                networks = [
+                    network
+                    for network in networks
+                    if network.network_info['dependent_outputs'][0].upper()
+                    == self.output_name.upper()
+                ]
+                logger.info(f"Output name filtering: {original_count} -> {len(networks)} networks")
+
+            # Process networks and collect data
+            network_and_data = []
+            logger.info(f"Processing {len(networks)} networks for data collection")
+
+            for network in networks:
+                logger.info(f"Processing network: {network.name}")
+
+                try:
+                    if self.calibration_name:
+                        logger.info(f"Applying calibration filter: {self.calibration_name}")
+                        datafile_query = (
+                            select(md.DataFile)
+                            .options(selectinload(md.DataFile.calibration))
+                            .where(
+                                md.DataFile.recipe_name == network.recipe_name,
+                                col(md.DataFile.calibration_name).regexp_match(
+                                    maybe_regex(self.calibration_name)
+                                ),
+                            )
+                            .order_by(col(md.DataFile.priority).desc())
+                        )
+                        logger.debug(f"Datafile query: {datafile_query}")
+
+                        try:
+                            datafiles = list(session.exec(datafile_query).all())
+                            logger.info(f"Found {len(datafiles)} datafiles for calibration")
+                        except SQLAlchemyError as e:
+                            logger.error(f"Database error while querying datafiles: {str(e)}")
+                            continue
+                    else:
+                        logger.info("No calibration filter, getting best datafile")
+                        with session.no_autoflush:
+                            try:
+                                datafiles = [network.recipe.get_best_datafile()]
+                                if datafiles[0] is None:
+                                    logger.warning(
+                                        f"No best datafile found for recipe: {network.recipe_name}"
+                                    )
+                                    continue
+                            except Exception as e:
+                                logger.error(
+                                    f"Error getting best datafile for recipe {network.recipe_name}: {str(e)}"
+                                )
+                                continue
+
+                    if not datafiles:
+                        logger.warning(f"No datafile found for recipe: {network.recipe_name}")
+                        continue
+
+                    logger.info(f"Processing {len(datafiles)} datafiles for network {network.name}")
+                    for datafile in datafiles:
+                        try:
+                            network_and_data.append(
+                                NetworkDataId(network_name=network.name, file_path=datafile.file)
+                            )
+                            logger.info(f"Added network data: {network.name} - {datafile.file}")
+                        except Exception as e:
+                            logger.error(
+                                f"Error creating NetworkDataId for {network.name}: {str(e)}"
+                            )
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error processing network {network.name}: {str(e)}")
+                    continue
+
+            logger.info(
+                f"Network data retrieval complete. Found {len(network_and_data)} network-data pairs"
+            )
+            return network_and_data
+
+        except Exception as e:
+            logger.error(f"Unexpected error in get_networkdata_ids: {str(e)}")
+            raise ValueError(f"Failed to retrieve network data: {str(e)}") from e
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -258,7 +338,6 @@ def build_data_manager(
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
     data = []
     actual_networks = []
-
 
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
         n.build(lib, use_cache=network_cache)
