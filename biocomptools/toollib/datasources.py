@@ -59,8 +59,15 @@ class DataSource(ArbitraryModel):
 
 config = cm.config
 
+DEFAULT_NAME_LOOKUP = {
+    'mNeonGreen': 'mNG',
+    'PgU': 'pgu',
+}
 
-def make_pretty_input_names(ratios, ordered_input_names):
+
+def make_pretty_input_names(
+    ratios, ordered_input_names, name_lookup: Optional[dict] = DEFAULT_NAME_LOOKUP
+):
     fluo_markers = [p[0][-1].upper() for p in ratios]
 
     names = []
@@ -75,6 +82,10 @@ def make_pretty_input_names(ratios, ordered_input_names):
                 x += rf"${content}$"
         else:
             print(f"Fluo marker: {p}, not found in ratios {fluo_markers}")
+
+        if name_lookup is not None:
+            for k, v in name_lookup.items():
+                x = x.replace(k, v)
 
         names.append(x)
 

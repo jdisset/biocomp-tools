@@ -58,7 +58,7 @@ class PlotConfig(BaseModel):
 
         return prepared_func
 
-    def inherit_from(self, other: 'PlotConfig', keep_rescaler: bool = True, key:str = '<<{+<}'):
+    def inherit_from(self, other: 'PlotConfig', keep_rescaler: bool = True, key:str = '<<{+<}[~<]'):
         from dracon.merge import MergeKey, merged
 
         k = MergeKey(raw=key)
@@ -131,6 +131,7 @@ class Figure(ArbitraryModel):
 
             for i, t in enumerate(self.plot_tasks):
                 try:
+                    print(f"Constructing plot task {i}")
                     pt = t.construct(context={"FIG": figax})
 
                     if dict_like(pt):

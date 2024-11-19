@@ -13,6 +13,6 @@ plot_method:
   func: biocomp.plotutils.histogram
   kwargs:
     plot_data: ${D}
-    ax: ${FIG.flat_ax[0] if ax is None else ax}
+    ax: ${FIG.flat_ax[0] if axnum is None else FIG.flat_ax[axnum]}
     xtitle: ${D.input_names[0]}
     ytitle: ${D.output_name}

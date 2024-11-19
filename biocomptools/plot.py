@@ -1,7 +1,7 @@
 ## {{{                          --     imports     --
 import os
 
-os.environ['RAY_DEDUP_LOGS'] = '0'
+os.environ.setdefault('RAY_DEDUP_LOGS', '0')
 
 from memory_profiler import profile
 
@@ -9,6 +9,7 @@ import logging.config
 import sys
 import time
 import ray
+from pathlib import Path
 from typing import List, Annotated, Dict, Any, Optional
 import dracon as dr
 from dracon.lazy import LazyDraconModel, resolve_all_lazy
@@ -19,6 +20,7 @@ from biocomp.utils import PartialFunction
 from biocomp.datautils import DataRescaler
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
+from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
 from biocomptools.toollib.figuremakers_.uorfmatrixfigure import uORFMatrixFigure
 from biocomptools.toollib.networkselector import (
@@ -194,6 +196,7 @@ def main():
         context={
             **make_context_from_types(DEFAULT_TYPES),
             'get_pretty_axis_label': get_pretty_axis_label,
+            'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
         },
     )
 

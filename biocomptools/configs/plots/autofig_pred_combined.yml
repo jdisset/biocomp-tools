@@ -27,7 +27,7 @@ figure_spec:
 
 plot_tasks:
   - !define D: ${plot_data}
-    !define ax: ${FIG.flat_ax[0]}
+    !define axnum: 0
     <<: !include pkg:biocomptools:configs/plots/tasks/auto
     <<{+<}:
       plot_method:
@@ -35,7 +35,7 @@ plot_tasks:
           title: "Ground Truth"
 
   - !define D: ${construct(&pred).get_data()[0]}
-    !define ax: ${FIG.flat_ax[1]}
+    !define axnum: 1
     <<: !include pkg:biocomptools:configs/plots/tasks/auto
     <<{+<}:
       plot_method:
