@@ -61,7 +61,7 @@ config = cm.config
 
 DEFAULT_NAME_LOOKUP = {
     'mNeonGreen': 'mNG',
-    'PgU': 'pgu',
+    'PgU': 'Pgu',
 }
 
 
