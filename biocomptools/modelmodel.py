@@ -2,12 +2,13 @@
 from biocomp import utils as ut
 import jax
 import biocomp.compute as cmp
+from biocomp.datautils import DataRescaler
 from pathlib import Path
 import numpy as np
 from pydantic import BeforeValidator
 from biocomp.utils import ArbitraryModel
 
-from typing import  Callable, Annotated
+from typing import Callable, Annotated
 from jax.random import PRNGKey
 
 import logging
@@ -73,6 +74,7 @@ def load_params(maybe_path):
 
 class BiocompModel(ArbitraryModel):
     compute_config: cmp.ComputeConfig
+    rescaler: DataRescaler
     shared_params: Annotated[
         pr.ParameterTree,
         BeforeValidator(get_shared_params),
@@ -126,6 +128,48 @@ class SingleNetworkModel(ArbitraryModel):
         assert isinstance(self._stack.apply, Callable)
         self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0)))
 
+        logger.info(f"Built stack for network {self.network.name}")
+
+    def predict_unscaled(self, X: np.ndarray, key=None, ground_truth=None) -> np.ndarray:
+        if key is None:
+            key = PRNGKey(0)
+        if isinstance(key, int):
+            key = PRNGKey(key)
+
+        num_z = self._params["global/number_of_quantile_variables"]
+        Z = jax.random.uniform(key, (X.shape[0], num_z))
+        keys = jax.random.split(key, X.shape[0])
+
+        mse = None
+
+        x = self.model.rescaler.fwd(X)
+
+        yhat, grads = self._batch_apply(self._params, x, Z, keys)
+
+        if ground_truth is not None:
+            ground_truth = self.model.rescaler.fwd(ground_truth)
+            logger.info("yhat shape: %s", yhat.shape)
+            mse = np.mean((yhat - ground_truth) ** 2)
+            rmse = np.sqrt(mse)
+            logger.info(f"MSE: {mse}")
+            logger.info(f"RMSE: {rmse}")
+
+            # pick 20 random samples to log
+            idx = np.random.choice(X.shape[0], 20, replace=False)
+            logger.info("Random samples:")
+            for i in idx:
+                logger.info(f"-- Sample {i} --")
+                logger.info(f"x: {x[i]}")
+                logger.info(f"yhat: {yhat[i]}")
+                logger.info(f"ground_truth: {ground_truth[i]}")
+
+
+
+        yhat = self.model.rescaler.inv(yhat)
+
+
+        return yhat, mse
+
     def predict(self, X: np.ndarray, key=None) -> np.ndarray:
         if key is None:
             key = PRNGKey(0)
@@ -136,6 +180,6 @@ class SingleNetworkModel(ArbitraryModel):
         Z = jax.random.uniform(key, (X.shape[0], num_z))
         keys = jax.random.split(key, X.shape[0])
 
-        yhat, grads = self._batch_apply(self._params, X, Z, keys)
+        yhat, grads = self._batch_apply(self._params, x, Z, keys)
 
         return yhat

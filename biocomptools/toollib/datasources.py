@@ -208,19 +208,30 @@ class NetworkPrediction(DataSource):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
-    def get_data(self) -> List[PlotData]:
+    def get_data_lazy(self) -> List[PlotData]:
         import time
 
         def get_XY(pdata):
             t0 = time.time()
-            yhat = self.network_model.predict(self.predict_at, self.seed)
+            yhat, mse = self.network_model.predict_unscaled(
+                self.predict_at, self.seed, ground_truth=self.ground_truth
+            )
             t1 = time.time()
+
+            logger.info(f"Predicted {yhat.shape[0]} samples")
+            logger.info(f"Predicted mean: {yhat.mean()}")
+            logger.info(f"Predicted std: {yhat.std()}")
+            logger.info(f"Predicted min: {yhat.min()}")
+            logger.info(f"Predicted max: {yhat.max()}")
+
             pdata.metadata['prediction_time'] = t1 - t0
+            logger.info(f"Prediction time: {pdata.metadata['prediction_time']}")
+
             if self.ground_truth is not None:
-                assert len(yhat) == len(self.ground_truth)
-                mse = np.mean((yhat - self.ground_truth) ** 2)
                 pdata.metadata['mse'] = mse
                 pdata.metadata['rmse'] = np.sqrt(mse)
+                logger.info(f"RMSE: {pdata.metadata['rmse']}")
+
             return self.predict_at, yhat
 
         metadata = self.metadata
@@ -235,6 +246,46 @@ class NetworkPrediction(DataSource):
         plot_data = pu.extract_lazy_plot_data_from_network(
             self.network_model.network.network,
             get_XY,
+            input_order=self.input_order,
+            metadata=metadata,
+        )
+
+        return [plot_data]
+
+    def get_data(self) -> List[PlotData]:
+        import time
+        print(f"Predicting {len(self.predict_at)} samples")
+
+        t0 = time.time()
+        yhat, mse = self.network_model.predict_unscaled(
+            self.predict_at, self.seed, ground_truth=self.ground_truth
+        )
+        t1 = time.time()
+        print(f"Predicted {yhat.shape[0]} samples")
+
+        metadata = self.metadata
+
+
+        metadata['source_type'] = 'prediction'
+        metadata['seed'] = self.seed
+        metadata['model'] = self.network_model.model
+        metadata['network'] = self.network_model.network
+        metadata['network_info'] = self.network_model.network.network_info
+        metadata['built_network'] = self.network_model.network.network
+        metadata['n_predictions'] = len(self.predict_at)
+
+        metadata['mse'] = mse
+        metadata['rmse'] = np.sqrt(mse) if mse is not None else None
+        metadata['prediction_time'] = t1 - t0
+
+        logger.info(f"Prediction shape: {yhat.shape}")
+        logger.info(f"Prediction mse: {mse}")
+        logger.info(f"Prediction time: {metadata['prediction_time']}")
+
+        plot_data = pu.extract_plot_data_from_network(
+            self.network_model.network.network,
+            self.predict_at,
+            yhat,
             input_order=self.input_order,
             metadata=metadata,
         )
