@@ -254,6 +254,7 @@ class NetworkPrediction(DataSource):
 
     def get_data(self) -> List[PlotData]:
         import time
+
         print(f"Predicting {len(self.predict_at)} samples")
 
         t0 = time.time()
@@ -264,7 +265,6 @@ class NetworkPrediction(DataSource):
         print(f"Predicted {yhat.shape[0]} samples")
 
         metadata = self.metadata
-
 
         metadata['source_type'] = 'prediction'
         metadata['seed'] = self.seed

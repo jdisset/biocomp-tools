@@ -1,5 +1,7 @@
 ## {{{                          --     imports     --
 
+import biocomp.utils as ut
+from biocomptools.modelmodel import BiocompModel, get_shared_params
 import dracon as dr
 import logging
 from pathlib import Path
@@ -13,7 +15,13 @@ import biocomp as bc
 import sys
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
-from biocomptools.trainutils import Logger, plot_loss, generate_unique_name, add_metadata
+from biocomptools.trainutils import (
+    Logger,
+    plot_loss,
+    generate_unique_name,
+    add_metadata,
+    get_best_smoothed_loss_id,
+)
 from sqlmodel import Session
 from datetime import datetime
 
@@ -184,8 +192,23 @@ class TrainingProgram(BaseModel):
         # rename the directory to indicate that the run is complete
         self._save_dir.rename(self._save_dir.with_name(self.run_name))
 
+    def save_best(self, all_models, all_losses, save_dir):
+        best_model_id, _ = get_best_smoothed_loss_id(all_losses)
+        best_params = get_shared_params(ut.tree_get(all_models, best_model_id))
+        model = BiocompModel(
+            compute_config=self.compute_conf,
+            rescaler=self.data_conf.rescaler,
+            shared_params=ut.tree_to_np(best_params),
+        )
+        model.save(save_dir / 'best_model.pickle')
+        model2 = BiocompModel.load(save_dir / 'best_model.pickle')
+        print(model.rescaler, model2.rescaler)
+        print(model.compute_config, model2.compute_config)
+        assert model.shared_params == model2.shared_params
+
     def save_outputs(self, params, loss_history, save_dir: Path):
         save(params, save_dir / 'all_models.pickle')
+        self.save_best(params, loss_history, save_dir)
 
         # Save loss history
         np.save(save_dir / 'loss_history.npy', loss_history)

@@ -149,7 +149,7 @@ class SingleNetworkModel(ArbitraryModel):
         if ground_truth is not None:
             ground_truth = self.model.rescaler.fwd(ground_truth)
             logger.info("yhat shape: %s", yhat.shape)
-            mse = np.mean((yhat - ground_truth) ** 2)
+            mse = np.mean((yhat - jax.numpy.concatenate([x, ground_truth], axis=1)) ** 2)
             rmse = np.sqrt(mse)
             logger.info(f"MSE: {mse}")
             logger.info(f"RMSE: {rmse}")
@@ -163,10 +163,7 @@ class SingleNetworkModel(ArbitraryModel):
                 logger.info(f"yhat: {yhat[i]}")
                 logger.info(f"ground_truth: {ground_truth[i]}")
 
-
-
         yhat = self.model.rescaler.inv(yhat)
-
 
         return yhat, mse
 
@@ -180,6 +177,6 @@ class SingleNetworkModel(ArbitraryModel):
         Z = jax.random.uniform(key, (X.shape[0], num_z))
         keys = jax.random.split(key, X.shape[0])
 
-        yhat, grads = self._batch_apply(self._params, x, Z, keys)
+        yhat, grads = self._batch_apply(self._params, X, Z, keys)
 
         return yhat
