@@ -13,6 +13,7 @@ from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
 import biocomp as bc
 import sys
+import biocomp.train as bctrain
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
 from biocomptools.trainutils import (
@@ -174,7 +175,7 @@ class TrainingProgram(BaseModel):
         print(f"{self._metadata}")
 
         # Start training
-        params, loss_history, step_history = bc.train.start(
+        params, loss_history, step_history = bctrain.start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
@@ -202,8 +203,6 @@ class TrainingProgram(BaseModel):
         )
         model.save(save_dir / 'best_model.pickle')
         model2 = BiocompModel.load(save_dir / 'best_model.pickle')
-        print(model.rescaler, model2.rescaler)
-        print(model.compute_config, model2.compute_config)
         assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):
