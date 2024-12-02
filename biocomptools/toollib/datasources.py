@@ -1,7 +1,6 @@
 ## {{{                          --     imports     --
 from pydantic.functional_validators import BeforeValidator
 from typing import Any, Optional, List
-from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector
 
 import numpy as np
 
@@ -14,12 +13,13 @@ import biocomp as bc
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
+from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector
 import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm
 import biocomptools.toollib.models as md
 from biocomptools.modelmodel import SingleNetworkModel
-
 from biocomptools.logging_config import get_logger
+
 from sqlmodel import Session, text
 from sqlalchemy.sql.elements import TextClause
 
@@ -102,6 +102,7 @@ class DBSource(DataSource, NetworkSet):
     input_order: Optional[List[int]] = None
 
     def model_post_init(self, *args, **kwargs):
+
         super().model_post_init(*args, **kwargs)
         self._lib = load_lib()
         self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)

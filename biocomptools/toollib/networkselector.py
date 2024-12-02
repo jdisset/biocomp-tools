@@ -117,13 +117,35 @@ class NetworkSelector(ArbitraryModel):
             # Apply filters
             if self.experiment_name:
                 logger.info(f"Applying experiment filter: {self.experiment_name}")
-                query = query.where(
-                    col(md.Experiment.name).regexp_match(maybe_regex(self.experiment_name))
-                )
+                if isinstance(self.experiment_name, Regex):
+                    query = query.where(col(md.Experiment.name).regexp_match(self.experiment_name))
+                else:
+                    query = query.where(md.Experiment.name == self.experiment_name)
 
             if self.recipe_name:
                 logger.info(f"Applying recipe filter: {self.recipe_name}")
-                query = query.where(col(md.Recipe.name).regexp_match(maybe_regex(self.recipe_name)))
+                if isinstance(self.recipe_name, Regex):
+                    # For regex, we'll just use the pattern directly since it might include custom matching
+                    query = query.where(col(md.Recipe.name).regexp_match(self.recipe_name))
+                else:
+                    # For exact string match, we need to find the recipe with format "{exp_name}_{recipe_name}"
+                    if self.experiment_name:
+                        if isinstance(self.experiment_name, Regex):
+                            # If experiment_name is a regex, we can't construct the exact recipe name
+                            # So we'll need to use a regex that matches the end of the string
+                            query = query.where(
+                                col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                            )
+                        else:
+                            # If we have exact experiment name, we can construct the full recipe name
+                            query = query.where(
+                                md.Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
+                            )
+                    else:
+                        # If no experiment name is provided, match any experiment prefix
+                        query = query.where(
+                            col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                        )
 
             logger.debug(f"Final network query: {query}")
 
@@ -165,14 +187,22 @@ class NetworkSelector(ArbitraryModel):
                         datafile_query = (
                             select(md.DataFile)
                             .options(selectinload(md.DataFile.calibration))
-                            .where(
-                                md.DataFile.recipe_name == network.recipe_name,
-                                col(md.DataFile.calibration_name).regexp_match(
-                                    maybe_regex(self.calibration_name)
-                                ),
-                            )
-                            .order_by(col(md.DataFile.priority).desc())
+                            .where(md.DataFile.recipe_name == network.recipe_name)
                         )
+
+                        # Add calibration name filter based on type
+                        if isinstance(self.calibration_name, Regex):
+                            datafile_query = datafile_query.where(
+                                col(md.DataFile.calibration_name).regexp_match(
+                                    self.calibration_name
+                                )
+                            )
+                        else:
+                            datafile_query = datafile_query.where(
+                                md.DataFile.calibration_name == self.calibration_name
+                            )
+
+                        datafile_query = datafile_query.order_by(col(md.DataFile.priority).desc())
                         logger.debug(f"Datafile query: {datafile_query}")
 
                         try:

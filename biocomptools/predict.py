@@ -7,7 +7,6 @@ from pathlib import Path
 import dracon as dr
 from biocomptools.toollib.plot import Figure
 
-
 trainingdir = (
     Path('~/Dropbox (MIT)/Biocomp_v2/Training/Runs/joyful-sashay/training/').expanduser().resolve()
 )

@@ -23,6 +23,7 @@ from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPredic
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
 from biocomptools.toollib.figuremakers_.uorfmatrixfigure import uORFMatrixFigure
+
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
     Regex,
@@ -193,11 +194,13 @@ def main():
         deferred_paths=[
             '/figures.*',
         ],
+
         context={
             **make_context_from_types(DEFAULT_TYPES),
             'get_pretty_axis_label': get_pretty_axis_label,
             'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
         },
+
     )
 
     dmp = dr.dump(pj)

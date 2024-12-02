@@ -17,6 +17,7 @@ from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
 from biocomptools.trainutils import (
     Logger,
+    ConsoleLogger,
     plot_loss,
     generate_unique_name,
     add_metadata,
@@ -24,25 +25,54 @@ from biocomptools.trainutils import (
 )
 from sqlmodel import Session
 from datetime import datetime
+from biocomp.utils import PartialFunction
 
 from biocomp.utils import (
     load_lib,
     save,
 )
 
+from biocomptools.toollib.networkselector import (
+    NetworkSelector,
+    Regex,
+    NetworkDataId,
+    NetworkSetUnion,
+    NetworkSetIntersection,
+    NetworkSetDifference,
+)
+
 from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 
+
 import biocomptools.toollib.models as md
 
+import biocomptools.trainutils as tu
+
+print("ConsoleLogger is defined in:", tu.__file__)
+
 logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
+
+DEFAULT_TYPES = [
+    Regex,
+    NetworkSelector,
+    NetworkSet,
+    NetworkDataId,
+    NetworkSetUnion,
+    NetworkSetIntersection,
+    NetworkSetDifference,
+    PartialFunction,
+]
+
+
+def make_context_from_types(types):
+    return {t.__name__: t for t in types}
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                      --     TrainingProgram     --
-
-DEFAULT_LOGGERS = []
 
 
 class TrainingProgram(BaseModel):
@@ -62,7 +92,9 @@ class TrainingProgram(BaseModel):
     outputdir: Annotated[
         str, Arg(help='Base directory to save model (will be saved in outputdir/run_name')
     ] = './training_output'
-    loggers: Annotated[List[Logger], Arg(help='Loggers to use')] = DEFAULT_LOGGERS
+    loggers: Annotated[List[Logger], Arg(help='Loggers to use')] = Field(
+        default_factory=lambda: []
+    )
 
     run_name: Annotated[
         Optional[str], Arg(help='Name of the run (automatically generated if None)')
@@ -240,7 +272,10 @@ def main():
     )
     trainprog, _ = cliprog.parse_args(
         sys.argv[1:],
-        context={'NetworkSet': NetworkSet},
+        context={
+            **make_context_from_types(DEFAULT_TYPES),
+            'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+        },
     )
     assert isinstance(trainprog, TrainingProgram), f"{trainprog=}"
 
