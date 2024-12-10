@@ -16,8 +16,6 @@ from sqlalchemy.exc import SQLAlchemyError
 logger = get_logger(__name__)
 
 ## {{{                           --     utils     --
-
-
 class NetworkDataId(BaseModel):
     """
     A network name and datafile path pair.
@@ -69,8 +67,6 @@ def maybe_regex(s: str) -> str:
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                         --     selector     --
-
-
 class NetworkSelector(ArbitraryModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
@@ -261,8 +257,6 @@ class NetworkSelector(ArbitraryModel):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     network sets     --
-
-
 class NetworkSet(ArbitraryModel):
     content: List[NetworkDataId | NetworkSelector] = []
 
@@ -351,6 +345,68 @@ class NetworkSetDifference(NetworkSet):
 
         new_content = list(set(self.set1.content) - set(self.set2.content))
         self.content = new_content
+
+
+class NetworkFilter(NetworkSet):
+    """Base class for filtering NetworkSets"""
+
+    source_set: NetworkSet
+
+    def run_selectors(self, session):
+        self.source_set.run_selectors(session)
+
+        self.content = [
+            net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
+        ]
+
+    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+        """
+        Determine if a network should be kept in the filtered set.
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement should_keep()")
+
+
+class CustomFilter(NetworkFilter):
+    filter_func: Callable[[md.Network, md.DataFile], bool]
+
+    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+        try:
+            network, datafile = network_id.fetch_network_and_datafile(session)
+            return self.filter_func(network, datafile)
+        except Exception as e:
+            logger.error(f"Error checking custom filter for network {network_id}: {e}")
+            return False
+
+
+class UorfFilter(NetworkFilter):
+    """Filter NetworkSets based on specific uORF value pairs"""
+
+    uorf_values: List[Tuple[int, int]]
+
+    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+        try:
+            network, _ = network_id.fetch_network_and_datafile(session)
+
+            # get uORF values from network info
+            network_info = network.network_info
+            if not network_info or 'uorf_values' not in network_info:
+                return False
+
+            # network_info['uorf_values'] should be list[tuple[int, int]]
+            # we want single ERN networks
+            if len(network_info['uorf_values']) != 1:
+                logger.warning(
+                    f"Unexpected uORF values for {network_id}: {network_info['uorf_values']}. Is it a single ERN?"
+                )
+                return False
+
+            uorf_values = network_info['uorf_values'][0]
+            return uorf_values in self.uorf_values
+
+        except Exception as e:
+            logger.error(f"Error checking uORF values for network {network_id}: {e}")
+            return False
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

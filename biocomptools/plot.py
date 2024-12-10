@@ -22,7 +22,7 @@ from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
-from biocomptools.toollib.figuremakers_.uorfmatrixfigure import uORFMatrixFigure
+from biocomptools.toollib.figuremakers.uorfmatrixfigure import uORFMatrixFigure, bundle_uorf_data
 
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
@@ -62,6 +62,7 @@ DEFAULT_TYPES = [
     PartialFunction,
     DataRescaler,
     uORFMatrixFigure,
+    bundle_uorf_data,
 ]
 
 ##────────────────────────────────────────────────────────────────────────────}}}

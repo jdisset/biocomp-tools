@@ -21,9 +21,15 @@ def load_default_plotconf():
     import dracon as dr
     from dracon.lazy import resolve_all_lazy
 
-    plcontent = dr.load('pkg:biocomptools:configs/plot_config/default_plotconf_v2', raw_dict=True)
+    plcontent = dr.load(
+        'pkg:biocomptools:configs/plot_config/default_plotconf_v2',
+        enable_interpolation=True,
+        raw_dict=True,
+    )
     resolve_all_lazy(plcontent)
-    return PlotConfig(**plcontent)
+    pc = PlotConfig(**plcontent)
+    print(f"Loaded default plot config: {pc}")
+    return pc
 
 
 class PlotConfig(BaseModel):
@@ -58,7 +64,9 @@ class PlotConfig(BaseModel):
 
         return prepared_func
 
-    def inherit_from(self, other: 'PlotConfig', keep_rescaler: bool = True, key:str = '<<{+<}[~<]'):
+    def inherit_from(
+        self, other: 'PlotConfig', keep_rescaler: bool = True, key: str = '<<{+<}[~<]'
+    ):
         from dracon.merge import MergeKey, merged
 
         k = MergeKey(raw=key)
@@ -78,7 +86,7 @@ class PlotConfig(BaseModel):
 class PlotTask(ArbitraryModel):
     plot_config: PlotConfig = Field(default_factory=PlotConfig)
     plot_method: Optional[PartialFunction] = None
-    raw_method: Optional[PartialFunction] = None
+    post_plot_callbacks: List[PartialFunction] = []
     auto_callstack_bind: bool = True  # whether to automatically bind callstack params
 
     # used as default if plot_method has an "ax" parameter that is not bound:
@@ -92,8 +100,13 @@ class PlotTask(ArbitraryModel):
                 auto_callstack_bind=self.auto_callstack_bind,
                 overwrite_kwargs=kw,
             )()
-        if self.raw_method:
-            self.raw_method()
+
+        for cb in self.post_plot_callbacks:
+            resolve_all_lazy(cb, context={'ax': self.ax})
+            print(f"Running post-plot callback {cb}")
+            kw = {'ax': self.ax} if self.ax else {}
+            cb.set_missing_kwargs(kw)
+            cb()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -122,7 +135,6 @@ class Figure(ArbitraryModel):
             return
 
         with mpl.rc_context(rc=self.plot_config.rc_context):
-
             try:
                 figax = self.figure_spec.make_figure()
             except Exception as e:
@@ -131,14 +143,10 @@ class Figure(ArbitraryModel):
 
             for i, t in enumerate(self.plot_tasks):
                 try:
-                    print(f"Constructing plot task {i}")
                     pt = t.construct(context={"FIG": figax})
-
                     if dict_like(pt):
                         pt = PlotTask(**pt)  # type: ignore
-
                     pt.plot_config.inherit_from(self.plot_config)
-
                     pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
 
                 except Exception as e:
