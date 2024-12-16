@@ -2,9 +2,12 @@
 
 import biocomp.utils as ut
 from biocomptools.modelmodel import BiocompModel, get_shared_params
+from typing import TypeVar
 import dracon as dr
+from biocomp import train
 import logging
 from pathlib import Path
+from dracon.deferred import DeferredNode
 import numpy as np
 from typing import List, Optional, Tuple, Annotated
 from pydantic import Field, BaseModel, ConfigDict
@@ -13,6 +16,8 @@ from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
 import biocomp as bc
 import sys
+
+from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
 from biocomptools.trainutils import (
@@ -39,6 +44,8 @@ from biocomptools.toollib.networkselector import (
     NetworkSetUnion,
     NetworkSetIntersection,
     NetworkSetDifference,
+    NetworkFilter,
+    UorfFilter,
 )
 
 from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
@@ -62,6 +69,12 @@ DEFAULT_TYPES = [
     NetworkSetIntersection,
     NetworkSetDifference,
     PartialFunction,
+    NetworkFilter,
+    UorfFilter,
+    DataSource,
+    DBSource,
+    NetworkPrediction,
+    BiocompModel,
 ]
 
 
@@ -73,6 +86,9 @@ def make_context_from_types(types):
 
 
 ## {{{                      --     TrainingProgram     --
+
+T = TypeVar('T')
+MaybeDeferred = DeferredNode[T] | T
 
 
 class TrainingProgram(BaseModel):
@@ -92,7 +108,8 @@ class TrainingProgram(BaseModel):
     outputdir: Annotated[
         str, Arg(help='Base directory to save model (will be saved in outputdir/run_name')
     ] = './training_output'
-    loggers: Annotated[List[Logger], Arg(help='Loggers to use')] = Field(
+
+    loggers: Annotated[List[MaybeDeferred[Logger]], Arg(help='Loggers to use')] = Field(
         default_factory=lambda: []
     )
 
@@ -189,6 +206,8 @@ class TrainingProgram(BaseModel):
 
         # Initialize loggers
         for logger in self.loggers:
+            if isinstance(logger, DeferredNode):
+                logger = logger.construct(context={'training_program': self})
             logger.initialize(self)
 
         # Set up logging to file
@@ -206,7 +225,7 @@ class TrainingProgram(BaseModel):
         print(f"{self._metadata}")
 
         # Start training
-        params, loss_history, step_history = bc.train.start(
+        params, loss_history, step_history = train.start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
@@ -224,18 +243,22 @@ class TrainingProgram(BaseModel):
         # rename the directory to indicate that the run is complete
         self._save_dir.rename(self._save_dir.with_name(self.run_name))
 
-    def save_best(self, all_models, all_losses, save_dir):
+    def get_best_model(self, all_models, all_losses):
         best_model_id, _ = get_best_smoothed_loss_id(all_losses)
         best_params = get_shared_params(ut.tree_get(all_models, best_model_id))
+
         model = BiocompModel(
             compute_config=self.compute_conf,
             rescaler=self.data_conf.rescaler,
             shared_params=ut.tree_to_np(best_params),
         )
+
+        return model
+
+    def save_best(self, all_models, all_losses, save_dir):
+        model = self.get_best_model(all_models, all_losses)
+
         model.save(save_dir / 'best_model.pickle')
-        model2 = BiocompModel.load(save_dir / 'best_model.pickle')
-        print(model.rescaler, model2.rescaler)
-        print(model.compute_config, model2.compute_config)
         assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):

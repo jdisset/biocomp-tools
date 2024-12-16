@@ -5,10 +5,10 @@ import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
 from pathlib import Path
 import numpy as np
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, Field
 from biocomp.utils import ArbitraryModel
 
-from typing import Callable, Annotated
+from typing import Callable, Annotated, Optional
 from jax.random import PRNGKey
 
 import logging
@@ -72,6 +72,10 @@ def load_params(maybe_path):
         return ut.tree_to_np(pickle.load(f))
 
 
+def empty_params():
+    return pr.ParameterTree()
+
+
 class BiocompModel(ArbitraryModel):
     compute_config: cmp.ComputeConfig
     rescaler: DataRescaler
@@ -79,7 +83,7 @@ class BiocompModel(ArbitraryModel):
         pr.ParameterTree,
         BeforeValidator(get_shared_params),
         BeforeValidator(load_params),
-    ]
+    ] = Field(default_factory=empty_params)
 
     def save(self, path):
         import pickle
@@ -108,17 +112,21 @@ def load_model(maybe_path):
     return BiocompModel.load(maybe_path)
 
 
-class SingleNetworkModel(ArbitraryModel):
+class NetworkModel(ArbitraryModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
-    network: md.Network
+    network: md.Network | list[md.Network]
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
-        self.network.build(lib=lib, use_cache=config.paths.cache.networks)
-        assert self.network.network is not None
+        if not isinstance(self.network, list):
+            self.network = [self.network]
 
-        self._stack: cmp.ComputeStack = cmp.ComputeStack([self.network.network])
+        for n in self.network:
+            n.build(lib=lib, use_cache=config.paths.cache.networks)
+            assert n.network is not None
+
+        self._stack: cmp.ComputeStack = cmp.ComputeStack([n.network for n in self.network])
         self._stack.build(self.model.compute_config)
         self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
 
@@ -128,7 +136,15 @@ class SingleNetworkModel(ArbitraryModel):
         assert isinstance(self._stack.apply, Callable)
         self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0)))
 
-        logger.info(f"Built stack for network {self.network.name}")
+        logger.info(f"Built stack for networks {[n.name for n in self.network]}")
+
+    def with_shared_params(self, shared_params) -> 'NetworkModel':
+        newmodel = self.copy()
+        newmodel._params = pr.ParameterTree.merge(shared_params, self._local_params)
+        return newmodel
+
+    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkModel':
+        return self.with_shared_params(model.shared_params)
 
     def predict_unscaled(self, X: np.ndarray, key=None, ground_truth=None) -> np.ndarray:
         if key is None:

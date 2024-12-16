@@ -13,13 +13,14 @@ import wandb as wb
 from pathlib import Path
 import numpy as np
 from numpy import ndarray as ndArray
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal
+from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal, TypeVar
 from pydantic import Field, BaseModel, ConfigDict
 from biocomptools.toollib.common import config
 from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, build_data_manager
 import matplotlib.pyplot as plt
 import wandb
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.plot import PlotJob
 from tqdm import tqdm
 from dracon.lazy import LazyDraconModel
 import pandas as pd
@@ -54,7 +55,7 @@ logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 ## {{{                          --     Loggers     --
 
 
-class Logger(BaseModel):
+class Logger(ArbitraryModel):
     periods: Union[int, List[int]] = 1  # Number of steps between logs or list of periods
 
     def initialize(self, training_program):
@@ -70,158 +71,29 @@ class Logger(BaseModel):
         pass
 
 
-# class PredictionLogger(Logger):
-#     """Generates prediction visualizations during training"""
-#
-#     figure_template: DeferredNode[Figure]
-#     batch_size: int = 2000
-#     n_chunks: int = 5
-#     seed: int = 0
-#
-#     # Which dataset to use for predictions
-#     data_source: Literal["training", "validation", "custom"] = "validation"
-#     custom_dataset: Optional[NetworkSet] = None  # Only used if data_source is "custom"
-#
-#
-#     def initialize(self, training_program):
-#         # Select the appropriate DataManager based on data_source
-#         if self.data_source == "training":
-#             self._dman = training_program._training_dman
-#         elif self.data_source == "validation":
-#             if not training_program.validation_set.content:
-#                 raise ValueError("Validation set is empty but data_source is 'validation'")
-#             self._dman = build_data_manager(
-#                 training_program.parts_library,
-#                 training_program.db_session,
-#                 training_program.path_prefix,
-#                 training_program.data_conf,
-#                 training_program.validation_set,
-#                 network_cache=config.paths.cache.networks,
-#             )
-#         elif self.data_source == "custom":
-#             if not self.custom_dataset:
-#                 raise ValueError("Custom dataset not provided but data_source is 'custom'")
-#             self._dman = build_data_manager(
-#                 training_program.parts_library,
-#                 training_program.db_session,
-#                 training_program.path_prefix,
-#                 training_program.data_conf,
-#                 self.custom_dataset,
-#                 network_cache=config.paths.cache.networks,
-#             )
-#         else:
-#             raise ValueError(f"Unknown data_source: {self.data_source}")
-#
-#         # Create the predictions directory
-#         self.predictions_dir = Path(training_program.outputdir) / 'predictions' / self.data_source
-#         self.predictions_dir.mkdir(parents=True, exist_ok=True)
-#
-#     def save_predictions(self, step: int, predictions, groundtruth):
-#         """Save prediction plots for each network"""
-#         prediction_path = self.predictions_dir / f'step_{step}'
-#         prediction_path.mkdir(exist_ok=True)
-#
-#         for i, (pred, truth) in enumerate(zip(predictions, groundtruth)):
-#             # Construct figure with context variables that can be used in the config
-#             fig = self.figure_template.construct(
-#                 context={
-#                     "pred_data": pred,
-#                     "ground_truth_data": truth,
-#                     "network_id": i,
-#                     "step": step,
-#                     "prediction_path": prediction_path.as_posix(),
-#                     "data_source": self.data_source,
-#                 }
-#             )
-#             fig.run()
-#
-#         return prediction_path
-#
-#     def generate_predictions(self, params):
-#         import jax
-#         from biocomp import compute as bcmp
-#
-#         networks = self._dman.get_networks()
-#         stack = self._dman.get_compute_stack()
-#         assert isinstance(stack, bcmp.ComputeStack)
-#
-#         n_samples_total = self.batch_size * self.n_chunks
-#         key = jax.random.PRNGKey(self.seed)
-#
-#         # Get uniform samples across the input space
-#         X, Y = self._dman.get_uniform_samples(key, n_samples_total)
-#         X = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in X]
-#         Y = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in Y]
-#
-#         # Concatenate all inputs
-#         all_x = np.concatenate(X, axis=1)
-#         x_chunks = np.split(all_x, self.n_chunks, axis=0)
-#
-#         @jax.jit
-#         def compute(params, XX, Q, keys):
-#             res, _ = stack.apply(params, XX, Q, keys)  # type: ignore
-#             return res
-#
-#         # Process chunks
-#         predictions = []
-#         for chunk_id, XX in enumerate(x_chunks):
-#             Q = jax.random.uniform(key, (self.batch_size, stack.total_nb_of_outputs))
-#             keys = jax.random.split(key, self.batch_size)
-#             key = keys[-1]
-#             chunk_pred = jax.vmap(compute, in_axes=(None, 0, 0, 0))(params, XX, Q, keys)
-#             predictions.append(np.array(chunk_pred))
-#
-#         all_predictions = np.concatenate(predictions, axis=0)
-#
-#         # Split predictions by network
-#         network_predictions = []
-#         network_groundtruth = []
-#         for i, network in enumerate(networks):
-#             out_id = stack.get_network_global_output_id(i)
-#             n_out = network.get_nb_outputs()
-#             x, y = X[i], Y[i]
-#             yhat = all_predictions[: x.shape[0], out_id : out_id + n_out]
-#
-#             # Create PlotData objects for ground truth and predictions
-#             metadata = {
-#                 'network': network,
-#                 'prediction_error': np.abs(y - yhat).mean(),
-#                 'source_type': 'prediction',
-#             }
-#
-#             pred_data = pu.PlotData(
-#                 xval=x,
-#                 yval=yhat,
-#                 input_names=network.get_input_proteins(),
-#                 output_name=network.get_output_proteins()[0],
-#                 metadata=metadata,
-#             )
-#
-#             truth_data = pu.PlotData(
-#                 xval=x,
-#                 yval=y,
-#                 input_names=network.get_input_proteins(),
-#                 output_name=network.get_output_proteins()[0],
-#                 metadata=metadata,
-#             )
-#
-#             network_predictions.append(pred_data)
-#             network_groundtruth.append(truth_data)
-#
-#         return network_predictions, network_groundtruth
-#
-#     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-#         def log_predictions(step, training_config, params=None, **kwargs):
-#             if params is None:
-#                 return
-#
-#             predictions, groundtruth = self.generate_predictions(params)
-#             prediction_path = self.save_predictions(step, predictions, groundtruth)
-#
-#             # Return the path so WandBLogger can find and upload the images
-#             return {"prediction_path": prediction_path}
-#
-#         return [(self.periods, log_predictions)]
+T = TypeVar('T')
+MaybeDeferred = DeferredNode[T] | T
+
+
+class PlotLogger(Logger):
+    jobs: List[DeferredNode[PlotJob]] = []
+
+    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
+        def plot_callback(step, training_config, step_history=None, **kwargs):
+            best_model = None
+            if step_history is not None:
+                losses = step_history.get('loss')
+                params = step_history.get('params')
+                best_model = training_program.get_best_model(params, losses)
+
+            logging.info(f'Plotting at step {step}')
+
+            for job in self.jobs:
+                job.construct(
+                    context={'training_program': training_program, 'best_model': best_model}
+                ).run()
+
+        return [(self.periods, plot_callback)]
 
 
 class EnhancedConsoleLogger(Logger):
