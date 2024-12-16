@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = get_logger(__name__)
 
+
 ## {{{                           --     utils     --
 class NetworkDataId(BaseModel):
     """
@@ -65,6 +66,7 @@ def maybe_regex(s: str) -> str:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ## {{{                         --     selector     --
 class NetworkSelector(ArbitraryModel):
@@ -256,23 +258,35 @@ class NetworkSelector(ArbitraryModel):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 ## {{{                       --     network sets     --
+
+
 class NetworkSet(ArbitraryModel):
-    content: List[NetworkDataId | NetworkSelector] = []
+    content: List[Union[NetworkDataId, NetworkSelector, "NetworkSet"]] = []
+
+    @model_validator(mode='before')
+    def validate_content(cls, values):
+        if isinstance(values.get('content'), (NetworkSelector, NetworkDataId, NetworkSet)):
+            values['content'] = [values['content']]
+        return values
 
     def run_selectors(self, session):
-        # we want to run this as a post-init so that we store the content in a more
-        # repeatable / serializable way than selectors when dumping the whole config
         new_content = []
         for n in self.content:
             if isinstance(n, NetworkSelector):
                 new_content.extend(n.get_networkdata_ids(session))
+            elif isinstance(n, NetworkSet):
+                # Recursively run selectors on nested NetworkSets
+                n.run_selectors(session)
+                new_content.extend(n.content)
             else:
-                assert isinstance(n, NetworkDataId)
+                assert isinstance(n, NetworkDataId), f"Expected NetworkDataId but got {type(n)}"
                 new_content.append(n)
         self.content = new_content
 
     def get_networks_and_data(self, session) -> List[Tuple[md.Network, md.DataFile]]:
+        print(f"Getting networks and data for {len(self.content)} network data IDs")
         res = []
         for n in self.content:
             assert isinstance(n, NetworkDataId)
@@ -353,6 +367,7 @@ class NetworkFilter(NetworkSet):
     source_set: NetworkSet
 
     def run_selectors(self, session):
+        print(f"Running selectors for filter {self}")
         self.source_set.run_selectors(session)
 
         self.content = [
@@ -382,15 +397,19 @@ class CustomFilter(NetworkFilter):
 class UorfFilter(NetworkFilter):
     """Filter NetworkSets based on specific uORF value pairs"""
 
-    uorf_values: List[Tuple[int, int]]
+    uorf_values: List[Tuple[int, int]] = []
 
     def should_keep(self, network_id: NetworkDataId, session) -> bool:
         try:
             network, _ = network_id.fetch_network_and_datafile(session)
+            print(f"Checking network {network_id.network_name}")
 
             # get uORF values from network info
             network_info = network.network_info
+            print(f"Network info: {network_info}")
+
             if not network_info or 'uorf_values' not in network_info:
+                print(f"No uorf_values found in network info for {network_id.network_name}")
                 return False
 
             # network_info['uorf_values'] should be list[tuple[int, int]]
@@ -399,13 +418,19 @@ class UorfFilter(NetworkFilter):
                 logger.warning(
                     f"Unexpected uORF values for {network_id}: {network_info['uorf_values']}. Is it a single ERN?"
                 )
+                print(f"Multiple uORF values found: {network_info['uorf_values']}")
                 return False
 
             uorf_values = network_info['uorf_values'][0]
+            print(f"uORF values for {network_id.network_name}: {uorf_values}")
+            print(f"Checking against filter values: {self.uorf_values}")
+            print(f"Keep network? {uorf_values in self.uorf_values}")
+
             return uorf_values in self.uorf_values
 
         except Exception as e:
             logger.error(f"Error checking uORF values for network {network_id}: {e}")
+            print(f"Error occurred: {str(e)}")
             return False
 
 
