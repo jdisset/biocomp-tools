@@ -83,15 +83,31 @@ class PlotLogger(Logger):
             best_model = None
             if step_history is not None:
                 losses = step_history.get('loss')
-                params = step_history.get('params')
+                params = step_history.get('latest_params')
                 best_model = training_program.get_best_model(params, losses)
 
             logging.info(f'Plotting at step {step}')
 
             for job in self.jobs:
-                job.construct(
-                    context={'training_program': training_program, 'best_model': best_model}
-                ).run()
+                try:
+                    if best_model is not None:
+                        constructed_job = job.construct(
+                            context={
+                                'training_program': training_program,
+                                'best_model': best_model,
+                                'step': step,
+                                'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+                            },
+                            deferred_paths=['/**.figures.*'],
+                        )
+                        if not isinstance(constructed_job, PlotJob):
+                            constructed_job = PlotJob(**constructed_job)
+                        constructed_job.run()
+                    else:
+                        logging.info('Skipping prediction plots - no best model available yet')
+                except Exception as e:
+                    logging.error(f'Error plotting job: {e}')
+                    continue
 
         return [(self.periods, plot_callback)]
 

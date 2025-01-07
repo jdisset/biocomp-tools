@@ -51,6 +51,7 @@ from biocomptools.toollib.networkselector import (
 from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 
+from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
 
 import biocomptools.toollib.models as md
 
@@ -75,7 +76,9 @@ DEFAULT_TYPES = [
     DBSource,
     NetworkPrediction,
     BiocompModel,
-]
+] + PLOT_TYPES
+
+DEFAULT_TYPES = list(set(DEFAULT_TYPES))
 
 
 def make_context_from_types(types):
@@ -147,6 +150,14 @@ class TrainingProgram(BaseModel):
 
         assert self.run_name, "Run name not set"
         self._save_dir = Path(self.outputdir).expanduser().resolve() / f"__running__{self.run_name}"
+
+        # construct loggers
+        new_loggers = []
+        for logger in self.loggers:
+            if isinstance(logger, DeferredNode):
+                logger = logger.construct(context={'training_program': self})
+            new_loggers.append(logger)
+        self.loggers = new_loggers
 
     def gen_metadata(self):
         import os
@@ -245,7 +256,13 @@ class TrainingProgram(BaseModel):
 
     def get_best_model(self, all_models, all_losses):
         best_model_id, _ = get_best_smoothed_loss_id(all_losses)
-        best_params = get_shared_params(ut.tree_get(all_models, best_model_id))
+        params = ut.tree_get(all_models, best_model_id)
+        if params is None:
+            return None
+
+        best_params = get_shared_params(params)
+        if best_params is None:
+            return None
 
         model = BiocompModel(
             compute_config=self.compute_conf,
@@ -255,10 +272,15 @@ class TrainingProgram(BaseModel):
 
         return model
 
-    def save_best(self, all_models, all_losses, save_dir):
+    def save_best(self, all_models, all_losses, save_dir, name='best_model'):
         model = self.get_best_model(all_models, all_losses)
+        if model is None:
+            print("!!!!!! No best model found !!!!!")
+            return
+        fname = save_dir / f'{name}.pickle'
+        model.save(fname)
 
-        model.save(save_dir / 'best_model.pickle')
+        model2 = BiocompModel.load(fname)
         assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):
