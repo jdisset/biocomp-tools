@@ -16,9 +16,9 @@ rc_context: !include pkg:biocomptools:configs/plot_config/default_rcparams
 callstack_params:
   heatmap_params:
     axtransform: null
-    bad_color: "#EEEEEEff"
+    bad_color: "#EEEEEE00"
     cmap: ${plotvars['cmap']}
-    contours: null
+    contours: 0
     opacities: null
     vlims: ${plotvars['vlims']}
 

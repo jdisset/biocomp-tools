@@ -1,4 +1,4 @@
-!set_default ax: null
+!set_default axnum: null
 
 plot_config:
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2

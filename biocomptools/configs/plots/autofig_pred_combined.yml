@@ -34,10 +34,11 @@ plot_tasks:
         kwargs:
           title: "Ground Truth"
 
-  - !define D: ${construct(&pred).get_data()[0]}
+  - !define D: ${construct(&pred).get_data_lazy()[0]}
     !define axnum: 1
     <<: !include pkg:biocomptools:configs/plots/tasks/auto
-    <<{+<}:
-      plot_method:
-        kwargs:
-          title: "Predictions (mse: ${str(round(D.metadata['mse'], 4))})"
+
+    # <<{+<}:
+    #   plot_method:
+    #     kwargs:
+    #       title: "Predictions (mse: ${str(round(D.metadata['mse'], 4))})"
