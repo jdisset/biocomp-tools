@@ -44,7 +44,6 @@ class Experiment(BiocompDB, table=True):
     comments: Optional[str] = None
     content: dict = Field(default_factory=dict, sa_column=Column(JSON))
     errors: str = Field(default_factory=str)
-    # _prvt: Optional[dict] = PrivateAttr(default={})
 
     recipes: List["Recipe"] = Relationship(back_populates="experiment")
 
@@ -155,14 +154,15 @@ class Network(BiocompDB, table=True):
     @property
     def network(self):
         if self._network is None:
-            logger.debug(f"Building network {self.name}")
             self.build(lib=ut.load_lib())
         assert self._network is not None
         return self._network
 
     def build(self, lib, use_cache=None):
         recipe = self.recipe  # should lazy load
-        assert recipe is not None
+        if recipe is None:
+            print("Recipe is None, skipping models.Network.build()")
+            return None
 
         recipe_networks = recipe.build_networks(
             lib=lib,
@@ -170,10 +170,14 @@ class Network(BiocompDB, table=True):
             inverse='all',
             add_to_self=False,
         )
+
+        print(f"Built networks: {recipe_networks}")
+
         for net in recipe_networks:
             if net.name == self.name:
                 self._network = net._network
                 return self._network
+
         raise ValueError(
             f"""Network {self.name} not found when built from recipe {self.recipe.name}. 
             Available networks: {recipe_networks}"""
@@ -265,6 +269,9 @@ class Recipe(BiocompDB, table=True):
 
         we build directly from the recipe content, without parsing the recipe file.
         """
+
+        print(f"Building networks from recipe {self.name}")
+        logger.debug(f"Building networks from recipe {self.name}")
 
         lib = lib or ut.load_lib()
         assert lib is not None

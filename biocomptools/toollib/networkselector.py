@@ -2,12 +2,11 @@ from biocomp.library import PartsLibrary
 from biocomp.recipe import get_network_XY
 from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
-from pydantic import BaseModel, Field, BeforeValidator, model_validator
+from pydantic import BaseModel, Field, BeforeValidator, model_validator, ConfigDict
 from sqlalchemy.orm import selectinload
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
-from biocomp.utils import ArbitraryModel
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
@@ -69,11 +68,17 @@ def maybe_regex(s: str) -> str:
 
 
 ## {{{                         --     selector     --
-class NetworkSelector(ArbitraryModel):
+class NetworkSelector(BaseModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
     This class allows to batch select networks based on their names, recipes, experiments, etc.
     """
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        validate_default=True,
+    )
 
     experiment_name: Optional[str | Regex] = None
     recipe_name: Optional[str | Regex] = None
@@ -262,13 +267,26 @@ class NetworkSelector(ArbitraryModel):
 ## {{{                       --     network sets     --
 
 
-class NetworkSet(ArbitraryModel):
+class NetworkSet(BaseModel):
     content: List[Union[NetworkDataId, NetworkSelector, "NetworkSet"]] = []
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        validate_default=True,
+    )
 
     @model_validator(mode='before')
     def validate_content(cls, values):
-        if isinstance(values.get('content'), (NetworkSelector, NetworkDataId, NetworkSet)):
-            values['content'] = [values['content']]
+        # Handle case where values is a list
+        if isinstance(values, list):
+            return {'content': values}
+        # Handle case where content is single item
+        content = values.get('content')
+        if isinstance(content, (NetworkSelector, NetworkDataId, NetworkSet)):
+            values['content'] = [content]
+        elif isinstance(content, NetworkSet):
+            values['content'] = content.content
         return values
 
     def run_selectors(self, session):
@@ -298,6 +316,9 @@ class NetworkSet(ArbitraryModel):
                 continue
             res.append(r)
         return res
+
+    def model_dump(self, **kwargs):
+        return super().model_dump(exclude={'recipe.networks'}, **kwargs)
 
 
 class NetworkSetUnion(NetworkSet):
@@ -421,7 +442,7 @@ class UorfFilter(NetworkFilter):
                 print(f"Multiple uORF values found: {network_info['uorf_values']}")
                 return False
 
-            uorf_values = network_info['uorf_values'][0]
+            uorf_values = tuple(network_info['uorf_values'][0])
             print(f"uORF values for {network_id.network_name}: {uorf_values}")
             print(f"Checking against filter values: {self.uorf_values}")
             print(f"Keep network? {uorf_values in self.uorf_values}")

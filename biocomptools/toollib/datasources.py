@@ -12,7 +12,7 @@ from biocomp.utils import (
 )
 from pathlib import Path
 import biocomp as bc
-from biocomp.plotutils import PlotData
+from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
 import biocomp.plotutils as pu
 
 from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, NetworkDataId
@@ -104,7 +104,6 @@ def to_text_clause(data: Any) -> TextClause:
 
 class DBSource(DataSource, NetworkSet):
     input_order: Optional[List[int]] = None
-
 
     @model_validator(mode='before')
     def validate_content(cls, values):
@@ -232,7 +231,7 @@ class NetworkPrediction(DataSource):
         Optional[np.ndarray | list[np.ndarray]], BeforeValidator(validate_ground_truth)
     ] = None
     seed: int = 0
-    resample_to: Optional[int] = 50000
+    resample_to: Optional[int] = 100000
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -250,19 +249,30 @@ class NetworkPrediction(DataSource):
                     f"does not match number of predict_at arrays ({len(self.predict_at)})"
                 )
 
-    def _align_inputs(self) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    def set_shared_from_model(self, model: NetworkModel):
+        self.network_model = self.network_model.with_shared_from_model(model)
+
+    def with_shared_from_model(self, model: NetworkModel) -> 'NetworkPrediction':
+        new = self.model_copy()
+        new.set_shared_from_model(model)
+        return new
+
+    def _prepare_inputs(self) -> tuple[list[np.ndarray], Optional[np.ndarray]]:
         """Align all predict_at arrays by either resampling to resample_to (or minimum length)"""
+
+        print(
+            f"Resampling to {self.resample_to=}. {self.predict_at[0].shape=}, {self.ground_truth[0].shape=}"
+        )
         rng = np.random.RandomState(self.seed)
 
         resample_to = self.resample_to or min(len(x) for x in self.predict_at)
 
         aligned_predict = []
         indices = []
-        for x in self.predict_at:
-            ids = rng.choice(len(x), size=resample_to, replace=(len(x) > resample_to))
+        for x in self.predict_at:  # one predict_at array per network
+            ids = rng.choice(len(x), size=resample_to, replace=True)
             aligned_predict.append(x[ids])
             indices.append(ids)
-        aligned_predict = np.column_stack(aligned_predict)
 
         aligned_ground_truth = None
         if self.ground_truth is not None:
@@ -275,99 +285,41 @@ class NetworkPrediction(DataSource):
 
         return aligned_predict, aligned_ground_truth
 
-    def _split_predictions(self, yhat: np.ndarray) -> List[np.ndarray]:
-        """Split concatenated predictions back into separate arrays for each network."""
-        outputs_per_network = [net.network.get_nb_outputs() for net in self.network_model.network]
-        splits = []
-        start_idx = 0
-        for n_outputs in outputs_per_network:
-            end_idx = start_idx + n_outputs
-            splits.append(yhat[:, start_idx:end_idx])
-            start_idx = end_idx
-        return splits
+    def _split_yhat_per_network(self, yhat: np.ndarray):
+        all_outputs = []
+        idstart = 0
+        for i, _ in enumerate(self.network_model.network):
+            _, shape = self.network_model._stack.get_network_output_indices(i)
+            print(f"Network {i} output shape: {shape}. {yhat.shape=}")
+            assert isinstance(shape, list)
+            outputs = []
+            for out_id, output_shape in enumerate(shape):
+                nout = np.prod(output_shape)
+                outputs.append(yhat[:, idstart : idstart + nout].reshape(-1, *output_shape))
+                idstart += nout
+                print(f"Network {i} output {out_id} shape: {outputs[-1].shape}. Start: {idstart}")
+            out = np.concatenate(outputs, axis=1)
+            print(f"Network {i} output shape: {out.shape}")
+            all_outputs.append(out)
+        return all_outputs
 
-    def get_data(self) -> List[PlotData]:
-        logger.info(f"Predicting for {len(self.network_model.network)} networks")
-        for i, predict in enumerate(self.predict_at):
-            logger.info(f"Network {i}: {len(predict)} samples")
-
-        # Align and predict
-        aligned_x, aligned_ground_truth = self._align_inputs()
-        t0 = time.time()
-        all_yhats, overall_mse = self.network_model.predict_unscaled(
-            aligned_x, self.seed, ground_truth=aligned_ground_truth
+    def compute_all_network_predictions(self):
+        self._aligned_x, self._aligned_ground_truth = self._prepare_inputs()
+        stacked_x = np.column_stack(self._aligned_x)
+        all_yhats = self.network_model.predict_unscaled(
+            stacked_x, self.seed, ground_truth=self._aligned_ground_truth
         )
-        t1 = time.time()
-        prediction_time = t1 - t0
+        print(f"Predicted {all_yhats=} from {stacked_x=}")
+        self._yhats = list(self._split_yhat_per_network(all_yhats))
 
-        # Split predictions for each network
-        yhats = self._split_predictions(all_yhats)
-
-        plot_data_list = []
-
-        # Create plot data for each network
-        for i, (network, yhat, predict_at) in enumerate(
-            zip(self.network_model.network, yhats, self.predict_at)
-        ):
-            metadata = self.metadata.copy()
-            metadata.update(
-                {
-                    'source_type': 'prediction',
-                    'seed': self.seed,
-                    'model': self.network_model.model,
-                    'network': network,
-                    'network_info': network.network_info,
-                    'built_network': network.network,
-                    'n_predictions': len(predict_at),
-                    'network_index': i,
-                    'prediction_time': prediction_time,
-                    'prediction_stats': {
-                        'samples': yhat.shape[0],
-                        'mean': float(yhat.mean()),
-                        'std': float(yhat.std()),
-                        'min': float(yhat.min()),
-                        'max': float(yhat.max()),
-                    },
-                }
-            )
-
-            # Calculate network-specific MSE if ground truth is available
-            if aligned_ground_truth is not None:
-                network_gt = aligned_ground_truth[:, i : i + 1]
-                network_mse = float(np.mean((yhat - network_gt) ** 2))
-                metadata['mse'] = network_mse
-                metadata['rmse'] = float(np.sqrt(network_mse))
-                logger.info(f"Network {i} RMSE: {metadata['rmse']}")
-
-            logger.info(f"Network {i} prediction shape: {yhat.shape}")
-            logger.info(f"Network {i} stats: {metadata['prediction_stats']}")
-
-            plot_data = pu.extract_plot_data_from_network(
-                network.network,
-                predict_at[: yhat.shape[0]],  # Ensure lengths match
-                yhat,
-                input_order=self.input_order,
-                metadata=metadata,
-            )
-            plot_data_list.append(plot_data)
-
-        logger.info(f"Total prediction time: {prediction_time}")
-        return plot_data_list
-
-    def get_data_lazy(self) -> List[PlotData]:
+    def get_data_lazy(self) -> List[LazyPlotData]:
         def make_get_XY(network_idx):
             def get_XY(pdata):
-                aligned_x, aligned_ground_truth = self._align_inputs()
+                if not hasattr(self, '_yhats') or self._yhats is None:
+                    self.compute_all_network_predictions()
 
-                t0 = time.time()
-                all_yhats, mse = self.network_model.predict_unscaled(
-                    aligned_x, self.seed, ground_truth=aligned_ground_truth
-                )
-                t1 = time.time()
-
-                # Split predictions for each network
-                yhats = self._split_predictions(all_yhats)
-                yhat = yhats[network_idx]
+                yhat = self._yhats[network_idx]
+                print(f"Network {network_idx} predicted {yhat.shape=}")
 
                 prediction_stats = {
                     'samples': yhat.shape[0],
@@ -380,20 +332,9 @@ class NetworkPrediction(DataSource):
                 for metric, value in prediction_stats.items():
                     logger.info(f"Network {network_idx} predicted {metric}: {value}")
 
-                pdata.metadata['prediction_time'] = t1 - t0
                 pdata.metadata['prediction_stats'] = prediction_stats
 
-                if aligned_ground_truth is not None:
-                    network_mse = float(
-                        np.mean(
-                            (yhat - aligned_ground_truth[:, network_idx : network_idx + 1]) ** 2
-                        )
-                    )
-                    pdata.metadata['mse'] = network_mse
-                    pdata.metadata['rmse'] = float(np.sqrt(network_mse))
-                    logger.info(f"Network {network_idx} RMSE: {pdata.metadata['rmse']}")
-
-                return self.predict_at[network_idx][: yhat.shape[0]], yhat
+                return self._aligned_x[network_idx], yhat
 
             return get_XY
 
@@ -420,9 +361,14 @@ class NetworkPrediction(DataSource):
                 input_order=self.input_order,
                 metadata=metadata,
             )
+
             plot_data_list.append(plot_data)
 
         return plot_data_list
+
+    def get_data(self):
+        return self.get_data_lazy()
+        # raise NotImplementedError('Use get_data_lazy instead')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
