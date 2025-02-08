@@ -12,22 +12,25 @@ import numpy as np
 from typing import List, Optional, Tuple, Annotated
 from pydantic import Field, BaseModel, ConfigDict
 from biocomptools.toollib.common import config, get_git_hash, get_package_git_hashes
-from biocomptools.toollib.networkselector import NetworkSet, build_data_manager
 from dracon.commandline import Program, make_program, Arg
 import biocomp as bc
 import sys
+from biocomptools.logging_config import setup_logging
 
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
+
 from biocomptools.trainutils import (
     Logger,
-    ConsoleLogger,
+    PlotLogger,
+    EnhancedConsoleLogger,
     plot_loss,
-    generate_unique_name,
+    make_unique_dir,
     add_metadata,
     get_best_smoothed_loss_id,
 )
+
 from sqlmodel import Session
 from datetime import datetime
 from biocomp.utils import PartialFunction
@@ -38,6 +41,7 @@ from biocomp.utils import (
 )
 
 from biocomptools.toollib.networkselector import (
+    build_data_manager,
     NetworkSelector,
     Regex,
     NetworkDataId,
@@ -45,6 +49,7 @@ from biocomptools.toollib.networkselector import (
     NetworkSetIntersection,
     NetworkSetDifference,
     NetworkFilter,
+    NetworkSet,
     UorfFilter,
 )
 
@@ -57,7 +62,6 @@ import biocomptools.toollib.models as md
 
 import biocomptools.trainutils as tu
 
-print("ConsoleLogger is defined in:", tu.__file__)
 
 logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 
@@ -76,9 +80,13 @@ DEFAULT_TYPES = [
     DBSource,
     NetworkPrediction,
     BiocompModel,
+    PlotLogger,
+    EnhancedConsoleLogger,
 ] + PLOT_TYPES
 
 DEFAULT_TYPES = list(set(DEFAULT_TYPES))
+
+log = logging.getLogger(__name__)
 
 
 def make_context_from_types(types):
@@ -105,22 +113,30 @@ class TrainingProgram(BaseModel):
     training_set: Annotated[NetworkSet, Arg(help='Networks in training set')] = Field(
         default_factory=NetworkSet
     )
+
     validation_set: Annotated[NetworkSet, Arg(help='Networks in validation set')] = Field(
         default_factory=NetworkSet
     )
-    outputdir: Annotated[
-        str, Arg(help='Base directory to save model (will be saved in outputdir/run_name')
+
+    base_dir: Annotated[
+        str,
+        Arg(
+            help='Base directory to save model (will be saved in base_dir/experiment_name/run_name)'
+        ),
     ] = './training_output'
 
     loggers: Annotated[List[MaybeDeferred[Logger]], Arg(help='Loggers to use')] = Field(
         default_factory=lambda: []
     )
 
-    run_name: Annotated[
-        Optional[str], Arg(help='Name of the run (automatically generated if None)')
-    ] = None
+    experiment_name: Annotated[str, Arg(help='Name of the experiment')] = 'default_xp'
 
+    # Private
     _lib: Optional[PartsLibrary] = None
+    _yamldump: str = ''
+    _modeldump: dict = {}
+    _save_dir: Path = Path('.')
+    _run_name: Optional[str] = None
 
     @property
     def db_session(self):
@@ -139,20 +155,26 @@ class TrainingProgram(BaseModel):
         super().model_post_init(*args, **kwargs)
         self._lib = load_lib()
         self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
+
+        self.base_dir = str(Path(self.base_dir).expanduser().resolve())
+
         with self.db_session as session:
             self.training_set.run_selectors(session)
             self.validation_set.run_selectors(session)
         self.gen_metadata()
-        if not self.run_name:
-            self.run_name = generate_unique_name(
-                self.outputdir,
-            )
 
-        assert self.run_name, "Run name not set"
-        self._save_dir = Path(self.outputdir).expanduser().resolve() / f"__running__{self.run_name}"
+        self._save_dir = make_unique_dir(
+            Path(self.base_dir) / self.experiment_name,
+            # prefix='__running__',
+        )
+
+        self._run_name = self._save_dir.name
 
         # construct loggers
         new_loggers = []
+        self._yamldump = dr.dump(self)
+        self._modeldump = self.model_dump()
+
         for logger in self.loggers:
             if isinstance(logger, DeferredNode):
                 logger = logger.construct(context={'training_program': self})
@@ -179,32 +201,12 @@ class TrainingProgram(BaseModel):
             'dracon hash': hashes.get('dracon', 'unknown'),
         }
 
-    @staticmethod
-    def setup_logging(log_file):
-        import logging
-
-        logger = logging.getLogger()
-        logger.setLevel(logging.INFO)
-
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        logger.addHandler(ch)
-
-        # File handler
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-
     def run(self):
-        self._fulldump = dr.dump(self)
         # Prepare output directory
         self._training_dir = self._save_dir / 'training'
         self._training_dir.mkdir(exist_ok=True, parents=True)
         with open(self._training_dir / 'training_program_dump.yaml', 'w') as f:
-            f.write(self._fulldump)
+            f.write(self._yamldump)
 
         # Build data manager from data_conf
         self._training_dman = build_data_manager(
@@ -216,24 +218,25 @@ class TrainingProgram(BaseModel):
         )
 
         # Initialize loggers
-        for logger in self.loggers:
-            if isinstance(logger, DeferredNode):
-                logger = logger.construct(context={'training_program': self})
-            logger.initialize(self)
+        log.debug(
+            f"Initializing {len(self.loggers)} loggers of types {[type(l) for l in self.loggers]}"
+        )
+        for logger_obj in self.loggers:
+            if isinstance(logger_obj, DeferredNode):
+                logger_obj = logger_obj.construct(context={'training_program': self})
+
+            log.debug(f"Initializing a {type(logger_obj)}")
+            logger_obj.initialize(self)
 
         # Set up logging to file
         log_file = self._training_dir / 'output.log.txt'
         log_file.parent.mkdir(exist_ok=True, parents=True)
-        self.setup_logging(log_file)
 
         # Collect logger callbacks
         logger_callbacks = []
-        for logger in self.loggers:
-            callbacks = logger.get_callbacks(self)
+        for logger_obj in self.loggers:
+            callbacks = logger_obj.get_callbacks(self)
             logger_callbacks.extend(callbacks)
-
-        print(f"Starting training run {self.run_name}")
-        print(f"{self._metadata}")
 
         # Start training
         params, loss_history, step_history = train.start(
@@ -243,16 +246,11 @@ class TrainingProgram(BaseModel):
             loggers=logger_callbacks,
         )
 
-        # Finalize loggers
-        for logger in self.loggers:
-            logger.finalize()
-
         self._metadata['end time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Save the model and other outputs
         self.save_outputs(params, loss_history, self._training_dir)
 
-        # rename the directory to indicate that the run is complete
-        self._save_dir.rename(self._save_dir.with_name(self.run_name))
+        for logger_obj in self.loggers:
+            logger_obj.finalize()
 
     def get_best_model(self, all_models, all_losses):
         best_model_id, _ = get_best_smoothed_loss_id(all_losses)
@@ -275,16 +273,18 @@ class TrainingProgram(BaseModel):
     def save_best(self, all_models, all_losses, save_dir, name='best_model'):
         model = self.get_best_model(all_models, all_losses)
         if model is None:
-            print("!!!!!! No best model found !!!!!")
+            log.warning("!!!!!! No best model found !!!!!")
             return
         fname = save_dir / f'{name}.pickle'
         model.save(fname)
 
         model2 = BiocompModel.load(fname)
+        log.debug(f"Saved best model to {fname}")
+
         assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):
-        save(params, save_dir / 'all_models.pickle')
+        save(params, save_dir / 'final_all_models.pickle')
         self.save_best(params, loss_history, save_dir)
 
         # Save loss history
@@ -292,18 +292,18 @@ class TrainingProgram(BaseModel):
 
         fig, ax = plot_loss(loss_history)
         assert self._metadata, "Metadata not set"
-        assert self.run_name, "Run name not set"
+        assert self._run_name, "Run name not set"
 
-        fig = add_metadata(fig, ax, self._metadata, run_name=self.run_name)
+        fig = add_metadata(fig, ax, self._metadata, run_name=self._run_name)
 
-        fig.savefig(save_dir / 'summary_plot.pdf')
+        fig.savefig(save_dir / 'summary_loss_plot.pdf')
         # save metadata as json
         with open(save_dir / 'metadata.json', 'w') as f:
             import json
 
             json.dump(self._metadata, f)
 
-        print(f"Saved summary plot to {save_dir / 'summary_plot.pdf'}")
+        log.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -328,4 +328,5 @@ def main():
 
 
 if __name__ == '__main__':
+    setup_logging()
     main()

@@ -151,6 +151,20 @@ class Network(BiocompDB, table=True):
 
     _network: Optional[bc.network.Network] = PrivateAttr(default=None)
 
+    @classmethod
+    def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
+        network_info = bc.network.generate_network_info(network)
+        if recipe_name is None:
+            recipe_name = 'unknown'
+        obj = cls(
+            name=f"{recipe_name}_{'-'.join(network_info['markers'])}",
+            recipe_name=recipe_name,
+            network_info=network_info,
+            **kwargs,
+        )
+        obj._network = network
+        return obj
+
     @property
     def network(self):
         if self._network is None:
@@ -170,8 +184,6 @@ class Network(BiocompDB, table=True):
             inverse='all',
             add_to_self=False,
         )
-
-        print(f"Built networks: {recipe_networks}")
 
         for net in recipe_networks:
             if net.name == self.name:
@@ -270,7 +282,6 @@ class Recipe(BiocompDB, table=True):
         we build directly from the recipe content, without parsing the recipe file.
         """
 
-        print(f"Building networks from recipe {self.name}")
         logger.debug(f"Building networks from recipe {self.name}")
 
         lib = lib or ut.load_lib()
@@ -279,6 +290,10 @@ class Recipe(BiocompDB, table=True):
         errors = []
 
         def error_handler(msg):
+            nonlocal errors
+            import traceback
+
+            msg = f"{msg}\n{traceback.format_exc()}"
             errors.append(msg)
 
         networks: ListOr[bc.network.Network] = bc.recipe.network_from_recipe(
@@ -290,11 +305,11 @@ class Recipe(BiocompDB, table=True):
             error_handler=error_handler,
         )
         networks = networks if isinstance(networks, list) else [networks]
+        logger.debug(f"Built networks: {networks}")
 
         if errors:
-            if add_to_self:
-                self.errors = "\n".join(errors)
-            logger.error(f"Recipe {self.name} has errors: {self.errors}")
+            self.errors = "\n".join(errors)
+            logger.error(f"Recipe {self.name} has {len(errors)} errors: {self.errors}")
             return []
 
         network_models = []

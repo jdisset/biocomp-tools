@@ -1,6 +1,7 @@
 ## {{{                          --     imports     --
 from biocomp import utils as ut
 import jax
+import jax.numpy as jnp
 import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
 from pathlib import Path
@@ -124,17 +125,14 @@ def load_model(maybe_path):
 
 
 def validate_network(network):
-    print("In validate_network BeforeValidator")
-    print(f"network: {network}")
-    if isinstance(network, list):
-        for n in network:
-            print(f"network entry type: {type(n)}")
-            if hasattr(n, '_network'):
-                print(f"internal network: {n._network}")
-    else:
-        print(f"network type: {type(network)}")
-        if hasattr(network, '_network'):
-            print(f"internal network: {network._network}")
+    #     for n in network:
+    #         if hasattr(n, '_network'):
+    #             print(f"internal network: {n._network}")
+    # else:
+    #     print(f"network type: {type(network)}")
+    #     if hasattr(network, '_network'):
+    #         print(f"internal network: {network._network}")
+
     return network
 
 
@@ -144,13 +142,10 @@ class NetworkModel(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: Annotated[md.Network | list[md.Network], BeforeValidator(validate_network)]
 
+    _stack: Optional[cmp.ComputeStack] = None
+
     @model_validator(mode='after')
     def validate_network(self):
-        print("Validating NetworkModel...")
-        print(f"Network: {self.network}")
-        print(f"Network type: {type(self.network)}")
-        if hasattr(self.network, '_network'):
-            print(f"Internal network: {self.network._network}")
         return self
 
     @model_validator(mode='before')
@@ -160,9 +155,6 @@ class NetworkModel(BaseModel):
         return data
 
     def model_post_init(self, *args, **kwargs):
-        print("Starting NetworkModel post_init")
-        print("In NetworkModel::postinit: Building networks...")
-
         if not isinstance(self.network, list):
             self.network = [self.network]
 
@@ -170,18 +162,14 @@ class NetworkModel(BaseModel):
             if hasattr(n, 'recipe') and n.recipe is not None:
                 n.build(lib=lib, use_cache=config.paths.cache.networks)
 
-        print("Networks built")
-
         # Create and build stack
-        self._stack: cmp.ComputeStack = cmp.ComputeStack([n._network for n in self.network])
+        self._stack = cmp.ComputeStack([n._network for n in self.network])
         self._stack.build(self.model.compute_config)
 
         # Initialize parameters
         self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
         self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
         self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None)))
-
-        print("Stack created")
 
     def with_shared_params(self, shared_params) -> 'NetworkModel':
         print("shared_params", shared_params)
@@ -193,60 +181,58 @@ class NetworkModel(BaseModel):
         print("with_shared_params")
         return self.with_shared_params(model.shared_params)
 
-    def predict_unscaled(
-        self, X: np.ndarray, key=None, ground_truth=None, ground_truth_output_id=None
-    ) -> np.ndarray:
+    def predict_unscaled(self, X: np.ndarray, key=None) -> np.ndarray:
+        return self.model.rescaler.inv(self.predict(self.model.rescaler.fwd(X), key))
+
+    def predict(
+        self,
+        X: np.ndarray,
+        key=None,
+        max_batch_size=10000,
+        disable_variational: bool = True,
+    ):
         if key is None:
             key = PRNGKey(0)
         if isinstance(key, int):
             key = PRNGKey(key)
 
         num_z = self._params["global/number_of_quantile_variables"]
-        Z = jax.random.uniform(key, (X.shape[0], num_z))
-        keys = jax.random.split(key, X.shape[0])
-
-        print(f'Going to predict with {X.shape=}, {Z.shape=}')
-
-        mse = None
-
-        x = self.model.rescaler.fwd(X)
-
-        yhat, (grads_wrt_inputs, full_output) = self._batch_apply(
-            self._params, x, Z, keys, None, None
+        n_samples = X.shape[0]
+        n_batches = (n_samples + max_batch_size - 1) // max_batch_size
+        print(
+            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks"
         )
-        print(f'with {x=}, {yhat=}')
 
-        if ground_truth is not None:
-            ground_truth = self.model.rescaler.fwd(ground_truth)
-            logger.info("yhat shape: %s", yhat.shape)
-            logger.info("ground_truth shape: %s", ground_truth.shape)
-            mse = np.mean((yhat - jax.numpy.concatenate([x, ground_truth], axis=1)) ** 2)
-            rmse = np.sqrt(mse)
-            logger.info(f"MSE: {mse}")
-            logger.info(f"RMSE: {rmse}")
-            # pick 20 random samples to log
-            idx = np.random.choice(X.shape[0], 20, replace=False)
-            logger.info("Random samples:")
-            for i in idx:
-                logger.info(f"-- Sample {i} --")
-                logger.info(f"x: {x[i]}")
-                logger.info(f"yhat: {yhat[i]}")
-                logger.info(f"ground_truth: {ground_truth[i]}")
+        all_yhats = []
+        from tqdm import tqdm
 
-        yhat = self.model.rescaler.inv(yhat)
+        params = self._params
 
-        return yhat
+        if disable_variational:
+            logstd = params['shared']['quantization']['logstdevs']
+            smallog = jax.tree_map(lambda x: jnp.ones_like(x) * -100, logstd)
+            params.set_subtree_at('shared/quantization/logstdevs', smallog)
 
-    def predict(self, X: np.ndarray, key=None) -> np.ndarray:
-        if key is None:
-            key = PRNGKey(0)
-        if isinstance(key, int):
-            key = PRNGKey(key)
+        print(
+            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks"
+        )
 
-        num_z = self._params["global/number_of_quantile_variables"]
-        Z = jax.random.uniform(key, (X.shape[0], num_z))
-        keys = jax.random.split(key, X.shape[0])
+        batch_keys = jax.random.split(key, n_batches)
+        for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="Predicting"):
+            start_idx = i * max_batch_size
+            end_idx = min((i + 1) * max_batch_size, n_samples)
+            batch_size = end_idx - start_idx
 
-        yhat, grads = self._batch_apply(self._params, X, Z, keys)
+            Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
+            keys_batch = jax.random.split(batch_key, batch_size)
+
+            yhat_batch, _ = self._batch_apply(
+                params, X[start_idx:end_idx], Z_batch, keys_batch, None, None
+            )
+
+            all_yhats.append(yhat_batch)
+
+        yhat = np.concatenate(all_yhats, axis=0)
+        print("yhat shape", yhat.shape)
 
         return yhat

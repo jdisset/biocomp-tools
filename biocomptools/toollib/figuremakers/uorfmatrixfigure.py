@@ -136,7 +136,6 @@ DEFAULT_GRID_PLOTCONFIGS = [
                         "label_position": "left",
                         "label_props": {
                             "size": 15,
-                            "pad": 3,
                         },
                     },
                 }
@@ -204,6 +203,7 @@ class uORFMatrixFigure(Figure):
     colorbar_col: int = -1
 
     label_fontsize: int = 20
+    rmse_fontsize: int = 8
     xlabel_padding: float = 0.3
     ylabel_padding: float = 0.3
     axis_title_padding: float = 0.6
@@ -404,6 +404,40 @@ class uORFMatrixFigure(Figure):
                             **self.annotation_style,
                         )
                     )
+
+        # add rmse annotations
+        rmses = []
+        for cell in cells:
+            if (
+                'prediction_stats' in cell.data.metadata
+                and 'rmse' in cell.data.metadata['prediction_stats']
+            ):
+                rmse = cell.data.metadata['prediction_stats']['rmse']
+                rmses.append(rmse)
+                ax = figax.ax[cell.row][cell.col]
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"RMSE: {rmse:.3f}",
+                    fontsize=self.rmse_fontsize,
+                    ha='center',
+                    va='center',
+                    transform=ax.transAxes,
+                    color='black',
+                )
+
+        if rmses:
+            overall_rmse = np.mean(rmses)
+            fig = figax.figure
+            fig.text(
+                0.5,
+                0.95,
+                f"Overall RMSE: {overall_rmse:.3f}",
+                fontsize=self.rmse_fontsize,
+                ha='center',
+                va='center',
+                color='black',
+            )
 
     def add_grid_lines(self, figax, grid_size: tuple[int, int]):
         """Add thin lines between subplots to show the grid structure"""

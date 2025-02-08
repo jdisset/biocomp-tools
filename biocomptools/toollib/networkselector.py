@@ -4,6 +4,7 @@ from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
 from pydantic import BaseModel, Field, BeforeValidator, model_validator, ConfigDict
 from sqlalchemy.orm import selectinload
+from sqlalchemy import func
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
 import biocomptools.toollib.models as md
@@ -99,9 +100,6 @@ class NetworkSelector(BaseModel):
             ValueError: If no networks are found or if query execution fails
             SQLAlchemyError: For database-related errors
         """
-        logger.info(
-            f"Starting network data retrieval - Experiment: {self.experiment_name}, Recipe: {self.recipe_name}"
-        )
 
         try:
             # Build the base query
@@ -115,18 +113,16 @@ class NetworkSelector(BaseModel):
                     selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
                 )
             )
-            logger.info("Base query constructed successfully")
 
             # Apply filters
             if self.experiment_name:
-                logger.info(f"Applying experiment filter: {self.experiment_name}")
+                logger.debug(f"Applying experiment filter: {self.experiment_name}")
                 if isinstance(self.experiment_name, Regex):
                     query = query.where(col(md.Experiment.name).regexp_match(self.experiment_name))
                 else:
                     query = query.where(md.Experiment.name == self.experiment_name)
 
             if self.recipe_name:
-                logger.info(f"Applying recipe filter: {self.recipe_name}")
                 if isinstance(self.recipe_name, Regex):
                     # For regex, we'll just use the pattern directly since it might include custom matching
                     query = query.where(col(md.Recipe.name).regexp_match(self.recipe_name))
@@ -155,19 +151,17 @@ class NetworkSelector(BaseModel):
             # Execute query
             try:
                 networks = session.exec(query).all()
-                logger.info(f"Query executed successfully. Found {len(networks)} networks")
             except SQLAlchemyError as e:
                 logger.error(f"Database error while executing network query: {str(e)}")
                 raise ValueError(f"Failed to execute network query: {str(e)}") from e
 
             if not networks:
-                msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}'"
+                msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}. Query: {query}. Ignoring."
                 logger.error(msg)
-                raise ValueError(msg)
+
 
             # Filter by output name if specified
             if self.output_name is not None:
-                logger.info(f"Filtering networks by output name: {self.output_name}")
                 original_count = len(networks)
                 networks = [
                     network
@@ -175,18 +169,16 @@ class NetworkSelector(BaseModel):
                     if network.network_info['dependent_outputs'][0].upper()
                     == self.output_name.upper()
                 ]
-                logger.info(f"Output name filtering: {original_count} -> {len(networks)} networks")
 
             # Process networks and collect data
             network_and_data = []
-            logger.info(f"Processing {len(networks)} networks for data collection")
 
             for network in networks:
-                logger.info(f"Processing network: {network.name}")
+                logger.debug(f"Processing network: {network.name}")
 
                 try:
                     if self.calibration_name:
-                        logger.info(f"Applying calibration filter: {self.calibration_name}")
+                        logger.debug(f"Applying calibration filter: {self.calibration_name}")
                         datafile_query = (
                             select(md.DataFile)
                             .options(selectinload(md.DataFile.calibration))
@@ -200,6 +192,14 @@ class NetworkSelector(BaseModel):
                                     self.calibration_name
                                 )
                             )
+
+                            # # case insensitive version:
+                            # datafile_query = datafile_query.where(
+                            #     func.upper(col(md.DataFile.calibration_name)).regexp_match(
+                            #         self.calibration_name
+                            #     )
+                            # )
+
                         else:
                             datafile_query = datafile_query.where(
                                 md.DataFile.calibration_name == self.calibration_name
@@ -210,12 +210,12 @@ class NetworkSelector(BaseModel):
 
                         try:
                             datafiles = list(session.exec(datafile_query).all())
-                            logger.info(f"Found {len(datafiles)} datafiles for calibration")
+                            logger.debug(f"Found {len(datafiles)} datafiles for calibration")
                         except SQLAlchemyError as e:
                             logger.error(f"Database error while querying datafiles: {str(e)}")
                             continue
                     else:
-                        logger.info("No calibration filter, getting best datafile")
+                        logger.debug("No calibration filter, getting best datafile")
                         with session.no_autoflush:
                             try:
                                 datafiles = [network.recipe.get_best_datafile()]
@@ -234,13 +234,15 @@ class NetworkSelector(BaseModel):
                         logger.warning(f"No datafile found for recipe: {network.recipe_name}")
                         continue
 
-                    logger.info(f"Processing {len(datafiles)} datafiles for network {network.name}")
+                    logger.debug(
+                        f"Processing {len(datafiles)} datafiles for network {network.name}"
+                    )
                     for datafile in datafiles:
                         try:
                             network_and_data.append(
                                 NetworkDataId(network_name=network.name, file_path=datafile.file)
                             )
-                            logger.info(f"Added network data: {network.name} - {datafile.file}")
+                            logger.debug(f"Added network data: {network.name} - {datafile.file}")
                         except Exception as e:
                             logger.error(
                                 f"Error creating NetworkDataId for {network.name}: {str(e)}"
@@ -304,7 +306,6 @@ class NetworkSet(BaseModel):
         self.content = new_content
 
     def get_networks_and_data(self, session) -> List[Tuple[md.Network, md.DataFile]]:
-        print(f"Getting networks and data for {len(self.content)} network data IDs")
         res = []
         for n in self.content:
             assert isinstance(n, NetworkDataId)
@@ -320,6 +321,9 @@ class NetworkSet(BaseModel):
     def model_dump(self, **kwargs):
         return super().model_dump(exclude={'recipe.networks'}, **kwargs)
 
+    def __len__(self):
+        return len(self.content)
+
 
 class NetworkSetUnion(NetworkSet):
     """
@@ -327,6 +331,8 @@ class NetworkSetUnion(NetworkSet):
     """
 
     sets: List[NetworkSet] = []
+    # exclude from export:
+    model_config = ConfigDict(exclude={'sets'})
 
     allow_duplicates: bool = False
 
@@ -369,10 +375,10 @@ class NetworkSetDifference(NetworkSet):
     set1: NetworkSet
     set2: NetworkSet
 
-    # make sure content is empty
-    @model_validator(mode='before')
-    def check_content(self):
-        assert not self.content, "content of a SetDifference should be empty"
+    # # make sure content is empty
+    # @model_validator(mode='before')
+    # def check_content(self):
+    #     assert not self.content, "content of a SetDifference should be empty"
 
     def run_selectors(self, session):
         self.set1.run_selectors(session)
@@ -388,7 +394,6 @@ class NetworkFilter(NetworkSet):
     source_set: NetworkSet
 
     def run_selectors(self, session):
-        print(f"Running selectors for filter {self}")
         self.source_set.run_selectors(session)
 
         self.content = [
@@ -423,14 +428,11 @@ class UorfFilter(NetworkFilter):
     def should_keep(self, network_id: NetworkDataId, session) -> bool:
         try:
             network, _ = network_id.fetch_network_and_datafile(session)
-            print(f"Checking network {network_id.network_name}")
 
             # get uORF values from network info
             network_info = network.network_info
-            print(f"Network info: {network_info}")
 
             if not network_info or 'uorf_values' not in network_info:
-                print(f"No uorf_values found in network info for {network_id.network_name}")
                 return False
 
             # network_info['uorf_values'] should be list[tuple[int, int]]
@@ -439,19 +441,14 @@ class UorfFilter(NetworkFilter):
                 logger.warning(
                     f"Unexpected uORF values for {network_id}: {network_info['uorf_values']}. Is it a single ERN?"
                 )
-                print(f"Multiple uORF values found: {network_info['uorf_values']}")
                 return False
 
             uorf_values = tuple(network_info['uorf_values'][0])
-            print(f"uORF values for {network_id.network_name}: {uorf_values}")
-            print(f"Checking against filter values: {self.uorf_values}")
-            print(f"Keep network? {uorf_values in self.uorf_values}")
 
             return uorf_values in self.uorf_values
 
         except Exception as e:
             logger.error(f"Error checking uORF values for network {network_id}: {e}")
-            print(f"Error occurred: {str(e)}")
             return False
 
 
