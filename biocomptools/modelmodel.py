@@ -17,6 +17,7 @@ from biocomptools.toollib.common import config, dict_like
 import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 
+
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
 logging.getLogger('biocomp').setLevel(logging.ERROR)
@@ -68,12 +69,15 @@ def get_nonshared_params(params):
 def load_params(maybe_path):
     import pickle
 
-    if isinstance(maybe_path, pr.ParameterTree):
-        # already loaded
-        return maybe_path
+    if isinstance(maybe_path, pr.ParameterTree):  # already loaded
+        return ut.tree_to_np(maybe_path)
 
     if isinstance(maybe_path, str):
-        maybe_path = Path(maybe_path)
+        if maybe_path.startswith('mlflow-'):
+            # TODO: implement this
+            raise NotImplementedError("mlflow loading not implemented")
+        else:
+            maybe_path = Path(maybe_path)
 
     with open(maybe_path, 'rb') as f:
         return ut.tree_to_np(pickle.load(f))
@@ -124,29 +128,13 @@ def load_model(maybe_path):
     return BiocompModel.load(maybe_path)
 
 
-def validate_network(network):
-    #     for n in network:
-    #         if hasattr(n, '_network'):
-    #             print(f"internal network: {n._network}")
-    # else:
-    #     print(f"network type: {type(network)}")
-    #     if hasattr(network, '_network'):
-    #         print(f"internal network: {network._network}")
-
-    return network
-
-
 class NetworkModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
-    network: Annotated[md.Network | list[md.Network], BeforeValidator(validate_network)]
+    network: md.Network | list[md.Network]
 
     _stack: Optional[cmp.ComputeStack] = None
-
-    @model_validator(mode='after')
-    def validate_network(self):
-        return self
 
     @model_validator(mode='before')
     @classmethod
