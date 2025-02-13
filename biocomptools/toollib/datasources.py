@@ -329,7 +329,6 @@ class NetworkPrediction(DataSource):
             assert all(output.shape == outputs[0].shape for output in outputs)
             network_i_outputs = np.concatenate(outputs, axis=1)
 
-
             assert (
                 network_i_outputs.shape[0] == self.max_evals
             ), f"Expected {self.max_evals} but got {len(network_i_outputs)}"
@@ -377,10 +376,7 @@ class NetworkPrediction(DataSource):
 
                 network = self.network_model.network[network_idx].network
 
-                input_order, output_pos, input_names, output_name = get_reordered_protein_names(
-                    network, self.input_order
-                )
-
+                _, output_pos, _, _ = get_reordered_protein_names(network)
 
                 latent_yhats = np.asarray(self.network_model.model.rescaler.fwd(yhat))
                 latent_yhat = latent_yhats[:, output_pos]
@@ -391,7 +387,6 @@ class NetworkPrediction(DataSource):
                     else None
                 )
                 latent_x = np.asarray(self.network_model.model.rescaler.fwd(x))
-
 
                 prediction_stats = {
                     'samples': yhat.shape[0],
@@ -422,11 +417,28 @@ class NetworkPrediction(DataSource):
                 pdata.metadata['prediction_stats'] = prediction_stats
 
                 return x, yhat
-                return yhat, yhat
+                # return yhat, yhat # in case we want to plot at predicted X
 
             return get_XY
 
         plot_data_list = []
+
+        input_order = self.input_order
+        if input_order is None:
+            input_order = [None] * len(self.network_model.network)
+        elif isinstance(input_order, (list, tuple, np.ndarray)):
+            input_order = np.asarray(input_order)
+            # check dimensions
+            if input_order.ndim == 1:  # repeat for all networks
+                input_order = np.tile(input_order, (len(self.network_model.network), 1))
+            elif input_order.ndim == 2:  # use as is
+                if input_order.shape[0] != len(self.network_model.network):
+                    raise ValueError(
+                        f"Input order has {input_order.shape[0]} rows but there are {len(self.network_model.network)} networks"
+                    )
+            input_order = input_order.tolist()
+
+        assert isinstance(input_order, list)
 
         for i, network in enumerate(self.network_model.network):
             metadata = self.metadata.copy()
@@ -446,7 +458,7 @@ class NetworkPrediction(DataSource):
             plot_data = pu.extract_lazy_plot_data_from_network(
                 network.network,
                 make_get_XY(i),
-                input_order=self.input_order,
+                input_order=input_order[i],
                 metadata=metadata,
             )
 
