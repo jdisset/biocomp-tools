@@ -14,6 +14,7 @@ import numpy as np
 from contextlib import contextmanager
 from dracon.deferred import DeferredNode
 from biocomptools.trainutils import Logger
+from biocomptools.toollib.common import config
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class MLflowLogger(Logger):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     tracking_url: str = Field(
-        default="https://mlf.rachael.jdisset.com", description="URL of the MLflow tracking server"
+        default=config.mlflow.server, description="URL of the MLflow tracking server"
     )
     log_artifacts: bool = Field(default=True, description="Whether to log model artifacts")
     log_plots: bool = Field(default=True, description="Whether to log generated plots")
@@ -57,7 +58,7 @@ class MLflowLogger(Logger):
     )
 
     # Private state
-    _training_program: Optional = None
+    _training_program: Optional[Any] = None
     _logged_plots: set[str] = set()  # Track logged plots by content hash
     _active_run = None
 

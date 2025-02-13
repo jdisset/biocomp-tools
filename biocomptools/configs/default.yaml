@@ -27,6 +27,9 @@ paths:
     xp: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/xp')}
     data: ${getenv('BIOCOMP_DATA_CACHE_DIR', '${&base_dir}/data')}
 
+mlflow:
+  server: ${getenv('BIOCOMP_MLFLOW_SERVER', 'https://mlf.rachael.jdisset.com')}
+
 calib:
   paths:
     - "./data/calibrated"
