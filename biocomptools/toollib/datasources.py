@@ -19,11 +19,13 @@ from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, Ne
 import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm
 import biocomptools.toollib.models as md
-from biocomptools.modelmodel import NetworkModel
+from biocomptools.modelmodel import NetworkModel, BiocompModel
 from biocomptools.logging_config import get_logger
 
 from sqlmodel import Session, text
 from sqlalchemy.sql.elements import TextClause
+
+config = cm.config
 
 
 def truncated_path(path: str | Path, max_len=50) -> str:
@@ -41,7 +43,6 @@ def to_str(data: Any) -> Any:
 
 
 logger = get_logger(__name__)
-config = cm.config
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -157,11 +158,12 @@ class DBSource(DataSource, NetworkSet):
             raise ValueError(f'Data file {datafile_path} does not exist for network {network.name}')
 
         def get_XY(_):
+            logger.debug(f"DBSource: getting XY data for network {network.name}")
             try:
                 X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
             except Exception as e:
                 logger.error(f"Error getting XY data for network {network.name}: {e}")
-                return None
+                return None, None
             assert isinstance(X, np.ndarray)
             assert isinstance(Y, np.ndarray)
             return X, Y
@@ -241,6 +243,8 @@ class NetworkPrediction(DataSource):
     # Setting this to True will use the outputed values as input in the plot data, instead of the original inputs.
     use_output_as_input: bool = False
 
+    _yhats: Optional[np.ndarray] = None
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
@@ -271,12 +275,14 @@ class NetworkPrediction(DataSource):
 
         self._aligned_x, self._aligned_ground_truth = self._prepare_inputs()
 
-    def set_shared_from_model(self, model: NetworkModel):
-        self.network_model = self.network_model.with_shared_from_model(model)
-
-    def with_shared_from_model(self, model: NetworkModel) -> 'NetworkPrediction':
-        new = self.model_copy()
-        new.set_shared_from_model(model)
+    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkPrediction':
+        logger.debug(f"Creating new NetworkPrediction with model {model.signature()=}")
+        logger.debug(f"Old model signature: {self.network_model.model.signature()=}")
+        new = self.model_copy(update={'network_model': self.network_model.with_model(model)})
+        new._yhats = None  # Clear the cache
+        logger.debug(
+            f"Created NetworkPrediction with model signature {new.network_model.model.signature()=}"
+        )
         return new
 
     def _prepare_inputs(self):
@@ -362,10 +368,21 @@ class NetworkPrediction(DataSource):
         self._split_yhat_per_network(stacked_yhats)
 
     def get_data_lazy(self) -> List[LazyPlotData]:
+        logger.debug(f"Getting data lazily for model {self.network_model.signature()}")
+
         def make_get_XY(network_idx):
-            def get_XY(pdata):
+            logger.debug(
+                f"Making get_XY for network {network_idx} with model {self.network_model.signature()}"
+            )
+
+            def get_XY(pdata: PlotData):
+                logger.debug(
+                    f"Getting XY for network {network_idx} with model {self.network_model.signature()}"
+                )
                 if not hasattr(self, '_yhats') or self._yhats is None:
-                    logger.debug("Computing all network predictions")
+                    logger.debug(
+                        f"Computing all network predictions with model {self.network_model.signature()}"
+                    )
                     self.compute_all_network_predictions()
 
                 logger.debug(f"Getting data for network {network_idx}. {len(self._x)=}")
@@ -416,6 +433,7 @@ class NetworkPrediction(DataSource):
 
                 pdata.metadata['prediction_stats'] = prediction_stats
 
+                logger.debug(f"Returning data for network {network_idx}")
                 return x, yhat
                 # return yhat, yhat # in case we want to plot at predicted X
 
@@ -446,7 +464,7 @@ class NetworkPrediction(DataSource):
                 {
                     'source_type': 'prediction',
                     'seed': self.seed,
-                    'model': self.network_model.model,
+                    'model_signature': self.network_model.model.signature(),
                     'network': network,
                     'network_info': network.network_info,
                     'built_network': network.network,

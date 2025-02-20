@@ -1,88 +1,135 @@
 import logging
-from rich.logging import RichHandler
-from typing import Optional, Dict
+import multiprocessing
 from pathlib import Path
-import os
+from typing import Optional, Dict, Union
 
-DEFAULT_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+from rich.logging import RichHandler
+from biocomptools.toollib.config import config
 
-# Configure default levels for various loggers
-DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
-    'matplotlib': logging.INFO,
-    'matplotlib.font_manager': logging.INFO,  # Suppress font debug messages
-    'fontTools': logging.INFO,
-    'biocomp': logging.INFO,
-    'biocomptools': logging.INFO,
-    'biocomptools.plot': logging.INFO,
-    'dracon': logging.INFO,
-    'PIL': logging.WARNING,
-    'jax': logging.WARNING,
-    'ray': logging.WARNING,
-    'h5py': logging.WARNING,
-    'parso': logging.WARNING,
-}
+_logging_setup_done = False
+
+
+class LevelFilter(logging.Filter):
+    """
+    A filter that only allows records whose level is at least the effective level
+    of the logger that issued them.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        effective_level = logging.getLogger(record.name).getEffectiveLevel()
+        return record.levelno >= effective_level
 
 
 def setup_logging(
-    default_level: int = logging.INFO,
     log_file: Optional[Path] = None,
-    logger_levels: Optional[Dict[str, int]] = None,
+    logger_levels: Optional[Dict[str, Union[str, int]]] = None,
+    force: bool = False,
 ) -> None:
-    """Configure logging for the biocomptools project.
+    """Configure logging using our config settings, with added prints and applying levels to children."""
+    global _logging_setup_done
 
-    Args:
-        default_level: Default logging level for all loggers
-        log_file: Optional file path to write logs to
-        logger_levels: Optional dict to override default logger levels
-
-    logger_levels can also be set through the environment variable `BIOCOMP_LOGLEVEL_pkg_name=lvl`
-    """
-
-    # Remove existing handlers
     root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
 
-    # Setup handlers
-    handlers = []
-    console_handler = RichHandler(
-        show_path=True, omit_repeated_times=False, log_time_format=DEFAULT_DATE_FORMAT
-    )
-    handlers.append(console_handler)
+    log_config = config.logging
 
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, DEFAULT_DATE_FORMAT))
-        handlers.append(file_handler)
+    # Use the default_level from config for the root logger.
+    if isinstance(log_config.default_level, str):
+        default_level = getattr(logging, log_config.default_level.upper(), logging.INFO)
+    else:
+        default_level = log_config.default_level
 
-    # Configure root logger
     root_logger.setLevel(default_level)
-    for handler in handlers:
-        root_logger.addHandler(handler)
 
-    # Apply logger-specific levels
-    levels_to_apply = DEFAULT_LOGGER_LEVELS.copy()
+    # Determine if we're in a worker process.
+    is_worker = multiprocessing.current_process().name != "MainProcess"
+
+    # Create the appropriate handler.
+    if log_config.use_rich_handler and not is_worker:
+        handler = RichHandler(
+            show_time=log_config.show_time,
+            show_path=log_config.show_path,
+            show_level=log_config.show_level,
+            enable_link_path=log_config.enable_link_path,
+            rich_tracebacks=log_config.rich_tracebacks,
+            omit_repeated_times=log_config.omit_repeated_times,
+            markup=log_config.markup,
+            log_time_format=log_config.date_format,
+        )
+        formatter = logging.Formatter(log_config.rich_format, datefmt=log_config.date_format)
+    else:
+        handler = logging.StreamHandler()
+        fmt = log_config.worker_format if is_worker else log_config.file_format
+        formatter = logging.Formatter(fmt, datefmt=log_config.date_format)
+
+    handler.setFormatter(formatter)
+    # Set handler level to NOTSET so that filtering is done at the logger level.
+    handler.setLevel(logging.NOTSET)
+    # Add our custom filter.
+    handler.addFilter(LevelFilter())
+    root_logger.addHandler(handler)
+
+    # Optionally add a file handler if a log_file is provided and not a worker process.
+    if log_file and not is_worker:
+        file_handler = logging.FileHandler(log_file)
+        file_formatter = logging.Formatter(log_config.file_format, datefmt=log_config.date_format)
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(logging.NOTSET)
+        file_handler.addFilter(LevelFilter())
+        root_logger.addHandler(file_handler)
+
+    # Prepare logger levels from config.
+    levels_to_apply = {
+        name: getattr(logging, level.upper()) if isinstance(level, str) else level
+        for name, level in log_config.levels.items()
+    }
     if logger_levels:
-        levels_to_apply.update(logger_levels)
+        # Override or add any logger levels provided as argument.
+        levels_to_apply.update(
+            {
+                name: getattr(logging, level.upper()) if isinstance(level, str) else level
+                for name, level in logger_levels.items()
+            }
+        )
 
-    # Override levels from environment variables
-    for env_var, level in os.environ.items():
-        if env_var.startswith('BIOCOMP_LOGLEVEL_'):
-            logger_name = env_var.split('BIOCOMP_LOGLEVEL_')[1].replace('_', '.')
-            # update all loggers that start with the specified name
-            for logger in logging.Logger.manager.loggerDict:
-                if logger.startswith(logger_name):
-                    levels_to_apply[logger] = getattr(logging, level.upper())
-            # levels_to_apply[logger_name] = getattr(logging, level.upper())
+    # Apply levels to any logger whose name matches or starts with the given key.
+    for logger_key, level in levels_to_apply.items():
+        # Iterate over all known loggers.
+        for existing_logger in list(logging.root.manager.loggerDict.keys()):
+            if existing_logger == logger_key or existing_logger.startswith(logger_key + "."):
+                logging.getLogger(existing_logger).setLevel(level)
+        # Also set the level on the base logger if it hasn't been created yet.
+        logging.getLogger(logger_key).setLevel(level)
 
-    for logger_name, level in levels_to_apply.items():
-        logging.getLogger(logger_name).setLevel(level)
+    _logging_setup_done = True
 
 
-def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
+def get_logger(name: str, level: Optional[Union[str, int]] = None) -> logging.Logger:
     """Get a logger with the specified name and optional level."""
     logger = logging.getLogger(name)
+
     if level is not None:
-        logger.setLevel(level)
+        if isinstance(level, str):
+            level_val = getattr(logging, level.upper(), logging.INFO)
+        else:
+            level_val = level
+        logger.setLevel(level_val)
+
     return logger
+
+
+def print_logger_hierarchy(logger_name: str):
+    """Utility function to print the full hierarchy of a logger with debug prints."""
+    print(f"\n=== Logger Hierarchy for {logger_name} ===")
+    logger = logging.getLogger(logger_name)
+    current = logger
+    while current:
+        print(f"Logger: {current.name}")
+        print(f"Level: {logging.getLevelName(current.level)}")
+        print(f"Effective Level: {logging.getLevelName(current.getEffectiveLevel())}")
+        print(f"Propagate: {current.propagate}")
+        print(f"Handlers: {len(current.handlers)}")
+        current = current.parent
+        if current:
+            print("\nParent →")

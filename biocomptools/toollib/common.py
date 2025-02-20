@@ -4,6 +4,7 @@ from pathlib import Path
 import xxhash
 from omegaconf import DictConfig, ListConfig
 import subprocess
+
 # using base58 instead of base64 because it's url-safe
 import base58
 
@@ -19,16 +20,14 @@ from typing import (
     Optional,
 )
 
+import logging
+from biocomptools.toollib.config import config as config
 
-from biocomptools.logging_config import get_logger
-
-tlog = get_logger(__name__)
-
+logger = logging.getLogger(__name__)
 
 PathLike = Union[str, Path]
 
 
-config = dr.load('pkg:biocomptools:configs/default.yaml', enable_interpolation=True)
 resolve_all_lazy(config)
 
 

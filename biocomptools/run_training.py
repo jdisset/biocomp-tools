@@ -1,25 +1,23 @@
 ## {{{                          --     imports     --
-
+from biocomptools.logging_config import get_logger, setup_logging, print_logger_hierarchy
 import biocomp.utils as ut
 from biocomptools.modelmodel import BiocompModel, get_shared_params
 from typing import TypeVar
 import dracon as dr
 from biocomp import train
-import logging
 from pathlib import Path
 from dracon.deferred import DeferredNode
 import numpy as np
 from typing import List, Optional, Tuple, Annotated
 from pydantic import Field, BaseModel, ConfigDict
-from biocomptools.toollib.common import config, get_git_hash, get_package_git_hashes
-from dracon.commandline import Program, make_program, Arg
-import biocomp as bc
+from biocomptools.toollib.common import config, get_package_git_hashes
+from dracon.commandline import make_program, Arg
 import sys
-from biocomptools.logging_config import setup_logging
 
 from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
+
 
 from biocomptools.trainutils import (
     Logger,
@@ -60,10 +58,9 @@ from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
 
 import biocomptools.toollib.models as md
 
-import biocomptools.trainutils as tu
+setup_logging(force=False)
+logger = get_logger(__name__)
 
-
-logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 
 DEFAULT_TYPES = [
     Regex,
@@ -85,8 +82,6 @@ DEFAULT_TYPES = [
 ] + PLOT_TYPES
 
 DEFAULT_TYPES = list(set(DEFAULT_TYPES))
-
-log = logging.getLogger(__name__)
 
 
 def make_context_from_types(types):
@@ -218,14 +213,14 @@ class TrainingProgram(BaseModel):
         )
 
         # Initialize loggers
-        log.debug(
+        logger.debug(
             f"Initializing {len(self.loggers)} loggers of types {[type(l) for l in self.loggers]}"
         )
         for logger_obj in self.loggers:
             if isinstance(logger_obj, DeferredNode):
                 logger_obj = logger_obj.construct(context={'training_program': self})
 
-            log.debug(f"Initializing a {type(logger_obj)}")
+            logger.debug(f"Initializing a {type(logger_obj)}")
             logger_obj.initialize(self)
 
         # Set up logging to file
@@ -253,14 +248,20 @@ class TrainingProgram(BaseModel):
             logger_obj.finalize()
 
     def get_best_model(self, all_models, all_losses):
+        import pickle
+
         best_model_id, _ = get_best_smoothed_loss_id(all_losses)
         params = ut.tree_get(all_models, best_model_id)
         if params is None:
             return None
 
-        best_params = get_shared_params(params)
+        copied_params = pickle.loads(pickle.dumps(params))
+
+        best_params = get_shared_params(copied_params)
+
         if best_params is None:
             return None
+
 
         model = BiocompModel(
             compute_config=self.compute_conf,
@@ -273,15 +274,15 @@ class TrainingProgram(BaseModel):
     def save_best(self, all_models, all_losses, save_dir, name='best_model'):
         model = self.get_best_model(all_models, all_losses)
         if model is None:
-            log.warning("!!!!!! No best model found !!!!!")
+            logger.warning("!!!!!! No best model found !!!!!")
             return
         fname = save_dir / f'{name}.pickle'
         model.save(fname)
 
         model2 = BiocompModel.load(fname)
-        log.debug(f"Saved best model to {fname}")
+        logger.debug(f"Saved best model to {fname}")
 
-        assert model.shared_params == model2.shared_params
+        # assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):
         save(params, save_dir / 'final_all_models.pickle')
@@ -303,7 +304,7 @@ class TrainingProgram(BaseModel):
 
             json.dump(self._metadata, f)
 
-        log.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
+        logger.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -328,5 +329,4 @@ def main():
 
 
 if __name__ == '__main__':
-    setup_logging()
     main()

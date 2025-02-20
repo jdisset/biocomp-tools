@@ -1,18 +1,18 @@
 ## {{{                          --     imports     --
 import os
 
-os.environ.setdefault('RAY_DEDUP_LOGS', '0')
+os.environ.setdefault('RAY_DEDUP_LOGS', '1')
 
-from memory_profiler import profile
+from biocomptools.logging_config import get_logger, setup_logging
 
 import logging.config
 import sys
 import time
 import ray
 from pathlib import Path
-from typing import List, Annotated, Dict, Any, Optional
+from typing import List, Annotated
 import dracon as dr
-from dracon.lazy import LazyDraconModel, resolve_all_lazy
+from dracon.lazy import LazyDraconModel
 from dracon.commandline import make_program, Arg
 from dracon.deferred import DeferredNode
 
@@ -35,14 +35,13 @@ from biocomptools.toollib.networkselector import (
 )
 
 from dracon.utils import dict_like
-from biocomptools.logging_config import get_logger, setup_logging
 
 import warnings
 
 # Suppress the fork warning from jax + ray (it's not a problem in this case)
 warnings.filterwarnings("ignore", message="os.fork()", module="subprocess")
 
-log = get_logger(__name__)
+logger = get_logger(__name__)
 
 DEFAULT_TYPES = [
     Figure,
@@ -50,6 +49,8 @@ DEFAULT_TYPES = [
     PlotTask,
     DataSource,
     DBSource,
+    FigureSpec,
+    FigAx,
     SimpleLayout,
     Regex,
     NetworkPrediction,
@@ -81,15 +82,18 @@ def get_pretty_axis_label(i: int, d: DataSource) -> str:
 def _make_figure(figure: DeferredNode[Figure], i: int, total: int, **kw):
     t0 = time.time()
     try:
-        f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+        logger.debug(f"Making figure {i}/{total}")
+        # f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
+        # f = figure.construct(deferred_paths=['/plot_tasks.*'])
+        f = figure.construct()
 
         if dict_like(f):
             f = Figure(**f)  # type: ignore
         f.run(**kw)
     except Exception as e:
-        log.error(f"Error making figure: {e}")
+        logger.error(f"Error making figure: {e}")
         # show the traceback
-        log.exception(e)
+        logger.exception(e)
         return
 
     import matplotlib.pyplot as plt
@@ -100,7 +104,7 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int, **kw):
 
     t1 = time.time()
     opath = f.figure_spec.output_path
-    print(f"[{i}/{total}] Completed {opath} in {t1 - t0:.2f}s")
+    logger.debug(f"[{i}/{total}] Completed {opath} in {t1 - t0:.2f}s")
 
 
 @ray.remote
@@ -121,15 +125,15 @@ class PlotJob(LazyDraconModel):
     def run(self):
         self._overwrite = not self.skip_existing
         total_figures = len(self.figures)
-        log.info(f"Going to create {total_figures} figures using {self.nworkers} workers")
+        logger.debug(f"Going to create {total_figures} figures using {self.nworkers} workers")
 
         if total_figures == 0:
-            log.warning("No figures to create")
+            logger.warning("No figures to create")
             return
 
         # Single figure or single worker case
         if total_figures == 1 or self.nworkers <= 1:
-            log.info("Running in single-threaded mode")
+            logger.debug("Running in single-threaded mode")
             for i, fig in enumerate(self.figures):
                 _make_figure(fig, i + 1, total_figures, overwrite=self._overwrite)
             return
@@ -181,6 +185,13 @@ class PlotJob(LazyDraconModel):
         ray.shutdown()
 
 
+plot_extra_context = {
+    **make_context_from_types(DEFAULT_TYPES),
+    'get_pretty_axis_label': get_pretty_axis_label,
+    'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+}
+
+
 def main():
     setup_logging(default_level=logging.DEBUG)
 
@@ -195,18 +206,12 @@ def main():
         deferred_paths=[
             '/figures.*',
         ],
-
-        context={
-            **make_context_from_types(DEFAULT_TYPES),
-            'get_pretty_axis_label': get_pretty_axis_label,
-            'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
-        },
-
+        context=plot_extra_context,
     )
 
     dmp = dr.dump(pj)
 
-    log.debug(dmp)
+    logger.debug(dmp)
 
     pj.run()
 

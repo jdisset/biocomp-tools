@@ -1,6 +1,9 @@
 ## {{{                          --     imports     --
+from biocomptools.logging_config import get_logger, setup_logging
 from biocomp import utils as ut
 import jax
+import xxhash
+import pickle
 import jax.numpy as jnp
 import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
@@ -8,21 +11,16 @@ from pathlib import Path
 import numpy as np
 from pydantic import BeforeValidator, Field, model_validator, BaseModel, ConfigDict
 from biocomp.utils import ArbitraryModel
+from copy import deepcopy
 
 from typing import Callable, Annotated, Optional
 from jax.random import PRNGKey
 
-import logging
 from biocomptools.toollib.common import config, dict_like
 import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 
-
-logger = logging.getLogger('build_xp_table')
-logger.setLevel(logging.DEBUG)
-logging.getLogger('biocomp').setLevel(logging.ERROR)
-logging.getLogger('jax').setLevel(logging.WARNING)
-logging.getLogger('biocomp').setLevel(logging.CRITICAL)
+logger = get_logger(__name__)
 
 ROOT = Path(config.paths.root).expanduser().resolve()
 lib = ut.load_lib()
@@ -97,10 +95,17 @@ class BiocompModel(ArbitraryModel):
     ] = Field(default_factory=empty_params)
 
     def save(self, path):
-        import pickle
-
         with open(path, 'wb') as f:
             pickle.dump(self, f)
+
+    def signature(self):
+        import base58
+
+        paramspickle = pickle.dumps(self.shared_params)
+        this_str = str(self.compute_config) + str(self.rescaler) + str(paramspickle)
+        h = xxhash.xxh64(this_str)
+        sig = base58.b58encode(h.digest()).decode()
+        return sig
 
     @classmethod
     def load(cls, path):
@@ -113,7 +118,6 @@ class BiocompModel(ArbitraryModel):
 
 
 def load_model(maybe_path):
-    print("In load_model validator")
     if isinstance(maybe_path, BiocompModel):
         # already loaded
         return maybe_path
@@ -135,11 +139,11 @@ class NetworkModel(BaseModel):
     network: md.Network | list[md.Network]
 
     _stack: Optional[cmp.ComputeStack] = None
+    _params: Optional[pr.ParameterTree] = None
 
     @model_validator(mode='before')
     @classmethod
     def prepare_network(cls, data):
-        print("Preparing network...")
         return data
 
     def model_post_init(self, *args, **kwargs):
@@ -150,24 +154,27 @@ class NetworkModel(BaseModel):
             if hasattr(n, 'recipe') and n.recipe is not None:
                 n.build(lib=lib, use_cache=config.paths.cache.networks)
 
+        self.build_stack()
+        self.update_params()
+
+    def build_stack(self):
         # Create and build stack
         self._stack = cmp.ComputeStack([n._network for n in self.network])
         self._stack.build(self.model.compute_config)
-
-        # Initialize parameters
-        self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
-        self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
         self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None)))
 
-    def with_shared_params(self, shared_params) -> 'NetworkModel':
-        print("shared_params", shared_params)
-        newmodel = self.model_copy()
-        newmodel._params = pr.ParameterTree.merge(shared_params, self._local_params)
-        return newmodel
+    def update_params(self):
+        assert self._stack is not None
+        self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
+        self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
 
-    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkModel':
-        print("with_shared_params")
-        return self.with_shared_params(model.shared_params)
+    def signature(self):
+        return self.model.signature()
+
+    def with_model(self, model: BiocompModel) -> 'NetworkModel':
+        new_model = self.model_copy(update={'model': model})
+        new_model.update_params()
+        return new_model
 
     def predict_unscaled(self, X: np.ndarray, key=None) -> np.ndarray:
         return self.model.rescaler.inv(self.predict(self.model.rescaler.fwd(X), key))
@@ -183,12 +190,13 @@ class NetworkModel(BaseModel):
             key = PRNGKey(0)
         if isinstance(key, int):
             key = PRNGKey(key)
+        logger.debug(f"Making prediction with model signature: {self.signature()}")
 
         num_z = self._params["global/number_of_quantile_variables"]
         n_samples = X.shape[0]
         n_batches = (n_samples + max_batch_size - 1) // max_batch_size
-        print(
-            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks"
+        logger.debug(
+            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks. Signature: {self.signature()}"
         )
 
         all_yhats = []
@@ -198,12 +206,8 @@ class NetworkModel(BaseModel):
 
         if disable_variational:
             logstd = params['shared']['quantization']['logstdevs']
-            smallog = jax.tree_map(lambda x: jnp.ones_like(x) * -100, logstd)
-            params.set_subtree_at('shared/quantization/logstdevs', smallog)
-
-        print(
-            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks"
-        )
+            for path, value in logstd.iter_leaves():
+                logstd[path] = jnp.ones_like(value) * -100
 
         batch_keys = jax.random.split(key, n_batches)
         for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="Predicting"):
@@ -221,6 +225,5 @@ class NetworkModel(BaseModel):
             all_yhats.append(yhat_batch)
 
         yhat = np.concatenate(all_yhats, axis=0)
-        print("yhat shape", yhat.shape)
 
         return yhat

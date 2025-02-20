@@ -2,43 +2,22 @@
 
 from pathlib import Path
 from datetime import datetime
-import os
 import re
 import dracon as dr
 from dracon.deferred import DeferredNode
 import numpy as np
 import logging
-import biocomp.plotutils as pu
 from scipy.ndimage import gaussian_filter1d
 from labellines import labelLine, labelLines
 import matplotlib.pyplot as plt
-import biocomp as bc
-import wandb as wb
 from numpy import ndarray as ndArray
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal, TypeVar
-from pydantic import Field, BaseModel, ConfigDict
-from biocomptools.toollib.common import config
-from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, build_data_manager
-import matplotlib.pyplot as plt
-import wandb
+from typing import Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal, TypeVar
+from pydantic import BaseModel, ConfigDict
+from biocomptools.plot import plot_extra_context
 from biocomptools.plot import PlotJob
-from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
 
-from biocomp.utils import (
-    save,
-)
-
-from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
-from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
-import re
-from sqlmodel import select, Session, col
-from tqdm import tqdm
-
-import biocomptools.toollib.models as md
-
-
-logging.getLogger('dracon.commandline').setLevel(logging.DEBUG)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                          --     Loggers     --
@@ -75,25 +54,31 @@ class PlotLogger(Logger):
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         def plot_callback(step, training_config, step_history=None, **kwargs):
+            logger.debug(f"\n==== PlotLogger callback at step {step} ====")
             best_model = None
             if step_history is not None:
                 losses = step_history.get('loss')
                 params = step_history.get('latest_params')
                 best_model = training_program.get_best_model(params, losses)
 
+                if best_model is not None:
+                    logger.debug(f"Got best model with signature: {best_model.signature()}")
+
             logging.info(f'Plotting at step {step}')
 
             for job in self.jobs:
+                j = job.copy()
+                jstr = dr.node_repr(j, context_paths=['**.d', '**.all_predicted_data'])
                 try:
                     if best_model is not None:
-                        constructed_job = job.construct(
+                        constructed_job = j.construct(
                             context={
+                                **plot_extra_context,
                                 'training_program': training_program,
                                 'best_model': best_model,
                                 'step': step,
-                                'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
                             },
-                            deferred_paths=['/**.figures.*'],
+                            # deferred_paths=['/**.figures.*'],
                         )
                         if not isinstance(constructed_job, PlotJob):
                             constructed_job = PlotJob(**constructed_job)
@@ -203,7 +188,7 @@ class ConsoleLogger(Logger):
                         avg_loss = np.mean(loss)
                         min_loss = np.min(loss)
                         max_loss = np.max(loss)
-                        print(
+                        logger.debug(
                             f"Step {step}, Replicate {i}: Avg loss: {avg_loss:.4f}, Min loss: {min_loss:.4f}, Max loss: {max_loss:.4f}"
                         )
 

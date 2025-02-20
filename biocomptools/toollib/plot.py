@@ -28,7 +28,6 @@ def load_default_plotconf():
     )
     resolve_all_lazy(plcontent)
     pc = PlotConfig(**plcontent)
-    print(f"Loaded default plot config: {pc}")
     return pc
 
 
@@ -57,7 +56,7 @@ class PlotConfig(BaseModel):
         ):
             full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
 
-            logger.debug(f'Plotting with kwargs: {full_kwargs} + {plot_method.kwargs}')
+            # logger.debug(f'Plotting with kwargs: {full_kwargs} + {plot_method.kwargs}')
 
             with mpl.rc_context(rc=rc):
                 return plot_method(*args, **full_kwargs)
@@ -103,7 +102,7 @@ class PlotTask(ArbitraryModel):
 
         for cb in self.post_plot_callbacks:
             resolve_all_lazy(cb, context={'ax': self.ax})
-            print(f"Running post-plot callback {cb}")
+            logger.debug(f"Running post-plot callback {cb}")
             kw = {'ax': self.ax} if self.ax else {}
             cb.set_missing_kwargs(kw)
             cb()
@@ -136,27 +135,32 @@ class Figure(ArbitraryModel):
 
         with mpl.rc_context(rc=self.plot_config.rc_context):
             try:
+                logger.debug("Making FigAx")
                 figax = self.figure_spec.make_figure()
+                logger.debug(f"FigAx for {self.figure_spec.output_path} made")
             except Exception as e:
                 logger.error(f"Error making figure: {e}")
                 return
 
             for i, t in enumerate(self.plot_tasks):
                 try:
+                    logger.debug(f"Constructing plot task {i}")
                     pt = t.construct(context={"FIG": figax})
                     if dict_like(pt):
                         pt = PlotTask(**pt)  # type: ignore
                     pt.plot_config.inherit_from(self.plot_config)
                     pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                    logger.debug(f"Task {i} constructed")
 
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
                     continue
 
                 try:
+                    logger.debug(f"Resolving plot task {i}")
                     resolve_all_lazy(pt)
-
                     pt.run()
+                    logger.debug(f"Plot task {i} done")
                 except Exception as e:
                     import traceback
 

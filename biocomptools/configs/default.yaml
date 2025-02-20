@@ -34,5 +34,55 @@ calib:
   paths:
     - "./data/calibrated"
   name_priority:
+    - "FINAL-*"
+    - "final-*"
     - "regular-*"
     - "regular*"
+
+logging:
+  default_level: INFO
+  use_rich_handler: true
+  show_time: true
+  show_path: true
+  show_level: true
+  enable_link_path: true
+  rich_tracebacks: true
+  omit_repeated_times: true
+  markup: false
+
+  rich_format: "[%(name)s] %(message)s"
+  file_format: "%(asctime)s %(levelname)s %(name)s: %(message)s" # Standard format for file logs
+  worker_format: "[%(processName)s] %(asctime)s %(levelname)s %(name)s: %(message)s" # Format for worker processes
+  date_format: "%Y-%m-%d %X"
+
+  format_examples:
+    simple: "%(message)s"
+    basic: "%(levelname)s: %(message)s"
+    standard: "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    detailed: "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    full: "%(asctime)s %(levelname)s [%(name)s:%(lineno)d]: %(message)s"
+    process_thread: "[%(process)d/%(threadName)s] %(name)s %(levelname)s: %(message)s"
+    custom_time: "[%(asctime)s.%(msecs)03d] %(levelname)s [%(name)s]: %(message)s"
+    compact: "%(asctime)s|%(levelname)s|%(name)s|%(message)s"
+    dev_debug: "%(asctime)s.%(msecs)03d %(levelname)-8s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
+
+  levels:
+    biocomptools.run_training: INFO
+    biocomptools.toollib.datasources: INFO
+    biocomptools.modelmodel: INFO
+    biocomp: INFO
+    biocomp.*: INFO
+    dracon.commandline: INFO
+    dracon.instructions: INFO
+    matplotlib: WARNING
+    matplotlib.font_manager: WARNING
+    fontTools: WARNING
+    PIL: WARNING
+    jax: WARNING
+    ray: WARNING
+    h5py: WARNING
+    parso: WARNING
+    numexpr: WARNING
+    mlflow: WARNING
+    docker: WARNING
+    git: WARNING

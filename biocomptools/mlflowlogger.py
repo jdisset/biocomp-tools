@@ -1,23 +1,18 @@
+from biocomptools.logging_config import get_logger, setup_logging
 import mlflow
-import mlflow.sklearn
-from mlflow.entities import RunStatus
-import os
 import sys
 import logging
 from pathlib import Path
 import json
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union
+from typing import Any, List, Optional, Tuple, Callable
 from pydantic import Field, ConfigDict, BaseModel
-import matplotlib.pyplot as plt
 import numpy as np
-from contextlib import contextmanager
 from dracon.deferred import DeferredNode
 from biocomptools.trainutils import Logger
 from biocomptools.toollib.common import config
 
-logger = logging.getLogger(__name__)
 
+logger = get_logger(__name__)
 
 class MLflowLogger(Logger):
     """
