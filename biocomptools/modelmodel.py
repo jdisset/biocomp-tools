@@ -182,7 +182,7 @@ class NetworkModel(BaseModel):
             if not isinstance(self.network, list):
                 networks = [self.network]
             for n in networks:
-                print(cm.network_str(n._network))
+                logger.error(n._network.compute_graph)
             raise e
         try:
             self._local_params = get_nonshared_params(init_params)

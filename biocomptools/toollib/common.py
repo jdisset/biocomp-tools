@@ -5,8 +5,6 @@ import xxhash
 from omegaconf import DictConfig, ListConfig
 import subprocess
 
-import pandas as pd
-import networkx as nx
 from typing import Dict, List, Set, Tuple
 
 # using base58 instead of base64 because it's url-safe
@@ -151,25 +149,3 @@ def filter_df(df, **filters):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
-def network_str(network):
-    # just get the id, type, input_from and output_to columns
-    df = network.compute_graph[['type', 'input_from', 'output_to']]
-    print(df)
-    # create a directed graph
-    G = nx.DiGraph()
-    # add nodes to the graph
-    id_to_name = {i: f"({i})-{row['type']}" for i, row in df.iterrows()}
-
-    for i, row in df.iterrows():
-        G.add_node(i, label=id_to_name[i], type=row['type'])
-        # add a color attribute to the node
-
-    # add edges to the graph
-    for i, row in df.iterrows():
-        for j in row['output_to']:
-            G.add_edge(i, j[0])
-
-    all_lines = nx.generate_network_text(G, vertical_chains=True)
-    nx.write_gexf(G, '/tmp/network.gexf')
-    return '\n' + '\n'.join(all_lines)

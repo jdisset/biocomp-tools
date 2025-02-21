@@ -227,11 +227,15 @@ def validate_ground_truth(v):
         return [v]
     return v
 
+def validate_input_order(v):
+    # if it's just a list of ints, turn it into a list of lists of ints
+    if isinstance(v, list) and all(isinstance(x, int) for x in v):
+        return [v]
 
 class NetworkPrediction(DataSource):
     predict_at: Annotated[Union[np.ndarray, List[np.ndarray]], BeforeValidator(validate_predict_at)]
     network_model: NetworkModel
-    input_order: Optional[list[int]] = None
+    input_order: Annotated[Optional[List[List[int]]], BeforeValidator(validate_input_order)] = None
     ground_truth: Annotated[
         Optional[np.ndarray | list[Optional[np.ndarray]]], BeforeValidator(validate_ground_truth)
     ] = None
