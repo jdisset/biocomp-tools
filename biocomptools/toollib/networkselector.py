@@ -419,6 +419,12 @@ class CustomFilter(NetworkFilter):
             logger.error(f"Error checking custom filter for network {network_id}: {e}")
             return False
 
+class CleanupFilter(NetworkFilter):
+    """Filter NetworkSets based on specific cleanup values"""
+    # - remove mismatch ERN - Recs
+    # - remove splits, meaning multiple recs for same ERN
+    # - anything with recombinase
+    ...
 
 class UorfFilter(NetworkFilter):
     """Filter NetworkSets based on specific uORF value pairs"""
