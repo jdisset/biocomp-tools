@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BeforeValidator, Field, model_validator, BaseModel, ConfigDict
 from biocomp.utils import ArbitraryModel
+import biocomptools.toollib.common as cm
 from copy import deepcopy
 
 from typing import Callable, Annotated, Optional
@@ -159,14 +160,37 @@ class NetworkModel(BaseModel):
 
     def build_stack(self):
         # Create and build stack
-        self._stack = cmp.ComputeStack([n._network for n in self.network])
-        self._stack.build(self.model.compute_config)
-        self._batch_apply = jax.jit(jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None)))
+        try:
+            self._stack = cmp.ComputeStack([n._network for n in self.network])
+            self._stack.build(self.model.compute_config)
+            self._batch_apply = jax.jit(
+                jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
+            )
+        except Exception as e:
+            logger.error(f"Error building stack: {e}")
+            raise e
 
     def update_params(self):
         assert self._stack is not None
-        self._local_params = get_nonshared_params(self._stack.init(PRNGKey(0)))
-        self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
+        try:
+            init_params = self._stack.init(PRNGKey(0))
+        except Exception as e:
+            logger.error(f"Error initializing stack: {e}")
+            logger.error(f"Networks: {self.network}")
+            logger.error("Compute graphs:")
+            networks = self.network
+            if not isinstance(self.network, list):
+                networks = [self.network]
+            for n in networks:
+                print(cm.network_str(n._network))
+            raise e
+        try:
+            self._local_params = get_nonshared_params(init_params)
+            self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
+        except Exception as e:
+            logger.error(f"Error updating params: {e}")
+            logger.error(f"Networks: {self.network}")
+            raise e
 
     def signature(self):
         return self.model.signature()

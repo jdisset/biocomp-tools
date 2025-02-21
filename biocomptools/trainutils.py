@@ -253,7 +253,9 @@ def generate_unique_funny_name(directory: Path | str, prefix: str = '', suffix: 
 
 def get_best_smoothed_loss_id(all_losses: ndArray, sigma: float = 12.0) -> Tuple[int, np.ndarray]:
     smoothed_losses = gaussian_filter1d(all_losses, sigma=sigma, mode='nearest')
-    endval = smoothed_losses[:, -1]
+    # endval = smoothed_losses[:, -1]
+    # instead, take the mean of the last third of the unsmoothed losses
+    endval = np.mean(all_losses[:, -int(all_losses.shape[1] / 3) :], axis=1)
     endval[np.isnan(endval)] = np.inf
     best_loss_id = int(np.argmin(endval))
     return best_loss_id, smoothed_losses

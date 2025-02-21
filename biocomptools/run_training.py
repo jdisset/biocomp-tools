@@ -251,6 +251,7 @@ class TrainingProgram(BaseModel):
         import pickle
 
         best_model_id, _ = get_best_smoothed_loss_id(all_losses)
+        logger.debug(f"Best model is replicate number {best_model_id}")
         params = ut.tree_get(all_models, best_model_id)
         if params is None:
             return None
@@ -261,7 +262,6 @@ class TrainingProgram(BaseModel):
 
         if best_params is None:
             return None
-
 
         model = BiocompModel(
             compute_config=self.compute_conf,

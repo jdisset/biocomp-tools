@@ -4,6 +4,9 @@ import os
 os.environ.setdefault('RAY_DEDUP_LOGS', '1')
 
 from biocomptools.logging_config import get_logger, setup_logging
+import copy
+import weakref
+import types
 
 import logging.config
 import sys
@@ -73,6 +76,8 @@ def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
 
+
+
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
     if "pretty_inputs" in d.metadata:
         return f'$\\mathbf{{X_{i+1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
@@ -110,7 +115,7 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int, **kw):
 @ray.remote
 class PlotWorker:
     def __init__(self):
-        setup_logging(default_level=logging.DEBUG)
+        setup_logging()
 
     def process_figure(self, figure: DeferredNode[Figure], i: int, total: int, **kw):
         _make_figure(figure, i, total, **kw)
@@ -150,6 +155,9 @@ class PlotJob(LazyDraconModel):
         while workers and unassigned_figures:
             worker = workers.pop(0)
             idx, figure = unassigned_figures.pop(0)
+            # remove the composition_result as it's not serializable
+            figure.clear_composition_context()
+            figure = make_serializable(figure)
             pending_tasks.append(
                 (
                     worker,
@@ -193,7 +201,7 @@ plot_extra_context = {
 
 
 def main():
-    setup_logging(default_level=logging.DEBUG)
+    setup_logging()
 
     prog = make_program(
         PlotJob,
