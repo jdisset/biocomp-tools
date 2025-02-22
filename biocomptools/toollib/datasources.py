@@ -86,9 +86,6 @@ def make_pretty_input_names(
             if content:
                 x += rf"${content}$"
         else:
-            # print(
-            #     f"Fluo marker: {p}, not found in ratios {fluo_markers}. {ordered_input_names=}, {ratios=}, {name_lookup=}, {fluo_markers=}"
-            # )
             ...
 
         if name_lookup is not None:
@@ -227,10 +224,12 @@ def validate_ground_truth(v):
         return [v]
     return v
 
+
 def validate_input_order(v):
     # if it's just a list of ints, turn it into a list of lists of ints
     if isinstance(v, list) and all(isinstance(x, int) for x in v):
         return [v]
+
 
 class NetworkPrediction(DataSource):
     predict_at: Annotated[Union[np.ndarray, List[np.ndarray]], BeforeValidator(validate_predict_at)]
@@ -464,13 +463,14 @@ class NetworkPrediction(DataSource):
 
         for i, network in enumerate(self.network_model.network):
             metadata = self.metadata.copy()
+            network_info = bc.network.generate_network_info(network.network)
             metadata.update(
                 {
                     'source_type': 'prediction',
                     'seed': self.seed,
                     'model_signature': self.network_model.model.signature(),
                     'network': network,
-                    'network_info': network.network_info,
+                    'network_info': network_info,
                     'built_network': network.network,
                     'n_predictions': len(self.predict_at[i]),
                     'network_index': i,
@@ -482,6 +482,10 @@ class NetworkPrediction(DataSource):
                 make_get_XY(i),
                 input_order=input_order[i],
                 metadata=metadata,
+            )
+            plot_data.metadata['pretty_inputs'] = make_pretty_input_names(
+                network_info['cotx'],
+                plot_data.input_names,
             )
 
             plot_data_list.append(plot_data)

@@ -154,6 +154,10 @@ class Figure(ArbitraryModel):
 
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
+                    # print exception traceback
+                    import traceback
+                    logger.error(traceback.format_exc())
+
                     continue
 
                 try:

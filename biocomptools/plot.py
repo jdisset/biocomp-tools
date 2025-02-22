@@ -76,8 +76,6 @@ def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
 
-
-
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
     if "pretty_inputs" in d.metadata:
         return f'$\\mathbf{{X_{i+1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
@@ -156,8 +154,8 @@ class PlotJob(LazyDraconModel):
             worker = workers.pop(0)
             idx, figure = unassigned_figures.pop(0)
             # remove the composition_result as it's not serializable
-            figure.clear_composition_context()
-            figure = make_serializable(figure)
+            # figure.clear_composition_context()
+            # figure = make_serializable(figure)
             pending_tasks.append(
                 (
                     worker,
@@ -217,9 +215,8 @@ def main():
         context=plot_extra_context,
     )
 
-    dmp = dr.dump(pj)
-
-    logger.debug(dmp)
+    # dmp = dr.dump(pj)
+    # logger.debug(dmp)
 
     pj.run()
 

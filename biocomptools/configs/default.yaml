@@ -40,7 +40,7 @@ calib:
     - "regular*"
 
 logging:
-  default_level: DEBUG
+  default_level: INFO
   use_rich_handler: true
   show_time: true
   show_path: true
@@ -67,14 +67,17 @@ logging:
     dev_debug: "%(asctime)s.%(msecs)03d %(levelname)-8s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
 
   levels:
-    # biocomptools.run_training: INFO
-    # biocomptools.toollib.datasources: DEBUG
-    # biocomptools.toollib.networkselector: DEBUG
-    # biocomptools.modelmodel: INFO
-    # biocomp: INFO
-    # biocomp.*: INFO
-    # dracon.commandline: INFO
-    # dracon.instructions: INFO
+    biocomptools.run_training: INFO
+    biocomptools.toollib.datasources: DEBUG
+    biocomptools.toollib.networkselector: DEBUG
+    biocomptools.toollib.plot: DEBUG
+    biocomptools.plot: DEBUG
+    biocomptools.modelmodel: DEBUG
+    biocomp: INFO
+    biocomp.compute: INFO
+    biocomp.nodes: INFO
+    dracon.commandline: INFO
+    dracon.instructions: INFO
     matplotlib: WARNING
     matplotlib.font_manager: ERROR
     fontTools: WARNING
