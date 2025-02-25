@@ -12,7 +12,7 @@ import numpy as np
 from pydantic import BeforeValidator, Field, model_validator, BaseModel, ConfigDict
 from biocomp.utils import ArbitraryModel
 import biocomptools.toollib.common as cm
-from copy import deepcopy
+import biocomptools.toollib.stackviz as sv
 
 from typing import Callable, Annotated, Optional
 from jax.random import PRNGKey
@@ -133,10 +133,17 @@ def load_model(maybe_path):
     return BiocompModel.load(maybe_path)
 
 
+def make_list(x):
+    if not isinstance(x, list):
+        return [x]
+    return x
+
+
 class NetworkModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
+    # network: Annotated[list[md.Network], BeforeValidator(make_list)]
     network: md.Network | list[md.Network]
 
     _stack: Optional[cmp.ComputeStack] = None
@@ -229,9 +236,13 @@ class NetworkModel(BaseModel):
         params = self._params
 
         if disable_variational:
+            logger.debug("Disabling variational embeddings")
             logstd = params['shared']['quantization']['logstdevs']
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
+
+        logger.debug("Saving stackviz to /tmp/stackviz.html")
+        sv.save_stackviz(self._stack, '/tmp/stackviz.html')
 
         batch_keys = jax.random.split(key, n_batches)
         for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="Predicting"):
