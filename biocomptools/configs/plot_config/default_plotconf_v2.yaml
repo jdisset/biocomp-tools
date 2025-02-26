@@ -1,14 +1,14 @@
-!define plotvars:
-  base_range: &br [0.05, 0.7]
-  xlims: *br
-  ylims: *br
-  zlims: *br
-  vlims: *br
-  cmap: bc_blues
-  colors:
-    grey: "#000000"
-    red: "#FF0000"
+!define base_range: ${[0.05, 0.7]}
 
+!set_default xlims: ${base_range}
+!set_default ylims: ${base_range}
+!set_default zlims: ${base_range}
+!set_default vlims: ${base_range}
+!set_default cmap: bc_blues
+!set_default colors_grey: "#000000"
+
+
+!define print_debug: "${print('xlims: ' + str(xlims) + ', ylims: ' + str(ylims) + ', zlims: ' + str(zlims) + ', vlims: ' + str(vlims))}"
 rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
 rc_context: !include pkg:biocomptools:configs/plot_config/default_rcparams
@@ -17,19 +17,19 @@ callstack_params:
   heatmap_params:
     axtransform: null
     bad_color: "#EEEEEE00"
-    cmap: ${plotvars['cmap']}
+    cmap: ${cmap}
     contours: 0
     opacities: null
-    vlims: ${plotvars['vlims']}
+    vlims: ${vlims}
 
   histogram_params:
-    cmap: ${plotvars['cmap']}
+    cmap: ${cmap}
     draw_colorbar: true
     noise_smooth: 0
     use_log_density: true
-    xlims: ${plotvars['xlims']}
-    ylims: ${plotvars['vlims']}
-    vlims: [0, null]
+    xlims: ${xlims}
+    ylims: ${vlims}
+    # vlims: [0, null]
     colorbar_params:
       size: [0.06, 0.85]
       position: [1.05, 0.075]
@@ -67,14 +67,14 @@ callstack_params:
       3: smooth
 
   smooth_1d_params:
-    xlims: ${plotvars['xlims']}
-    vlims: ${plotvars['vlims']}
+    xlims: ${xlims}
+    vlims: ${vlims}
 
   smooth_2d_params:
     draw_colorbar: true
-    xlims: ${plotvars['xlims']}
-    ylims: ${plotvars['ylims']}
-    vlims: ${plotvars['vlims']}
+    xlims: ${xlims}
+    ylims: ${ylims}
+    vlims: ${vlims}
 
     colorbar_params:
       size: [0.06, 0.85]
@@ -90,10 +90,10 @@ callstack_params:
       heatmap_params:
         bad_color: "#EEEEEE00"
         image_interpolation: "bilinear"
-    xlims: ${plotvars['xlims']}
-    ylims: ${plotvars['ylims']}
-    zlims: ${plotvars['zlims']}
-    vlims: ${plotvars['vlims']}
+    xlims: ${xlims}
+    ylims: ${ylims}
+    zlims: ${zlims}
+    vlims: ${vlims}
     zslices: [0.05, 0.25, 0.4, 0.55]
     draw_colorbar: null
     colorbar_position: [1.05, 0.4]
@@ -108,7 +108,7 @@ callstack_params:
         offset: [0, 0]
         props:
           alpha: 0.5
-          color: ${plotvars['colors']['grey']}
+          color: ${colors_grey}
           linestyle: ":"
           linewidth: 0.5
           zorder: -2147483637
@@ -123,19 +123,19 @@ callstack_params:
                 facecolor: white
                 pad: -0.25
               fontsize: 10
-              color: ${plotvars['colors']['grey']}
+              color: ${colors_grey}
               ha: left
               va: center
           slice:
             offset: [85, 0]
             props:
               fontsize: 7
-              color: ${plotvars['colors']['grey']}
+              color: ${colors_grey}
               ha: left
               va: center
         offset: [0.0, 0]
         props:
-          color: ${plotvars['colors']['grey']}
+          color: ${colors_grey}
           linestyle: "-"
           linewidth: 0.5
           zorder: 2147483637
@@ -145,8 +145,7 @@ callstack_params:
               {
                 direction: [1, 0, 0],
                 length: 6,
-                props:
-                  { color: "${plotvars['colors']['grey']}", linewidth: 0.4 },
+                props: { color: "${colors_grey}", linewidth: 0.4 },
               },
             ]
           minor:
@@ -154,8 +153,7 @@ callstack_params:
               {
                 direction: [1, 0, 0],
                 length: 2,
-                props:
-                  { color: "${plotvars['colors']['grey']}", linewidth: 0.2 },
+                props: { color: "${colors_grey}", linewidth: 0.2 },
               },
             ]
           slice:
@@ -165,7 +163,7 @@ callstack_params:
                 length: 80,
                 props:
                   {
-                    color: "${plotvars['colors']['grey']}",
+                    color: "${colors_grey}",
                     alpha: 0.5,
                     dashes: [5, 5],
                     linewidth: 0.2,
@@ -179,18 +177,18 @@ callstack_params:
             rotation: 45
             ha: center
             va: center
-            color: ${plotvars['colors']['grey']}
+            color: ${colors_grey}
       top_left:
         offset: [0, 0]
         props:
-          color: ${plotvars['colors']['grey']}
+          color: ${colors_grey}
           linestyle: "-"
           linewidth: 0.5
           zorder: 2147483637
       top_right:
         offset: [0, 0]
         props:
-          color: ${plotvars['colors']['grey']}
+          color: ${colors_grey}
           linestyle: "-"
           linewidth: 0.5
           zorder: 2147483637
