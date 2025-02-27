@@ -14,7 +14,7 @@ from biocomptools.toollib.common import config, get_package_git_hashes
 from dracon.commandline import make_program, Arg
 import sys
 
-from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
+from biocomptools.toollib.datasources import DataSource, DBSource
 from biocomp.train import TrainingConfig
 from biocomp.library import PartsLibrary
 
@@ -55,6 +55,7 @@ from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 
 from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
+from biocomptools.plot import NetworkPrediction
 
 import biocomptools.toollib.models as md
 

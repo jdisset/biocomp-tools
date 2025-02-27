@@ -5,12 +5,9 @@ import xxhash
 from omegaconf import DictConfig, ListConfig
 import subprocess
 
-from typing import Dict, List, Set, Tuple
-
 # using base58 instead of base64 because it's url-safe
 import base58
 
-import dracon as dr
 from dracon.lazy import resolve_all_lazy
 
 from typing import (
@@ -149,3 +146,33 @@ def filter_df(df, **filters):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+DEFAULT_NAME_LOOKUP = {
+    'mNeonGreen': 'mNG',
+    'PgU': 'Pgu',
+}
+
+
+def make_pretty_input_names(ratios, ordered_input_names, name_lookup=None):
+    """create formatted input names for display"""
+    if name_lookup is None:
+        name_lookup = DEFAULT_NAME_LOOKUP
+
+    fluo_markers = [p[0][-1].upper() for p in ratios]
+    names = []
+
+    for p in ordered_input_names:
+        x = ''
+        if p.upper() in fluo_markers:
+            idx = fluo_markers.index(p.upper())
+            content = ' + '.join(ratios[idx][0][:-1])
+            if content:
+                x += rf"${content}$"
+
+        if name_lookup is not None:
+            for k, v in name_lookup.items():
+                x = x.replace(k, v)
+
+        names.append(x)
+
+    logger.debug(f"Created pretty input names: {names} from ordered inputs: {ordered_input_names}")
+    return names

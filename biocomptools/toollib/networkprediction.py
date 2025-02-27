@@ -1,25 +1,28 @@
-from typing import List, Optional, Union, Dict, Any, Tuple, Literal, TypeVar, Annotated, Callable
-from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from pydantic.functional_validators import BeforeValidator
+from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
-import jax
 import jax.numpy as jnp
-from biocomp.utils import ArbitraryModel, tree_to_jax
 from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
-from biocomptools.toollib.datasources import DataSource, make_pretty_input_names
-from biocomptools.modelmodel import NetworkModel
+from biocomptools.toollib.common import make_pretty_input_names
+from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
-import biocomp.plotutils as pu
+from biocomptools.toollib.datasources import DataSource
+
 
 logger = get_logger(__name__)
 
+NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
-def validate_predict_at(v):
+
+def validate_predict_at(v: Any) -> List[np.ndarray]:
+    """convert single numpy array to list of arrays"""
     if isinstance(v, np.ndarray):
         return [v]
     return v
 
 
-def validate_ground_truth(v):
+def validate_ground_truth(v: Any) -> Optional[List[Optional[np.ndarray]]]:
+    """convert single numpy array to list of arrays or none to list of none"""
     if v is None:
         return None
     if isinstance(v, np.ndarray):
@@ -27,292 +30,348 @@ def validate_ground_truth(v):
     return v
 
 
-def validate_input_order(v):
+def validate_input_order(v: Any) -> Optional[List[List[int]]]:
+    """convert list of ints to list of lists of ints"""
     if v is None:
         return None
-
-    if isinstance(v, (list, tuple, np.ndarray)):
-        v = np.asarray(v)
-        if v.ndim == 1:
-            return [v.tolist()]
-        elif v.ndim == 2:
-            return v.tolist()
+    if isinstance(v, list) and all(isinstance(x, int) for x in v):
+        return [v]
     return v
-
-
-class NodeSpec(BaseModel):
-    network_id: int
-    node_id: int
-    shape: Optional[tuple] = None  # If None, will be inferred from the stack
-
-
-def get_node_indices(stack, network_id, node_id) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """Gets the input and output indices for a virtual node in the compute stack."""
-    layer_id, n_id = stack.node_map[(network_id, node_id)]
-    layer = stack.layers[layer_id]
-    node = layer.nodes[n_id]
-
-    input_indices = []
-    if layer.f_input_shapes:  # Skip for input layer
-        for input_slot in range(len(layer.f_input_shapes)):
-            start_idx = stack.get_node_input_start_index(node, input_slot)
-            input_shape = layer.f_input_shapes[input_slot]
-            length = int(np.prod(input_shape))
-            input_indices.append(np.arange(start_idx, start_idx + length))
-
-    output_indices = []
-    for output_slot in range(len(layer.f_out_shapes)):
-        start_idx = stack.get_node_output_start_index(node, output_slot)
-        output_shape = layer.f_out_shapes[output_slot]
-        length = int(np.prod(output_shape))
-        output_indices.append(np.arange(start_idx, start_idx + length))
-
-    return input_indices, output_indices
-
-
-def make_pretty_input_names(ratios, ordered_input_names, name_lookup=None):
-    if name_lookup is None:
-        name_lookup = {
-            'mNeonGreen': 'mNG',
-            'PgU': 'Pgu',
-        }
-
-    fluo_markers = [p[0][-1].upper() for p in ratios]
-    names = []
-
-    for p in ordered_input_names:
-        x = ''
-        if p.upper() in fluo_markers:
-            idx = fluo_markers.index(p.upper())
-            content = ' + '.join(ratios[idx][0][:-1])
-            if content:
-                x += rf"${content}$"
-
-        if name_lookup is not None:
-            for k, v in name_lookup.items():
-                x = x.replace(k, v)
-
-        names.append(x)
-
-    return names
 
 
 class NetworkPrediction(DataSource):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    """
+    Performs predictions using a networkmodel and prepares data for plotting
 
-    network_model: NetworkModel
+    responsible for:
+    - preparing input data for prediction
+    - making predictions using the network model
+    - comparing predictions to ground truth
+    - generating plot data for visualization
+    """
+
     predict_at: Annotated[Union[np.ndarray, List[np.ndarray]], BeforeValidator(validate_predict_at)]
+    network_model: NetworkModel
+    input_order: Annotated[Optional[List[List[int]]], BeforeValidator(validate_input_order)] = None
     ground_truth: Annotated[
         Optional[Union[np.ndarray, List[Optional[np.ndarray]]]],
         BeforeValidator(validate_ground_truth),
     ] = None
-    input_order: Annotated[Optional[List[List[int]]], BeforeValidator(validate_input_order)] = None
 
-    # Node injection/collection configuration
+    # node injection and collection capabilities
     injection_points: Optional[List[NodeSpec]] = None
     collection_points: Optional[List[NodeSpec]] = None
-    injection_values: Optional[List[np.ndarray]] = None
 
-    # Computation settings
-    max_evals: int = 300000
-    z: Union[Literal['uniform'], float] = 'uniform'
+    # prediction control parameters
     seed: int = 0
+    max_evals: int = 300000
     use_output_as_input: bool = False
+    z_value: Union[Literal['uniform'], float] = 'uniform'
+    disable_variational: bool = True
 
-    _yhats: Optional[np.ndarray] = None
+    # internal state
+    _yhats: Optional[List[np.ndarray]] = None
+    _x: Optional[List[np.ndarray]] = None
+    _gtruths: Optional[List[Optional[np.ndarray]]] = None
+    _aligned_x: Optional[List[np.ndarray]] = None
+    _aligned_ground_truth: Optional[List[Optional[np.ndarray]]] = None
 
     def model_post_init(self, *args, **kwargs):
+        """initialize the model after validation"""
         super().model_post_init(*args, **kwargs)
 
+        logger.debug(
+            f"predict_at: {len(self.predict_at)} arrays, shapes: {[x.shape for x in self.predict_at]}"
+        )
+
+        # validate number of networks matches input data
         if len(self.predict_at) != len(self.network_model.network):
             raise ValueError(
-                f"Number of predict_at arrays ({len(self.predict_at)}) "
+                f"number of predict_at arrays ({len(self.predict_at)}) "
                 f"does not match number of networks ({len(self.network_model.network)})"
             )
 
-        if self.ground_truth is not None:
+        # normalize ground truth
+        if self.ground_truth is None:
+            self.ground_truth = [None] * len(self.predict_at)
+        else:
             if len(self.ground_truth) != len(self.predict_at):
                 raise ValueError(
-                    f"Number of ground truth arrays ({len(self.ground_truth)}) "
+                    f"number of ground truth arrays ({len(self.ground_truth)}) "
                     f"does not match number of predict_at arrays ({len(self.predict_at)})"
                 )
-        else:
-            self.ground_truth = [None] * len(self.predict_at)
 
-        # shuffle predict_at (and ground_truth)
+        # shuffle inputs with fixed random seed
+        self._shuffle_inputs()
+
+        # prepare aligned inputs
+        self._aligned_x, self._aligned_ground_truth = self._prepare_inputs()
+        logger.debug(f"aligned_x shapes: {[x.shape for x in self._aligned_x]}")
+        logger.debug(
+            f"aligned_ground_truth shapes: {[None if gt is None else gt.shape for gt in self._aligned_ground_truth]}"
+        )
+
+    def _shuffle_inputs(self):
+        """shuffle inputs and ground truth with the same random order"""
+        # set random seed for reproducibility
+        rng = np.random.RandomState(self.seed)
+
         new_predict_at = []
         new_gt = []
-        for x, gt in zip(self.predict_at, self.ground_truth):
-            order = np.random.permutation(len(x))
+        for i, (x, gt) in enumerate(zip(self.predict_at, self.ground_truth)):
+            order = rng.permutation(len(x))
             new_predict_at.append(x[order])
             new_gt.append(gt[order] if gt is not None else None)
         self.predict_at = new_predict_at
         self.ground_truth = new_gt
 
-        if self.injection_points is not None:
-            if self.injection_values is None:
-                raise ValueError("injection_values must be provided when injection_points is set")
-            if len(self.injection_points) != len(self.injection_values):
-                raise ValueError("Number of injection points must match number of injection values")
-
-        self._aligned_x, self._aligned_ground_truth = self._prepare_inputs()
-
     def _prepare_inputs(self) -> Tuple[List[np.ndarray], List[Optional[np.ndarray]]]:
-        """Prepare inputs by padding or truncating to the same length."""
+        """prepare inputs by padding or truncating to the same length"""
         max_prediction_length = max(len(x) for x in self.predict_at)
+        logger.debug(f"max_prediction_length across networks: {max_prediction_length}")
 
-        if self.max_evals < 0:
-            self.max_evals = max_prediction_length
-
-        self.max_evals = min(self.max_evals, max_prediction_length)
+        effective_max_evals = min(
+            self.max_evals if self.max_evals > 0 else max_prediction_length, max_prediction_length
+        )
+        logger.debug(f"effective_max_evals: {effective_max_evals}")
 
         aligned_predict_at = []
         aligned_ground_truth = []
 
-        for x, gt in zip(self.predict_at, self.ground_truth):
-            if len(x) < self.max_evals:
-                zeros = np.zeros((self.max_evals - len(x), x.shape[1]))
-                aligned_predict_at.append(np.vstack([x, zeros]))
+        for i, (x, gt) in enumerate(zip(self.predict_at, self.ground_truth)):
+            logger.debug(
+                f"aligning network {i}: x.shape={x.shape}, gt={None if gt is None else gt.shape}"
+            )
+
+            if len(x) < effective_max_evals:
+                # pad with zeros if shorter than desired length
+                f"padding prediction queries for network {i} from {len(x)} to {effective_max_evals} points"
+                zeros = np.zeros((effective_max_evals - len(x), x.shape[1]))
+                padded_x = np.vstack([x, zeros])
+                aligned_predict_at.append(padded_x)
+
                 if gt is not None:
-                    gtzeros = np.zeros((self.max_evals - len(x), gt.shape[1]))
-                    aligned_ground_truth.append(np.vstack([gt, gtzeros]))
+                    gtzeros = np.zeros((effective_max_evals - len(x), gt.shape[1]))
+                    padded_gt = np.vstack([gt, gtzeros])
+                    aligned_ground_truth.append(padded_gt)
                 else:
                     aligned_ground_truth.append(None)
             else:
-                aligned_predict_at.append(x[: self.max_evals])
-                aligned_ground_truth.append(gt[: self.max_evals] if gt is not None else None)
+                # truncate if longer than desired length
+                logger.debug(
+                    f"truncating prediction queries for network {i} from {len(x)} to {effective_max_evals} points"
+                )
+                truncated_x = x[:effective_max_evals]
+                aligned_predict_at.append(truncated_x)
+
+                if gt is not None:
+                    truncated_gt = gt[:effective_max_evals]
+                    aligned_ground_truth.append(truncated_gt)
+                else:
+                    aligned_ground_truth.append(None)
 
         return aligned_predict_at, aligned_ground_truth
 
-    def _get_injection_indices(self) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        """Get input and output indices for injection points."""
-        if self.injection_points is None:
-            return [], []
+    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkPrediction':
+        """create a new networkprediction with a different model"""
+        logger.debug(f"creating new networkprediction with model {model.signature()=}")
 
-        all_input_indices = []
-        all_output_indices = []
+        # create new instance with updated network model
+        new = self.model_copy(update={'network_model': self.network_model.with_model(model)})
+        new._yhats = None  # clear the cache
 
-        for point in self.injection_points:
-            input_indices, output_indices = get_node_indices(
-                self.network_model._stack, point.network_id, point.node_id
-            )
-            all_input_indices.extend(input_indices)
-            all_output_indices.extend(output_indices)
+        logger.debug(
+            f"created networkprediction with model signature {new.network_model.model.signature()=}"
+        )
+        return new
 
-        return all_input_indices, all_output_indices
+    def compute_all_network_predictions(self):
+        """compute predictions for all networks"""
+        logger.debug(f"computing predictions with model {self.network_model.signature()}")
+        logger.debug(
+            f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
+        )
 
-    def _get_collection_indices(self) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        """Get input and output indices for collection points."""
-        if self.collection_points is None:
-            # Default to collecting final outputs
-            return [], [np.arange(self.network_model._stack.total_nb_of_outputs)]
+        # stack inputs from all networks
+        assert isinstance(self._aligned_x, list)
+        stacked_x = np.column_stack(self._aligned_x)
 
-        all_input_indices = []
-        all_output_indices = []
+        effective_max_evals = len(self._aligned_x[0])
+        logger.debug(f"effective_max_evals: {effective_max_evals}")
 
-        for point in self.collection_points:
-            input_indices, output_indices = get_node_indices(
-                self.network_model._stack, point.network_id, point.node_id
-            )
-            all_input_indices.extend(input_indices)
-            all_output_indices.extend(output_indices)
+        stacked_yhats = self.network_model.predict_unscaled(
+            stacked_x,
+            key=self.seed,
+            disable_variational=self.disable_variational,
+            injection_points=self.injection_points,
+            collection_points=self.collection_points,
+            z_value=self.z_value,
+        )
+        logger.debug(f"stacked_yhats shape: {stacked_yhats.shape}")
 
-        return all_input_indices, all_output_indices
+        # split the outputs by network
+        network_outputs = self.network_model.split_outputs_per_network(
+            stacked_yhats, effective_max_evals
+        )
+        logger.debug(f"network_outputs shapes: {[out.shape for out in network_outputs]}")
 
-    def _split_yhat_per_network(self, yhat: np.ndarray):
-        """Takes the whole stack output and returns a list of per-network outputs"""
+        self._process_prediction_results(network_outputs, effective_max_evals)
+
+    def _process_prediction_results(self, network_outputs: List[np.ndarray], max_evals: int):
+        """process and store prediction results"""
         self._x = []
         self._yhats = []
         self._gtruths = []
+        assert isinstance(self.ground_truth, list)
+        assert isinstance(self._aligned_ground_truth, list)
 
-        logger.debug(f"Going to split a full yhat of shape {yhat.shape}")
+        for i, (network_output, x) in enumerate(zip(network_outputs, self.predict_at)):
+            effective_max_evals = min(max_evals, len(x))
+            logger.debug(f"processing network {i}, effective_max_evals: {effective_max_evals}")
 
-        output_start_id = 0
-        for i, x in enumerate(self.predict_at):
-            _, output_shapes = self.network_model._stack.get_network_output_indices(i)
-            assert isinstance(output_shapes, list)
-            outputs = []
-            for output_shape in output_shapes:
-                nout = np.prod(output_shape)
-                output = yhat[:, output_start_id : output_start_id + nout].reshape(
-                    -1, *output_shape
-                )
-                outputs.append(output)
-                output_start_id += nout
+            # store prediction results
+            truncated_output = network_output[:effective_max_evals]
+            self._yhats.append(truncated_output)
+            logger.debug(f"stored yhat shape: {truncated_output.shape}")
 
-            # assumes all outputs are of same shape
-            assert all(output.shape == outputs[0].shape for output in outputs)
-            network_i_outputs = np.concatenate(outputs, axis=1)
-
-            assert (
-                network_i_outputs.shape[0] == self.max_evals
-            ), f"Expected {self.max_evals} but got {len(network_i_outputs)}"
-
-            # truncate to remove padding
-            network_i_outputs = network_i_outputs[: min(len(x), self.max_evals)]
-
-            self._yhats.append(network_i_outputs)
-            if self.ground_truth is not None and self.ground_truth[i] is not None:
-                self._gtruths.append(self._aligned_ground_truth[i][: len(network_i_outputs)])
+            # store ground truth if available
+            if self.ground_truth[i] is not None:
+                truncated_gt = self._aligned_ground_truth[i][:effective_max_evals]
+                self._gtruths.append(truncated_gt)
+                logger.debug(f"stored ground truth shape: {truncated_gt.shape}")
             else:
                 self._gtruths.append(None)
+                logger.debug("stored ground truth: None")
 
-            self._x.append(x[: min(len(x), self.max_evals)])
+            # store inputs
+            truncated_x = x[:effective_max_evals]
+            self._x.append(truncated_x)
+            logger.debug(f"stored x shape: {truncated_x.shape}")
 
-    def compute_predictions(self, key=None):
-        """Compute predictions for all inputs."""
-        if key is None:
-            key = jax.random.PRNGKey(self.seed)
+        # validate results
+        assert len(self._x) == len(self.predict_at)
+        assert len(self._x) == len(self.network_model.network)
 
-        assert self.network_model._params is not None
+    def _create_xy_function(
+        self, network_idx: int
+    ) -> Callable[[PlotData], Tuple[np.ndarray, np.ndarray]]:
+        """create a function to get x and y data for a specific network"""
 
-        num_z = self.network_model._params["global/number_of_quantile_variables"]
-        params = tree_to_jax(self.network_model._params)
-        npoints = self.max_evals
-
-        # prepare Z values
-        if self.z == 'uniform':
-            z_values = jax.random.uniform(key, (npoints, int(num_z)))
-        else:
-            z_values = jnp.ones((npoints, int(num_z))) * self.z
-
-        stack_inputs = np.column_stack(self._aligned_x)
-
-        # prepare injections if any
-        injection_in_indices, injection_out_indices = self._get_injection_indices()
-        collection_in_indices, collection_out_indices = self._get_collection_indices()
-        injection_values = None
-        if self.injection_values is not None:
-            injection_values = np.concatenate(
-                [v.reshape(npoints, -1) for v in self.injection_values], axis=1
+        def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
+            logger.debug(
+                f"getting xy for network {network_idx} with model {self.network_model.signature()}"
             )
-        overwrite_at = None
-        if injection_in_indices:
-            overwrite_at = jnp.concatenate([arr for arr in injection_in_indices])
 
-        keys = jax.random.split(key, npoints)
-        out, (grads, fullout) = self.network_model._batch_apply(
-            params, stack_inputs, z_values, keys, injection_values, overwrite_at
+            # compute predictions if not already computed
+            if not hasattr(self, '_yhats') or self._yhats is None:
+                self.compute_all_network_predictions()
+
+            assert isinstance(self._x, list)
+            assert isinstance(self._yhats, list)
+            assert isinstance(self._gtruths, list)
+
+            x = self._x[network_idx]
+            yhat = self._yhats[network_idx]
+            gt = self._gtruths[network_idx]
+
+            logger.debug(
+                f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
+            )
+
+            assert isinstance(self.network_model.network, list)
+
+            network = self.network_model.network[network_idx].network
+
+            # get output position for this network
+            _, output_pos, _, _ = get_reordered_protein_names(network)
+            assert isinstance(output_pos, int)
+            logger.debug(f"output_pos: {output_pos}")
+
+            # calculate and store prediction statistics
+            self._calculate_prediction_stats(network_idx, pdata, yhat, gt, output_pos)
+
+            if self.use_output_as_input:
+                logger.debug("using output as input, returning yhat as both x and y")
+                return yhat, yhat
+            else:
+                logger.debug("using original input, returning x and yhat")
+                return x, yhat
+
+        return get_xy
+
+    def _log_stats(
+        self,
+        network_idx: int,
+        prediction_stats: Dict[str, Any],
+        latent_gt: np.ndarray,
+        latent_yhat: np.ndarray,
+        latent_x: np.ndarray,
+    ):
+        n_samples = 15
+
+        sample_ids = np.random.choice(len(latent_gt), n_samples, replace=False)
+        gt_sample = latent_gt[sample_ids]
+        yhat_sample = latent_yhat[sample_ids]
+        latentx_sample = latent_x[sample_ids]
+        se_sample = (yhat_sample - gt_sample) ** 2
+
+        original_yhat = self.network_model.model.rescaler.inv(yhat_sample)
+        original_gt = self.network_model.model.rescaler.inv(gt_sample)
+        unscaledx_sample = self.network_model.model.rescaler.inv(latentx_sample)
+        unscaledx_sample = [tuple(np.round(x, 3) for x in xs) for xs in unscaledx_sample]
+        latentx_sample = [tuple(np.round(x, 3) for x in xs) for xs in latentx_sample]
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                'unscaled X': unscaledx_sample,
+                'unscaled gt': original_gt,
+                'unscaled yhat': original_yhat,
+                'latent X': latentx_sample,
+                'latent gt': gt_sample,
+                'latent yhat': yhat_sample,
+                'l2 error': se_sample,
+            }
         )
 
-        self._split_yhat_per_network(out)
+        logger.debug(
+            f"""network {network_idx} evaluated over {prediction_stats['samples']} samples:
+                - mse: {prediction_stats['mse']:.3f}
+                - rmse: {prediction_stats['rmse']:.3f}
+                - mean: {prediction_stats['mean']:.3f}
+                - std: {prediction_stats['std']:.3f}
+                - min: {prediction_stats['min']:.3f}
+                - max: {prediction_stats['max']:.3f}"""
+        )
 
-        # store collected values
-        self._collected_inputs = []
-        self._collected_outputs = []
+        logger.debug(f"Random samples:\n{df.round(3).to_string()}")
 
-        for in_indices, out_indices in zip(collection_in_indices, collection_out_indices):
-            if len(in_indices) > 0:
-                self._collected_inputs.append(fullout[:, in_indices])
-            if len(out_indices) > 0:
-                self._collected_outputs.append(fullout[:, out_indices])
+    def _calculate_prediction_stats(
+        self,
+        network_idx: int,
+        pdata: PlotData,
+        yhat: np.ndarray,
+        gt: Optional[np.ndarray],
+        output_pos: np.ndarray,
+    ):
+        """calculate prediction statistics and store them in metadata"""
+        logger.debug(f"calculating stats for network {network_idx}")
 
-    def _calculate_prediction_stats(self, yhat, gt, output_pos) -> Dict[str, float]:
-        """Calculate statistics for the predictions in latent space."""
-        latent_yhats = np.asarray(self.network_model.model.rescaler.fwd(yhat))
+        # transform to latent space for statistics
+        rescaler = self.network_model.model.rescaler
+        latent_yhats = np.asarray(rescaler.fwd(yhat))
+        logger.debug(f"latent_yhats shape: {latent_yhats.shape}")
+
         latent_yhat = latent_yhats[:, output_pos]
+        logger.debug(f"latent_yhat shape: {latent_yhat.shape}")
 
-        stats = {
+        latent_gt = None
+        if gt is not None:
+            latent_gt = np.asarray(rescaler.fwd(gt).flatten())
+            logger.debug(f"latent_gt shape: {latent_gt.shape}")
+
+        # calculate basic statistics
+        prediction_stats = {
             'samples': yhat.shape[0],
             'mean': float(latent_yhat.mean()),
             'std': float(latent_yhat.std()),
@@ -320,123 +379,123 @@ class NetworkPrediction(DataSource):
             'max': float(latent_yhat.max()),
         }
 
-        if gt is not None:
-            latent_gt = np.asarray(self.network_model.model.rescaler.fwd(gt))
-            stats['mse'] = float(np.mean((latent_yhat - latent_gt.flatten()) ** 2))
-            stats['rmse'] = float(np.sqrt(stats['mse']))
-
-            # Debug high RMSE cases
-            if stats['rmse'] > 0.18:
-                self._debug_high_rmse(latent_gt, latent_yhats, latent_yhat)
-
-        return stats
-
-    def _debug_high_rmse(
-        self, latent_gt: np.ndarray, latent_yhats: np.ndarray, latent_yhat: np.ndarray
-    ) -> None:
-        """Save debug information for high RMSE cases."""
-        debug_data = {
-            'latent_gt.npy': latent_gt,
-            'latent_yhats.npy': latent_yhats,
-            'latent_yhat.npy': latent_yhat,
-        }
-        for filename, data in debug_data.items():
-            with open(f'/tmp/prediction_{filename}', 'wb') as f:
-                np.save(f, data)
-
-    def _prepare_network_metadata(
-        self, network_idx: int, prediction_stats: Dict[str, float]
-    ) -> Dict[str, Any]:
-        """Prepare metadata for a network's plot data."""
-        network = self.network_model.network[network_idx]
-        network_info = network.get_info()
-
-        metadata = {
-            'source_type': 'prediction',
-            'seed': self.seed,
-            'model_signature': self.network_model.model.signature(),
-            'network': network,
-            'network_info': network_info,
-            'built_network': network._network,
-            'n_predictions': len(self.predict_at[network_idx]),
-            'network_index': network_idx,
-            'prediction_stats': prediction_stats,
-        }
-
-        return metadata
-
-    def _get_network_data(
-        self, network_idx: int
-    ) -> Callable[[PlotData], Tuple[np.ndarray, np.ndarray]]:
-        """Create a data getter function for a specific network."""
-
-        def get_XY(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
-            logger.debug(
-                f"Getting XY for network {network_idx} with model {self.network_model.signature()}"
-            )
-
-            # Ensure predictions are computed
-            if not hasattr(self, '_yhats') or self._yhats is None:
-                logger.debug(f"Computing predictions with model {self.network_model.signature()}")
-                self.compute_predictions()
-
-            assert self._x is not None
-            assert self._yhats is not None
-            assert self._gtruths is not None
-
+        # add comparison stats if ground truth available
+        if latent_gt is not None:
+            mse = float(np.mean((latent_yhat - latent_gt) ** 2))
+            prediction_stats['mse'] = mse
+            prediction_stats['rmse'] = float(np.sqrt(mse))
+            assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
-            yhat = self._yhats[network_idx]
-            gt = self._gtruths[network_idx]
-            network = self.network_model.network[network_idx].network
+            latent_x = rescaler.fwd(x)
+            self._log_stats(network_idx, prediction_stats, latent_gt, latent_yhat, latent_x)
 
-            # Calculate prediction statistics
-            _, output_pos, _, _ = get_reordered_protein_names(network)
-            prediction_stats = self._calculate_prediction_stats(yhat, gt, output_pos)
+        # store in plot data
+        pdata.metadata['prediction_stats'] = prediction_stats
 
-            # Add stats to plot data metadata
-            pdata.metadata['prediction_stats'] = prediction_stats
-
-            if self.use_output_as_input:
-                return yhat, yhat
-            return x, yhat
-
-        return get_XY
-
-    def get_data_lazy(self) -> List[LazyPlotData]:
-        """Get lazy plot data for all networks."""
-        logger.debug(f"Getting data lazily for model {self.network_model.signature()}")
-
-        plot_data_list = []
+    def _normalize_input_order(self) -> List[Optional[List[int]]]:
+        """normalize input_order to ensure it's consistent across networks"""
+        assert self.network_model is not None
+        assert isinstance(self.network_model.network, list)
 
         if self.input_order is None:
-            input_orders = [None] * len(self.network_model.network)
-        else:
-            input_orders = self.input_order
-            if len(input_orders) == 1:
-                input_orders = input_orders * len(self.network_model.network)
+            logger.debug(
+                f"input_order is None, using None for all {len(self.network_model.network)} networks"
+            )
+            return [None] * len(self.network_model.network)
 
+        if isinstance(self.input_order, list):
+            # single input order for all networks
+            if all(isinstance(x, int) for x in self.input_order):
+                logger.debug(f"using same input_order {self.input_order} for all networks")
+                return [self.input_order] * len(self.network_model.network)
+
+            if len(self.input_order) != len(self.network_model.network):
+                raise ValueError(
+                    f"input order list has {len(self.input_order)} items but there are "
+                    f"{len(self.network_model.network)} networks"
+                )
+            return self.input_order
+
+        raise ValueError(f"unexpected input_order type: {type(self.input_order)}")
+
+    def get_data_lazy(self) -> List[LazyPlotData]:
+        """get plot data in lazy evaluation mode"""
+        logger.debug(f"getting data lazily for model {self.network_model.signature()}")
+
+        plot_data_list = []
+        input_order = self._normalize_input_order()
+        logger.debug(f"normalized input_order: {input_order}")
+
+        # create plot data for each network
         for i, network in enumerate(self.network_model.network):
-            metadata = self._prepare_network_metadata(i, {})
+            metadata = self._create_network_metadata(i, network)
+            plot_data = self._extract_plot_data(i, network, input_order[i], metadata)
 
-            plot_data = pu.extract_lazy_plot_data_from_network(
-                network.network,
-                self._get_network_data(i),
-                input_order=input_orders[i],
-                metadata=metadata,
+            # add pretty input names
+            network_info = metadata['network_info']
+            pretty_inputs = make_pretty_input_names(
+                network_info['cotx'],
+                plot_data.input_names,
             )
-
-            # Add pretty input names
-            plot_data.metadata['pretty_inputs'] = make_pretty_input_names(
-                metadata['network_info']['cotx'], plot_data.input_names
-            )
+            plot_data.metadata['pretty_inputs'] = pretty_inputs
 
             plot_data_list.append(plot_data)
 
+        logger.debug(f"returning {len(plot_data_list)} plot data objects")
         return plot_data_list
 
+    def _create_network_metadata(self, network_idx: int, network) -> Dict[str, Any]:
+        """create metadata dictionary for a network"""
+        metadata = self.metadata.copy()
+
+        import biocomp.network
+
+        network_info = biocomp.network.generate_network_info(network.network)
+
+        metadata.update(
+            {
+                'source_type': 'prediction',
+                'seed': self.seed,
+                'model_signature': self.network_model.model.signature(),
+                'network': network,
+                'network_info': network_info,
+                'built_network': network.network,
+                'n_predictions': len(self.predict_at[network_idx]),
+                'network_index': network_idx,
+            }
+        )
+
+        logger.debug(f"created metadata for network {network_idx}")
+        return metadata
+
+    def _extract_plot_data(
+        self, network_idx: int, network, input_order: Optional[List[int]], metadata: Dict[str, Any]
+    ) -> LazyPlotData:
+        """extract plot data from a network"""
+        import biocomp.plotutils as pu
+
+        # create function to get data for this network
+        get_xy_fn = self._create_xy_function(network_idx)
+
+        # extract plot data
+        plot_data = pu.extract_lazy_plot_data_from_network(
+            network.network,
+            get_xy_fn,
+            input_order=input_order,
+            metadata=metadata,
+        )
+
+        logger.debug(
+            f"extracted plot data for network {network_idx}: {plot_data.input_names=}, {plot_data.output_name=}"
+        )
+        return plot_data
+
     def get_data(self) -> List[PlotData]:
-        """Get concrete plot data by evaluating lazy plot data."""
-        plot_data_list = self.get_data_lazy()
-        for plot_data in plot_data_list:
-            plot_data.set_xy()
-        return plot_data_list
+        """get fully-evaluated plot data"""
+        lazy_data = self.get_data_lazy()
+
+        # evaluate all plot data
+        for i, data in enumerate(lazy_data):
+            data.set_xy()
+
+        return lazy_data

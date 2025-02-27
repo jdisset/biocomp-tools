@@ -1,79 +1,35 @@
-## {{{                          --     imports     --
-from biocomptools.logging_config import get_logger, setup_logging
-from biocomp import utils as ut
+from pydantic import BaseModel, ConfigDict, model_validator, BeforeValidator, Field
+from typing import Optional, List, Union, Dict, Tuple, Any, Callable, TypeAlias
+import numpy as np
 import jax
-import xxhash
-import pickle
 import jax.numpy as jnp
+from jax.random import PRNGKey
+from pathlib import Path
+import pickle
+import xxhash
+from typing import Annotated
 import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
-from pathlib import Path
-import numpy as np
-from pydantic import BeforeValidator, Field, model_validator, BaseModel, ConfigDict
-from biocomp.utils import ArbitraryModel
-import biocomptools.toollib.common as cm
-import biocomptools.toollib.stackviz as sv
-
-from typing import Callable, Annotated, Optional
-from jax.random import PRNGKey
-
-from biocomptools.toollib.common import config, dict_like
 import biocomptools.toollib.models as md
 import biocomp.parameters as pr
+from biocomptools.logging_config import get_logger
+from biocomptools.toollib.common import config, dict_like
+import biocomp.utils as ut
+from tqdm import tqdm
 
 logger = get_logger(__name__)
-
-ROOT = Path(config.paths.root).expanduser().resolve()
 lib = ut.load_lib()
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-def random_split_like_tree(rng_key, target=None, treedef=None):
-    import jax
-
-    if treedef is None:
-        treedef = jax.tree_structure(target)
-    keys = jax.random.split(rng_key, treedef.num_leaves)
-    return jax.tree.unflatten(treedef, keys)
-
-
-def tree_random_normal_like(rng_key, target):
-    import jax
-
-    keys_tree = random_split_like_tree(rng_key, target)
-    return jax.tree.map(
-        lambda x, k: jax.random.normal(k, shape=x.shape),
-        target,
-        keys_tree,
-    )
-
-
-def get_shared_params(params):
-    if params is None:
-        return None
-
-    shared, _ = params.filter_by_tag(['shared'])
-    return shared
-
-
-def get_nonshared_params(params):
-    if params is None:
-        return None
-
-    _, nonshared = params.filter_by_tag(['shared'])
-    return nonshared
+NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
 
 def load_params(maybe_path):
-    import pickle
-
+    """load parameters from file or use directly if already a parameter tree"""
     if isinstance(maybe_path, pr.ParameterTree):  # already loaded
         return ut.tree_to_np(maybe_path)
 
     if isinstance(maybe_path, str):
         if maybe_path.startswith('mlflow-'):
-            # TODO: implement this
             raise NotImplementedError("mlflow loading not implemented")
         else:
             maybe_path = Path(maybe_path)
@@ -82,11 +38,39 @@ def load_params(maybe_path):
         return ut.tree_to_np(pickle.load(f))
 
 
+def get_shared_params(params):
+    """extract shared parameters from parameter tree"""
+    if params is None:
+        return None
+
+    shared, _ = params.filter_by_tag(['shared'])
+    return shared
+
+
+def get_nonshared_params(params):
+    """extract non-shared parameters from parameter tree"""
+    if params is None:
+        return None
+
+    _, nonshared = params.filter_by_tag(['shared'])
+    return nonshared
+
+
 def empty_params():
+    """create empty parameter tree"""
     return pr.ParameterTree()
 
 
-class BiocompModel(ArbitraryModel):
+class NodeSpec(BaseModel):
+    """specification for a node in the network"""
+
+    network_id: int
+    node_id: int
+
+
+class BiocompModel(ut.ArbitraryModel):
+    """model containing compute configuration, rescaler, and shared parameters"""
+
     compute_config: cmp.ComputeConfig
     rescaler: DataRescaler
     shared_params: Annotated[
@@ -96,10 +80,12 @@ class BiocompModel(ArbitraryModel):
     ] = Field(default_factory=empty_params)
 
     def save(self, path):
+        """save model to file"""
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
     def signature(self):
+        """compute unique signature for this model"""
         import base58
 
         paramspickle = pickle.dumps(self.shared_params)
@@ -110,8 +96,7 @@ class BiocompModel(ArbitraryModel):
 
     @classmethod
     def load(cls, path):
-        import pickle
-
+        """load model from file"""
         with open(path, 'rb') as f:
             m = pickle.load(f)
             assert isinstance(m, cls)
@@ -119,6 +104,7 @@ class BiocompModel(ArbitraryModel):
 
 
 def load_model(maybe_path):
+    """load model from file or use directly if already a model"""
     if isinstance(maybe_path, BiocompModel):
         # already loaded
         return maybe_path
@@ -134,39 +120,52 @@ def load_model(maybe_path):
 
 
 def make_list(x):
+    """convert single item to list if not already a list"""
     if not isinstance(x, list):
         return [x]
     return x
 
 
 class NetworkModel(BaseModel):
+    """
+    model that combines a biocomp model with networks for prediction
+
+    this class manages the compute stack, parameters, and provides methods
+    for prediction including node injection and collection
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
-    # network: Annotated[list[md.Network], BeforeValidator(make_list)]
     network: md.Network | list[md.Network]
 
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
+    _batch_apply: Optional[Callable] = None
 
     @model_validator(mode='before')
     @classmethod
     def prepare_network(cls, data):
+        """prepare network data before model initialization"""
         return data
 
     def model_post_init(self, *args, **kwargs):
+        """initialize model after validation"""
+        # ensure network is a list
         if not isinstance(self.network, list):
             self.network = [self.network]
 
+        # build networks if needed
         for n in self.network:
             if hasattr(n, 'recipe') and n.recipe is not None:
                 n.build(lib=lib, use_cache=config.paths.cache.networks)
 
+        # initialize stack and parameters
         self.build_stack()
         self.update_params()
 
     def build_stack(self):
-        # Create and build stack
+        """build compute stack from networks"""
         try:
             self._stack = cmp.ComputeStack([n._network for n in self.network])
             self._stack.build(self.model.compute_config)
@@ -174,17 +173,18 @@ class NetworkModel(BaseModel):
                 jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
             )
         except Exception as e:
-            logger.error(f"Error building stack: {e}")
+            logger.error(f"error building stack: {e}")
             raise e
 
     def update_params(self):
+        """update parameters from model and initialize local parameters"""
         assert self._stack is not None
         try:
             init_params = self._stack.init(PRNGKey(0))
         except Exception as e:
-            logger.error(f"Error initializing stack: {e}")
-            logger.error(f"Networks: {self.network}")
-            logger.error("Compute graphs:")
+            logger.error(f"error initializing stack: {e}")
+            logger.error(f"networks: {self.network}")
+            logger.error("compute graphs:")
             networks = self.network
             if not isinstance(self.network, list):
                 networks = [self.network]
@@ -195,20 +195,105 @@ class NetworkModel(BaseModel):
             self._local_params = get_nonshared_params(init_params)
             self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
         except Exception as e:
-            logger.error(f"Error updating params: {e}")
-            logger.error(f"Networks: {self.network}")
+            logger.error(f"error updating params: {e}")
+            logger.error(f"networks: {self.network}")
             raise e
 
     def signature(self):
+        """get unique signature for this model"""
         return self.model.signature()
 
     def with_model(self, model: BiocompModel) -> 'NetworkModel':
+        """create a new network model with a different biocomp model"""
+        logger.debug(f"creating new network model with model {model.signature()=}")
         new_model = self.model_copy(update={'model': model})
         new_model.update_params()
         return new_model
 
-    def predict_unscaled(self, X: np.ndarray, key=None) -> np.ndarray:
-        return self.model.rescaler.inv(self.predict(self.model.rescaler.fwd(X), key))
+    def get_node_indices(
+        self, network_id: int, node_id: int
+    ) -> Tuple[List[NdArray], List[NdArray]]:
+        """
+        get input and output indices for a virtual node in the compute stack
+
+        parameters:
+            network_id: index of the network
+            node_id: id of the node within the network
+
+        returns:
+            tuple of (input_indices, output_indices) where each is a list of arrays
+        """
+        if self._stack is None:
+            raise ValueError("stack not built")
+
+        layer_id, n_id = self._stack.node_map[(network_id, node_id)]
+        layer = self._stack.layers[layer_id]
+        node = layer.nodes[n_id]
+
+        input_indices = []
+        if layer.f_input_shapes:  # skip for input layer
+            for input_slot in range(len(layer.f_input_shapes)):
+                start_idx = self._stack.get_node_input_start_index(node, input_slot)
+                input_shape = layer.f_input_shapes[input_slot]
+                length = int(np.prod(input_shape))
+                input_indices.append(np.arange(start_idx, start_idx + length))
+
+        output_indices = []
+        for output_slot in range(len(layer.f_out_shapes)):
+            start_idx = self._stack.get_node_output_start_index(node, output_slot)
+            output_shape = layer.f_out_shapes[output_slot]
+            length = int(np.prod(output_shape))
+            output_indices.append(np.arange(start_idx, start_idx + length))
+
+        return input_indices, output_indices
+
+    def get_network_output_indices(self, network_idx: int) -> Tuple[List[NdArray], List[Any]]:
+        """
+        get output indices and shapes for a network
+
+        parameters:
+            network_idx: index of the network
+
+        returns:
+            tuple of (output_indices, output_shapes)
+        """
+        if self._stack is None:
+            raise ValueError("stack not built")
+
+        return self._stack.get_network_output_indices(network_idx)
+
+    def predict_unscaled(
+        self,
+        X: np.ndarray,
+        key=None,
+        max_batch_size=10000,
+        disable_variational: bool = True,
+        injection_points: Optional[List[NodeSpec]] = None,
+        collection_points: Optional[List[NodeSpec]] = None,
+        z_value: Union[str, float] = 'uniform',
+    ) -> np.ndarray:
+        """
+        predict but rescale input data to latent space before prediction
+        (and rescale to original range back after)
+
+        parameters: c.f. predict()
+
+        returns:
+            predictions in original range
+        """
+        logger.debug("Rescaling input data into latent space before prediction")
+        scaled_X = self.model.rescaler.fwd(X)
+        scaled_result = self.predict(
+            scaled_X,
+            key=key,
+            max_batch_size=max_batch_size,
+            disable_variational=disable_variational,
+            injection_points=injection_points,
+            collection_points=collection_points,
+            z_value=z_value,
+        )
+        scaled_yhat = self.model.rescaler.inv(scaled_result)
+        return scaled_yhat
 
     def predict(
         self,
@@ -216,49 +301,180 @@ class NetworkModel(BaseModel):
         key=None,
         max_batch_size=10000,
         disable_variational: bool = True,
-    ):
+        injection_points: Optional[List[NodeSpec]] = None,
+        collection_points: Optional[List[NodeSpec]] = None,
+        z_value: Union[str, float] = 'uniform',
+    ) -> np.ndarray:
+        """
+        make predictions using the model
+
+        parameters:
+            X: input data
+            key: random key for predictions
+            max_batch_size: maximum batch size for predictions
+            disable_variational: whether to disable variational parameters
+            injection_points: list of points to inject data
+            collection_points: list of points to collect data from
+            z_value: value for z latents, either 'uniform' or a float
+
+        returns:
+            predictions
+        """
+
         if key is None:
             key = PRNGKey(0)
         if isinstance(key, int):
             key = PRNGKey(key)
-        logger.debug(f"Making prediction with model signature: {self.signature()}")
 
-        num_z = self._params["global/number_of_quantile_variables"]
-        n_samples = X.shape[0]
-        n_batches = (n_samples + max_batch_size - 1) // max_batch_size
-        logger.debug(
-            f"Predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks. Signature: {self.signature()}"
-        )
-
-        all_yhats = []
-        from tqdm import tqdm
-
+        # prepare parameters
         params = self._params
-
         if disable_variational:
-            logger.debug("Disabling variational embeddings")
+            logger.debug("disabling variational embeddings")
             logstd = params['shared']['quantization']['logstdevs']
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
 
-        logger.debug("Saving stackviz to /tmp/stackviz.html")
-        sv.save_stackviz(self._stack, '/tmp/stackviz.html')
+        # determine injection/collection indices
+        inject_indices, collect_indices = self._prepare_injection_collection_indices(
+            injection_points, collection_points
+        )
 
+        # prepare for batched prediction
+        num_z = self._params["global/number_of_quantile_variables"]
+        n_samples = X.shape[0]
+        n_batches = (n_samples + max_batch_size - 1) // max_batch_size
+        logger.debug(
+            f"predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks. signature: {self.signature()}"
+        )
+
+        # make predictions in batches
+        all_yhats = []
         batch_keys = jax.random.split(key, n_batches)
-        for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="Predicting"):
+        for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="predicting"):
             start_idx = i * max_batch_size
             end_idx = min((i + 1) * max_batch_size, n_samples)
             batch_size = end_idx - start_idx
 
-            Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
+            # prepare z values
+            if z_value == 'uniform':
+                Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
+            else:
+                Z_batch = jnp.ones((batch_size, num_z)) * z_value
+
             keys_batch = jax.random.split(batch_key, batch_size)
 
-            yhat_batch, _ = self._batch_apply(
-                params, X[start_idx:end_idx], Z_batch, keys_batch, None, None
+            # prepare injection data if needed
+            injection_data = None
+            if inject_indices:
+                injection_data = X[start_idx:end_idx].reshape(batch_size, -1)
+
+            # apply the model
+            out, (_, fullout) = self._batch_apply(
+                params,
+                X[start_idx:end_idx],
+                Z_batch,
+                keys_batch,
+                injection_data,
+                jnp.concatenate(inject_indices) if inject_indices else None,
             )
+
+            # use appropriate output based on collection points
+            if collect_indices:
+                yhat_batch = np.asarray(fullout[:, np.concatenate(collect_indices)])
+            else:
+                yhat_batch = np.asarray(out)
 
             all_yhats.append(yhat_batch)
 
+        # combine batches
         yhat = np.concatenate(all_yhats, axis=0)
-
         return yhat
+
+    def _prepare_injection_collection_indices(
+        self,
+        injection_points: Optional[List[NodeSpec]] = None,
+        collection_points: Optional[List[NodeSpec]] = None,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """
+        prepare indices for injection and collection points
+
+        parameters:
+            injection_points: list of points to inject data
+            collection_points: list of points to collect data from
+
+        returns:
+            tuple of (inject_indices, collect_indices)
+        """
+        if injection_points is None and collection_points is None:
+            return [], []
+
+        # prepare injection indices
+        inject_indices = []
+        if injection_points:
+            for point in injection_points:
+                in_idx, _ = self.get_node_indices(point.network_id, point.node_id)
+                inject_indices.extend(in_idx)
+
+        # prepare collection indices
+        collect_indices = []
+        if collection_points:
+            for point in collection_points:
+                _, out_idx = self.get_node_indices(point.network_id, point.node_id)
+                collect_indices.extend(out_idx)
+
+        return inject_indices, collect_indices
+
+    def split_outputs_per_network(
+        self, yhat: np.ndarray, max_samples: Optional[int] = None
+    ) -> List[np.ndarray]:
+        """
+        split a stacked output into per-network outputs
+
+        parameters:
+            yhat: stacked output array
+            max_samples: maximum number of samples to include (for truncation)
+
+        returns:
+            list of per-network output arrays
+        """
+        if self._stack is None:
+            raise ValueError("stack not built")
+
+        network_outputs = []
+        output_start_id = 0
+
+        for i, _ in enumerate(self.network):
+            # get output shapes for this network
+            _, output_shapes = self._stack.get_network_output_indices(i)
+            assert isinstance(output_shapes, list)
+
+            # process each output
+            outputs = []
+            for output_shape in output_shapes:
+                nout = np.prod(output_shape)
+                output = yhat[:, output_start_id : output_start_id + nout].reshape(
+                    -1, *output_shape
+                )
+                outputs.append(output)
+                output_start_id += nout
+
+            if not all(output.shape == outputs[0].shape for output in outputs):
+                raise ValueError(
+                    f"Outputs have different shapes: {[output.shape for output in outputs]}"
+                )
+            network_output = np.concatenate(outputs, axis=1)
+
+            # truncate if needed
+            if max_samples is not None and max_samples < network_output.shape[0]:
+                network_output = network_output[:max_samples]
+
+            network_outputs.append(network_output)
+
+        return network_outputs
+
+    def visualize_stack(self, output_path='/tmp/stackviz.html'):
+        """visualize the compute stack as html"""
+        import biocomptools.toollib.stackviz as sv
+
+        sv.save_stackviz(self._stack, output_path)
+        logger.debug(f"saved stack visualization to {output_path}")

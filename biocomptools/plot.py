@@ -22,8 +22,10 @@ from dracon.deferred import DeferredNode
 from biocomp.utils import PartialFunction
 from biocomp.datautils import DataRescaler
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
-from biocomptools.toollib.datasources import DataSource, DBSource, NetworkPrediction
-# from biocomptools.toollib.networkprediction import NetworkPrediction
+from biocomptools.toollib.datasources import DataSource, DBSource
+
+from biocomptools.toollib.networkprediction import NetworkPrediction
+
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
 from biocomptools.toollib.figuremakers.uorfmatrixfigure import uORFMatrixFigure, bundle_uorf_data
