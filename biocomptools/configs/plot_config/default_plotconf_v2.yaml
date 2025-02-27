@@ -7,8 +7,6 @@
 !set_default cmap: bc_blues
 !set_default colors_grey: "#000000"
 
-
-!define print_debug: "${print('xlims: ' + str(xlims) + ', ylims: ' + str(ylims) + ', zlims: ' + str(zlims) + ', vlims: ' + str(vlims))}"
 rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
 rc_context: !include pkg:biocomptools:configs/plot_config/default_rcparams
