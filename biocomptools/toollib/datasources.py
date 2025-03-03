@@ -94,7 +94,7 @@ class DBSource(DataSource, NetworkSet):
             logger.error(f"Error building network {network.name}: {e}")
             return None
 
-        actual_network = network._network
+        actual_network = network.network
         assert isinstance(actual_network, bc.network.Network)
 
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()

@@ -30,6 +30,7 @@ class NetworkDataId(BaseModel):
         return hash((self.network_name, self.file_path))
 
     def fetch_network_and_datafile(self, session) -> Tuple[md.Network, md.DataFile]:
+        logger.debug(f"Fetching network and datafile for {self.network_name} - {self.file_path}")
         network = session.exec(
             select(md.Network)
             .where(md.Network.name == self.network_name)
@@ -38,12 +39,21 @@ class NetworkDataId(BaseModel):
                 selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
                 selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
             )
-        ).first()
+        )
+        networks = network.all()
+        if len(networks) > 1:
+            logger.error(f"Found multiple networks with name {self.network_name}. Taking first.")
+        network = networks[0] if networks else None
+
         datafile = session.exec(
             select(md.DataFile)
             .where(md.DataFile.file == self.file_path)
             .options(selectinload(md.DataFile.calibration))
-        ).first()
+        )
+        datafiles = datafile.all()
+        if len(datafiles) > 1:
+            logger.error(f"Found multiple datafiles with path {self.file_path}. Taking first.")
+        datafile = datafiles[0] if datafiles else None
 
         assert network, f"No network found for {self.network_name}"
         assert datafile, f"No datafile found for {self.file_path}"
@@ -159,7 +169,6 @@ class NetworkSelector(BaseModel):
                 msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}. Query: {query}. Ignoring."
                 logger.error(msg)
 
-
             # Filter by output name if specified
             if self.output_name is not None:
                 original_count = len(networks)
@@ -231,7 +240,7 @@ class NetworkSelector(BaseModel):
                                 continue
 
                     if not datafiles:
-                        logger.warning(f"No datafile found for recipe: {network.recipe_name}")
+                        logger.error(f"No datafile for {network.recipe_name}. Skipping")
                         continue
 
                     logger.debug(
@@ -242,7 +251,7 @@ class NetworkSelector(BaseModel):
                             network_and_data.append(
                                 NetworkDataId(network_name=network.name, file_path=datafile.file)
                             )
-                            logger.debug(f"Added network data: {network.name} - {datafile.file}")
+                            logger.debug(f"Matching data: {datafile.file}")
                         except Exception as e:
                             logger.error(
                                 f"Error creating NetworkDataId for {network.name}: {str(e)}"
@@ -253,7 +262,7 @@ class NetworkSelector(BaseModel):
                     logger.error(f"Error processing network {network.name}: {str(e)}")
                     continue
 
-            logger.info(
+            logger.debug(
                 f"Network data retrieval complete. Found {len(network_and_data)} network-data pairs"
             )
             return network_and_data
@@ -295,7 +304,11 @@ class NetworkSet(BaseModel):
         new_content = []
         for n in self.content:
             if isinstance(n, NetworkSelector):
-                new_content.extend(n.get_networkdata_ids(session))
+                logger.debug(f"Running selector: {n}")
+                ncontent = n.get_networkdata_ids(session)
+                new_content.extend(ncontent)
+                logger.debug(f"Found {len(ncontent)} matching networks")
+
             elif isinstance(n, NetworkSet):
                 # Recursively run selectors on nested NetworkSets
                 n.run_selectors(session)
@@ -313,9 +326,10 @@ class NetworkSet(BaseModel):
             try:
                 r = n.fetch_network_and_datafile(session)
             except AssertionError as e:
-                logger.error(f"Error fetching network and datafile: {e}")
+                logger.error(f"Error fetching network and datafile: {e}. Skipping.")
                 continue
             res.append(r)
+
         return res
 
     def model_dump(self, **kwargs):
@@ -419,12 +433,15 @@ class CustomFilter(NetworkFilter):
             logger.error(f"Error checking custom filter for network {network_id}: {e}")
             return False
 
+
 class CleanupFilter(NetworkFilter):
     """Filter NetworkSets based on specific cleanup values"""
+
     # - remove mismatch ERN - Recs
     # - remove splits, meaning multiple recs for same ERN
     # - anything with recombinase
     ...
+
 
 class UorfFilter(NetworkFilter):
     """Filter NetworkSets based on specific uORF value pairs"""
@@ -465,19 +482,36 @@ def build_data_manager(
     lib: PartsLibrary,
     db_session,
     path_prefix,
-    data_conf: DataConfig,
     dataset: NetworkSet,
+    data_conf: DataConfig = DEFAULT_DATA_CONFIG,
     network_cache=config.paths.cache.networks,
     data_cache=config.paths.cache.data,
 ) -> DataManager:
+    assert all(
+        [isinstance(n, NetworkDataId) for n in dataset.content]
+    ), "By now, dataset should only contain NetworkDataId objects"
+
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
     data = []
     actual_networks = []
 
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
         n.build(lib, use_cache=network_cache)
-        data.append(get_network_XY(n._network, path_prefix / f.file))
-        actual_networks.append(n._network)
+        # n.build(lib)
+        network = n._network
+        if isinstance(network, list):
+            logger.debug(
+                f"Network {n.name} contains multiple networks due to multiple valid inversion"
+            )
+        else:
+            network = [network]
+
+        for net in network:
+            data.append(get_network_XY(net, path_prefix / f.file))
+            net.metadata['data_file'] = f.file
+            net.metadata['calibration_name'] = f.calibration.name
+            net.metadata['recipe_name'] = f.recipe_name
+            actual_networks.append(net)
 
     X, Y = zip(*data)
 

@@ -334,10 +334,15 @@ class NetworkModel(BaseModel):
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
 
+        logger.debug(
+            f"predicting with injection points: {injection_points} and collection points: {collection_points}"
+        )
         # determine injection/collection indices
         inject_indices, collect_indices = self._prepare_injection_collection_indices(
             injection_points, collection_points
         )
+        logger.debug(f"inject_indices: {inject_indices}")
+        logger.debug(f"collect_indices: {collect_indices}")
 
         # prepare for batched prediction
         num_z = self._params["global/number_of_quantile_variables"]
@@ -422,7 +427,7 @@ class NetworkModel(BaseModel):
                 _, out_idx = self.get_node_indices(point.network_id, point.node_id)
                 collect_indices.extend(out_idx)
 
-        return inject_indices, collect_indices
+        return inject_indices, np.asarray(collect_indices).flatten()
 
     def split_outputs_per_network(
         self, yhat: np.ndarray, max_samples: Optional[int] = None
@@ -443,6 +448,9 @@ class NetworkModel(BaseModel):
         network_outputs = []
         output_start_id = 0
 
+        # TODO: when we use different collection points than the regular output,
+        # we can't simply split by network_output_indices. we need to figure out the
+        # shape of each output collection
         for i, _ in enumerate(self.network):
             # get output shapes for this network
             _, output_shapes = self._stack.get_network_output_indices(i)

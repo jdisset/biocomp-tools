@@ -106,16 +106,17 @@ class TrainingRun(BiocompDB, table=True):
 
 
 class Calibration(BiocompDB, table=True):
-    name: str = Field(primary_key=True)
+    fullname: str = Field(primary_key=True)
     pipeline: dict = Field(default_factory=dict, sa_column=Column(JSON))
     data_files: List["DataFile"] = Relationship(back_populates="calibration")
+    name: str
     quality: Optional[float] = 0.0
 
 
 class DataFile(BiocompDB, table=True):
     file: str = Field(primary_key=True)
     attrs: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    calibration_name: str = Field(foreign_key="calibration.name")
+    calibration_name: str = Field(foreign_key="calibration.fullname")
     recipe_name: Optional[str] = Field(foreign_key="recipe.name", default=None)
 
     priority: int = 0  # used to select the best data file for a given recipe
@@ -175,7 +176,7 @@ class Network(BiocompDB, table=True):
     def build(self, lib, use_cache=None):
         recipe = self.recipe  # should lazy load
         if recipe is None:
-            print("Recipe is None, skipping models.Network.build()")
+            logger.error(f"Recipe for network {self.name} not found. Skipping build.")
             return None
 
         recipe_networks = recipe.build_networks(
@@ -185,15 +186,21 @@ class Network(BiocompDB, table=True):
             add_to_self=False,
         )
 
+        logger.debug(
+            f"Recipe {recipe.name} yielded {len(recipe_networks)} networks: {[n.name for n in recipe_networks]}"
+        )
+
         for net in recipe_networks:
             if net.name == self.name:
+                logger.debug(f"Network {net.name} found after building recipe {recipe.name}")
                 self._network = net._network
                 return self._network
 
-        raise ValueError(
-            f"""Network {self.name} not found when built from recipe {self.recipe.name}. 
-            Available networks: {recipe_networks}"""
-        )
+        all_net_names = '\n   - '.join([net.name for net in recipe_networks])
+        msg = f"""Network "{self.name}" not found after building recipe "{self.recipe.name}". 
+            Recipe yielded the following networks: {all_net_names}"""
+        logger.error(msg)
+        raise ValueError(msg)
 
     def title(self):
         if self._network is None:
@@ -282,7 +289,7 @@ class Recipe(BiocompDB, table=True):
         we build directly from the recipe content, without parsing the recipe file.
         """
 
-        logger.debug(f"Building networks from recipe {self.name}")
+        logger.debug(f"Building recipe {self.name}")
 
         lib = lib or ut.load_lib()
         assert lib is not None
@@ -305,7 +312,8 @@ class Recipe(BiocompDB, table=True):
             error_handler=error_handler,
         )
         networks = networks if isinstance(networks, list) else [networks]
-        logger.debug(f"Built networks: {networks}")
+        for net in networks:
+            net.metadata['recipe_name'] = self.name
 
         if errors:
             self.errors = "\n".join(errors)
@@ -316,12 +324,14 @@ class Recipe(BiocompDB, table=True):
 
         for net in networks:
             network_info = bc.network.generate_network_info(net)
+            network_info['recipe_name'] = self.name
             unique_name = f"{self.name}_{'-'.join(network_info['markers'])}"
             network = Network(
                 name=unique_name,
                 recipe_name=self.name,
                 network_info=network_info,
             )
+            net.name = unique_name
             network._network = net
             network_models.append(network)
 

@@ -196,11 +196,12 @@ class BiocompDBUpdater:
                             self.logger.debug(f"Marked as favorite: {datafile}")
 
                         namehash = data.attrs['calibration']['namehash']
-                        calib_name = f"{xp.name}_{namehash}"
+                        calib_fullname = f"{xp.name}_{namehash}"
 
                         if namehash not in calibrations:
                             calibrations[namehash] = md.Calibration(
-                                name=calib_name,
+                                fullname=calib_fullname,
+                                name=namehash,
                                 pipeline=data.attrs['calibration']['pipeline'],
                             )
                             calibrations[namehash].data_files = []
@@ -208,7 +209,7 @@ class BiocompDBUpdater:
                         dfile = md.DataFile(
                             file=datafile.relative_to(self.base_dir).as_posix(),
                             attrs=data.attrs,
-                            calibration_name=calib_name,
+                            calibration_name=calib_fullname,
                             priority=priority,
                         )
 
