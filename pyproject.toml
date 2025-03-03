@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "biocomptools"
-version = "0.2.0"
+version = "0.2.1"
 description = "A set of tools and utils for the biocompiler."
 authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
@@ -24,8 +24,8 @@ dependencies = [
 
 
 [project.scripts]
-biocomp-plotdata = "biocomptools.plot_data:main" # old script, keeping for now
-biocomp-plot= "biocomptools.plot:main" # new plot tool
+biocomp-plot= "biocomptools.plot:main"
 biocomp-makevideo = "biocomptools.make_video:main"
 biocomp-training = "biocomptools.run_training:main"
+biocomp-data-test = "biocomptools.test_dataset:main"
 
