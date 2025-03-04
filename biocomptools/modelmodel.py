@@ -334,8 +334,6 @@ class NetworkModel(BaseModel):
         collect_in_indices, collect_out_indices = self.prepare_collection_indices(collection_points)
         logger.debug(f"collect_in_indices: {collect_in_indices}")
         logger.debug(f"collect_out_indices: {collect_out_indices}")
-        print(f"collect_in_indices: {collect_in_indices}")
-        print(f"collect_out_indices: {collect_out_indices}")
 
         # prepare for batched prediction
         num_z = self._params["global/number_of_quantile_variables"]
@@ -388,7 +386,6 @@ class NetworkModel(BaseModel):
                 np.concatenate(collections_x, axis=0),
                 np.concatenate(collections_y, axis=0),
             )
-            print(f"collections: {collections}")
         else:
             collections = (None, None)
 

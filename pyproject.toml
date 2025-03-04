@@ -20,6 +20,7 @@ dependencies = [
 	"gitpython",
 	"mlflow",
 	"rich",
+	"plotext",
 ]
 
 

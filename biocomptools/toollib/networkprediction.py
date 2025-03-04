@@ -265,7 +265,6 @@ class NetworkPrediction(DataSource):
 
             # compute predictions if not already computed
             if not hasattr(self, '_collection_in') or self._collection_in is None:
-                print("computing all network predictions")
                 self.compute_all_network_predictions()
 
             if self._collection_in is None or self._collection_out is None:
@@ -280,7 +279,6 @@ class NetworkPrediction(DataSource):
             y = all_y[:, 0:1]
 
             logger.debug(f"x shape: {x.shape}, y shape: {y.shape}, all_y shape: {all_y.shape}")
-            print(f"x shape: {x.shape}, y shape: {y.shape}, all_y shape: {all_y.shape}")
 
             pdata.metadata['full_y'] = all_y
 
@@ -550,9 +548,6 @@ class NetworkPrediction(DataSource):
 
             input_dim = self._collection_input_offsets[i + 1] - self._collection_input_offsets[i]
 
-            print(f"input_dim: {input_dim}")
-            print(f"collection_input_offsets: {self._collection_input_offsets}")
-            print(f"collection_output_offsets: {self._collection_output_offsets}")
 
             # create function to get data for this collection point
             get_xy_fn = self._create_collection_xy_function(
