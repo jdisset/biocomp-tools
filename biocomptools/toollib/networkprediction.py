@@ -58,8 +58,7 @@ class NetworkPrediction(DataSource):
         BeforeValidator(validate_ground_truth),
     ] = None
 
-    # node injection and collection capabilities
-    injection_points: Optional[List[NodeSpec]] = None
+    # node collection capabilities
     collection_points: Optional[List[NodeSpec]] = None
 
     # prediction control parameters
@@ -69,12 +68,18 @@ class NetworkPrediction(DataSource):
     z_value: Union[Literal['uniform'], float] = 'uniform'
     disable_variational: bool = True
 
+    already_latent: bool = False
+
     # internal state
     _yhats: Optional[List[np.ndarray]] = None
     _x: Optional[List[np.ndarray]] = None
     _gtruths: Optional[List[Optional[np.ndarray]]] = None
     _aligned_x: Optional[List[np.ndarray]] = None
     _aligned_ground_truth: Optional[List[Optional[np.ndarray]]] = None
+    _collection_in: Optional[np.ndarray] = None
+    _collection_out: Optional[np.ndarray] = None
+    _collection_input_offsets: Optional[List[int]] = None
+    _collection_output_offsets: Optional[List[int]] = None
 
     def model_post_init(self, *args, **kwargs):
         """initialize the model after validation"""
@@ -185,6 +190,24 @@ class NetworkPrediction(DataSource):
         )
         return new
 
+    def _compute_collection_indices(self):
+        """compute index offsets for each collection point"""
+        input_offsets = [0]
+        output_offsets = [0]
+
+        for point in self.collection_points:
+            input_indices, output_indices = self.network_model.get_node_indices(
+                point.network_id, point.node_id
+            )
+
+            total_input_indices = sum(len(idx) for idx in input_indices)
+            total_output_indices = sum(len(idx) for idx in output_indices)
+
+            input_offsets.append(input_offsets[-1] + total_input_indices)
+            output_offsets.append(output_offsets[-1] + total_output_indices)
+
+        return input_offsets, output_offsets
+
     def compute_all_network_predictions(self):
         """compute predictions for all networks"""
         logger.debug(f"computing predictions with model {self.network_model.signature()}")
@@ -199,23 +222,71 @@ class NetworkPrediction(DataSource):
         effective_max_evals = len(self._aligned_x[0])
         logger.debug(f"effective_max_evals: {effective_max_evals}")
 
-        stacked_yhats = self.network_model.predict_unscaled(
+        predict_f = (
+            self.network_model.predict
+            if self.already_latent
+            else self.network_model.predict_unscaled
+        )
+
+        stacked_yhats, collection_values = predict_f(
             stacked_x,
             key=self.seed,
-            disable_variational=self.disable_variational,
-            injection_points=self.injection_points,
             collection_points=self.collection_points,
             z_value=self.z_value,
+            disable_variational=self.disable_variational,
         )
-        logger.debug(f"stacked_yhats shape: {stacked_yhats.shape}")
+
+        self._collection_in, self._collection_out = collection_values
+
+        if self.collection_points and self._collection_in is not None:
+            self._collection_input_offsets, self._collection_output_offsets = (
+                self._compute_collection_indices()
+            )
 
         # split the outputs by network
         network_outputs = self.network_model.split_outputs_per_network(
             stacked_yhats, effective_max_evals
         )
-        logger.debug(f"network_outputs shapes: {[out.shape for out in network_outputs]}")
 
         self._process_prediction_results(network_outputs, effective_max_evals)
+
+    def _create_collection_xy_function(
+        self,
+        collection_idx: int,
+        input_start: int,
+        input_end: int,
+        output_start: int,
+        output_end: int,
+    ) -> Callable[[PlotData], Tuple[np.ndarray, np.ndarray]]:
+        """create a function to get x and y data for a specific collection point"""
+
+        def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
+            logger.debug(f"getting xy for collection point {collection_idx}")
+
+            # compute predictions if not already computed
+            if not hasattr(self, '_collection_in') or self._collection_in is None:
+                print("computing all network predictions")
+                self.compute_all_network_predictions()
+
+            if self._collection_in is None or self._collection_out is None:
+                raise ValueError("No collection data available")
+
+            # extract the specific collection point data
+            x = self._collection_in[:, input_start:input_end]
+
+            all_y = self._collection_out[:, output_start:output_end]
+
+            # for compatibility with PlotData, we need to pick just one column from y
+            y = all_y[:, 0:1]
+
+            logger.debug(f"x shape: {x.shape}, y shape: {y.shape}, all_y shape: {all_y.shape}")
+            print(f"x shape: {x.shape}, y shape: {y.shape}, all_y shape: {all_y.shape}")
+
+            pdata.metadata['full_y'] = all_y
+
+            return x, y
+
+        return get_xy
 
     def _process_prediction_results(self, network_outputs: List[np.ndarray], max_evals: int):
         """process and store prediction results"""
@@ -422,6 +493,11 @@ class NetworkPrediction(DataSource):
         """get plot data in lazy evaluation mode"""
         logger.debug(f"getting data lazily for model {self.network_model.signature()}")
 
+        # handle collection points if provided
+        if self.collection_points is not None and len(self.collection_points) > 0:
+            return self._get_collection_data_lazy()
+
+        # otherwise, continue with normal network data
         plot_data_list = []
         input_order = self._normalize_input_order()
         logger.debug(f"normalized input_order: {input_order}")
@@ -431,7 +507,6 @@ class NetworkPrediction(DataSource):
             metadata = self._create_network_metadata(i, network)
             plot_data = self._extract_plot_data(i, network, input_order[i], metadata)
 
-            # add pretty input names
             network_info = metadata['network_info']
             pretty_inputs = make_pretty_input_names(
                 network_info['cotx'],
@@ -442,6 +517,69 @@ class NetworkPrediction(DataSource):
             plot_data_list.append(plot_data)
 
         logger.debug(f"returning {len(plot_data_list)} plot data objects")
+        return plot_data_list
+
+    def _get_collection_data_lazy(self) -> List[LazyPlotData]:
+        """get plot data for collection points in lazy evaluation mode"""
+        logger.debug(f"getting collection data lazily for model {self.network_model.signature()}")
+
+        plot_data_list = []
+
+        # compute index offsets for each collection point if needed
+        if not hasattr(self, '_collection_input_offsets') or self._collection_input_offsets is None:
+            if not hasattr(self, '_collection_in') or self._collection_in is None:
+                self.compute_all_network_predictions()
+
+        if self._collection_in is None or self._collection_out is None:
+            logger.warning("No collection data available, returning empty list")
+            return []
+
+        # create plot data for each collection point
+        for i, collection_point in enumerate(self.collection_points):
+            metadata = {
+                'source_type': 'collection',
+                'seed': self.seed,
+                'model_signature': self.network_model.model.signature(),
+                'collection_point_index': i,
+                'network_id': collection_point.network_id,
+                'node_id': collection_point.node_id,
+            }
+
+            assert isinstance(self._collection_input_offsets, list)
+            assert isinstance(self._collection_output_offsets, list)
+
+            input_dim = self._collection_input_offsets[i + 1] - self._collection_input_offsets[i]
+
+            print(f"input_dim: {input_dim}")
+            print(f"collection_input_offsets: {self._collection_input_offsets}")
+            print(f"collection_output_offsets: {self._collection_output_offsets}")
+
+            # create function to get data for this collection point
+            get_xy_fn = self._create_collection_xy_function(
+                i,
+                self._collection_input_offsets[i],
+                self._collection_input_offsets[i + 1],
+                self._collection_output_offsets[i],
+                self._collection_output_offsets[i + 1],
+            )
+
+            # create plot data with placeholder input and output names
+            input_names = [
+                f"node_{collection_point.network_id}_{collection_point.node_id}_{i}"
+                for i in range(input_dim)
+            ]
+            output_name = f"node_{collection_point.network_id}_{collection_point.node_id}"
+
+            plot_data = LazyPlotData(
+                get_xy=get_xy_fn,
+                input_names=input_names,
+                output_name=output_name,
+                metadata=metadata,
+            )
+
+            plot_data_list.append(plot_data)
+
+        logger.debug(f"returning {len(plot_data_list)} collection plot data objects")
         return plot_data_list
 
     def _create_network_metadata(self, network_idx: int, network) -> Dict[str, Any]:

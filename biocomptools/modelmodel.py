@@ -131,7 +131,7 @@ class NetworkModel(BaseModel):
     model that combines a biocomp model with networks for prediction
 
     this class manages the compute stack, parameters, and provides methods
-    for prediction including node injection and collection
+    for prediction including node collection points
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
@@ -268,7 +268,6 @@ class NetworkModel(BaseModel):
         key=None,
         max_batch_size=10000,
         disable_variational: bool = True,
-        injection_points: Optional[List[NodeSpec]] = None,
         collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
     ) -> np.ndarray:
@@ -283,17 +282,16 @@ class NetworkModel(BaseModel):
         """
         logger.debug("Rescaling input data into latent space before prediction")
         scaled_X = self.model.rescaler.fwd(X)
-        scaled_result = self.predict(
+        scaled_result, collections = self.predict(
             scaled_X,
             key=key,
             max_batch_size=max_batch_size,
             disable_variational=disable_variational,
-            injection_points=injection_points,
             collection_points=collection_points,
             z_value=z_value,
         )
         scaled_yhat = self.model.rescaler.inv(scaled_result)
-        return scaled_yhat
+        return scaled_yhat, collections
 
     def predict(
         self,
@@ -301,7 +299,6 @@ class NetworkModel(BaseModel):
         key=None,
         max_batch_size=10000,
         disable_variational: bool = True,
-        injection_points: Optional[List[NodeSpec]] = None,
         collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
     ) -> np.ndarray:
@@ -313,7 +310,6 @@ class NetworkModel(BaseModel):
             key: random key for predictions
             max_batch_size: maximum batch size for predictions
             disable_variational: whether to disable variational parameters
-            injection_points: list of points to inject data
             collection_points: list of points to collect data from
             z_value: value for z latents, either 'uniform' or a float
 
@@ -334,15 +330,12 @@ class NetworkModel(BaseModel):
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
 
-        logger.debug(
-            f"predicting with injection points: {injection_points} and collection points: {collection_points}"
-        )
-        # determine injection/collection indices
-        inject_indices, collect_indices = self._prepare_injection_collection_indices(
-            injection_points, collection_points
-        )
-        logger.debug(f"inject_indices: {inject_indices}")
-        logger.debug(f"collect_indices: {collect_indices}")
+        # determine collection indices
+        collect_in_indices, collect_out_indices = self.prepare_collection_indices(collection_points)
+        logger.debug(f"collect_in_indices: {collect_in_indices}")
+        logger.debug(f"collect_out_indices: {collect_out_indices}")
+        print(f"collect_in_indices: {collect_in_indices}")
+        print(f"collect_out_indices: {collect_out_indices}")
 
         # prepare for batched prediction
         num_z = self._params["global/number_of_quantile_variables"]
@@ -354,13 +347,14 @@ class NetworkModel(BaseModel):
 
         # make predictions in batches
         all_yhats = []
+        collections_x = []
+        collections_y = []
         batch_keys = jax.random.split(key, n_batches)
         for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="predicting"):
             start_idx = i * max_batch_size
             end_idx = min((i + 1) * max_batch_size, n_samples)
             batch_size = end_idx - start_idx
 
-            # prepare z values
             if z_value == 'uniform':
                 Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
             else:
@@ -368,66 +362,68 @@ class NetworkModel(BaseModel):
 
             keys_batch = jax.random.split(batch_key, batch_size)
 
-            # prepare injection data if needed
-            injection_data = None
-            if inject_indices:
-                injection_data = X[start_idx:end_idx].reshape(batch_size, -1)
-
-            # apply the model
             out, (_, fullout) = self._batch_apply(
                 params,
                 X[start_idx:end_idx],
                 Z_batch,
                 keys_batch,
-                injection_data,
-                jnp.concatenate(inject_indices) if inject_indices else None,
+                None,
+                None,
             )
 
-            # use appropriate output based on collection points
-            if collect_indices:
-                yhat_batch = np.asarray(fullout[:, np.concatenate(collect_indices)])
-            else:
-                yhat_batch = np.asarray(out)
+            if len(collect_out_indices) > 0:
+                collections_y_batch = np.asarray(fullout[:, collect_out_indices])
+                collections_x_batch = np.asarray(fullout[:, collect_in_indices])
+                collections_x.append(collections_x_batch)
+                collections_y.append(collections_y_batch)
 
+            yhat_batch = np.asarray(out)
             all_yhats.append(yhat_batch)
 
         # combine batches
         yhat = np.concatenate(all_yhats, axis=0)
-        return yhat
 
-    def _prepare_injection_collection_indices(
+        if len(collections_x) > 0:
+            collections = (
+                np.concatenate(collections_x, axis=0),
+                np.concatenate(collections_y, axis=0),
+            )
+            print(f"collections: {collections}")
+        else:
+            collections = (None, None)
+
+        return yhat, collections
+
+    def prepare_collection_indices(
         self,
-        injection_points: Optional[List[NodeSpec]] = None,
         collection_points: Optional[List[NodeSpec]] = None,
-    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        prepare indices for injection and collection points
+        prepare indices for collection points
 
         parameters:
-            injection_points: list of points to inject data
             collection_points: list of points to collect data from
 
         returns:
-            tuple of (inject_indices, collect_indices)
+            tuple of (collect_in_indices, collect_out_indices)
         """
-        if injection_points is None and collection_points is None:
+        if collection_points is None:
             return [], []
 
-        # prepare injection indices
-        inject_indices = []
-        if injection_points:
-            for point in injection_points:
-                in_idx, _ = self.get_node_indices(point.network_id, point.node_id)
-                inject_indices.extend(in_idx)
-
-        # prepare collection indices
-        collect_indices = []
+        collect_out_indices = []
+        collect_in_indices = []
         if collection_points:
             for point in collection_points:
-                _, out_idx = self.get_node_indices(point.network_id, point.node_id)
-                collect_indices.extend(out_idx)
+                collect_in_idx, collect_out_idx = self.get_node_indices(
+                    point.network_id, point.node_id
+                )
+                collect_in_indices.extend(collect_in_idx)
+                collect_out_indices.extend(collect_out_idx)
 
-        return inject_indices, np.asarray(collect_indices).flatten()
+        return (
+            np.asarray(collect_in_indices).flatten(),
+            np.asarray(collect_out_indices).flatten(),
+        )
 
     def split_outputs_per_network(
         self, yhat: np.ndarray, max_samples: Optional[int] = None
