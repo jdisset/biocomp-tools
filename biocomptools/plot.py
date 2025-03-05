@@ -78,6 +78,12 @@ DEFAULT_TYPES = [
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+def copy_pickleable(obj):
+    import ray.cloudpickle as pickle
+
+    return pickle.loads(pickle.dumps(obj))
+
+
 def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
@@ -94,10 +100,15 @@ def _make_figure(figure: DeferredNode[Figure], i: int, total: int, **kw):
         logger.debug(f"Making figure {i}/{total}")
         # f = figure.construct(deferred_paths=['/figures.*.plot_tasks.*'])
         # f = figure.construct(deferred_paths=['/plot_tasks.*'])
+
         f = figure.construct()
 
         if dict_like(f):
+            logger.debug(f"Figure {i}/{total} is a dict")
             f = Figure(**f)  # type: ignore
+
+        assert isinstance(f, Figure), f"Expected Figure, got {type(f)}"
+
         f.run(**kw)
     except Exception as e:
         logger.error(f"Error making figure: {e}")
@@ -130,6 +141,7 @@ class PlotJob(LazyDraconModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
     skip_existing: Annotated[bool, Arg(help='Overwrite existing figures')] = False
+    enable_ray: Annotated[bool, Arg(help='Enable Ray for parallel processing')] = True
 
     def run(self):
         self._overwrite = not self.skip_existing
@@ -141,10 +153,11 @@ class PlotJob(LazyDraconModel):
             return
 
         # Single figure or single worker case
-        if total_figures == 1 or self.nworkers <= 1:
+        if total_figures == 1 or self.nworkers <= 1 or not self.enable_ray:
             logger.debug("Running in single-threaded mode")
             for i, fig in enumerate(self.figures):
-                _make_figure(fig, i + 1, total_figures, overwrite=self._overwrite)
+                f = copy_pickleable(fig)
+                _make_figure(f, i + 1, total_figures, overwrite=self._overwrite)
             return
 
         if not ray.is_initialized():

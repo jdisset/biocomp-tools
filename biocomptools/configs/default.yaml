@@ -68,7 +68,7 @@ logging:
 
   levels:
     biocomptools.run_training: INFO
-    biocomptools.toollib.datasources: DEBUG
+    # biocomptools.toollib.datasources: DEBUG
     # biocomptools.toollib.networkselector: DEBUG
     # biocomptools.toollib.networkprediction: DEBUG
     # biocomptools.modelmodel: DEBUG

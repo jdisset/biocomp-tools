@@ -9,7 +9,7 @@ import biocomptools.toollib.models as md
 import biocomp.plotutils as pu
 from pathlib import Path
 
-from typing import Optional, List, Dict, Tuple, Union, Literal, TypeVar, TypeAlias, Annotated
+from typing import Optional, List, Dict, Tuple, Union, Literal, TypeVar, TypeAlias, Annotated, Any
 from pydantic import Field, ConfigDict, BaseModel, BeforeValidator
 import numpy as np
 import matplotlib as mpl
@@ -50,6 +50,7 @@ class InnerNodesFigureSpec(FigureSpec):
     output_file: Optional[str] = 'inner_nodes.png'
     layout: FigureLayout = Field(default_factory=RowSubFigureLayout)
     dpi: int = 200
+    title_kwargs: Dict[str, Any] = {'fontsize': 16, 'fontweight': 'bold', 'y': 1.05}
 
     def save_figure(self, figax: FigAx) -> None:
         assert self.output_file is not None
@@ -346,7 +347,8 @@ class InnerNodesFigure(Figure):
                     spine.set_color('gray')
                 ax.tick_params(width=0.8, length=4, color='gray')
 
-            row1_fig.subplots_adjust(wspace=self.wspace, right=0.9)
+            wspace = self.figure_spec.layout.wspace
+            row1_fig.subplots_adjust(wspace=wspace, right=0.9)
             if sc is not None:
                 cbar_ax = row1_fig.add_subplot(row1_gs[0, num_ern_to_show])
                 cbar = plt.colorbar(sc, cax=cbar_ax)
@@ -581,8 +583,9 @@ class InnerNodesFigure(Figure):
                 spine.set_color('gray')
             ax_uorf_emb.tick_params(width=0.8, length=4, color='gray')
 
-            row1_fig.subplots_adjust(wspace=self.wspace, right=0.9)
-            row2_fig.subplots_adjust(wspace=self.wspace, right=0.9)
+            wspace = self.figure_spec.layout.wspace
+            row1_fig.subplots_adjust(wspace=wspace, right=0.9)
+            row2_fig.subplots_adjust(wspace=wspace, right=0.9)
 
             return fig
 

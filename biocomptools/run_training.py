@@ -139,6 +139,7 @@ class TrainingProgram(BaseModel):
         """Lazy-load the database engine when needed (otherwise unpicklable)."""
         from biocomptools.toollib.models import get_biocompdb_sqlite_engine
         from biocomptools.toollib.common import config
+
         _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
         return _db_engine
 
@@ -168,10 +169,7 @@ class TrainingProgram(BaseModel):
             self.validation_set.run_selectors(session)
         self.gen_metadata()
 
-        self._save_dir = make_unique_dir(
-            Path(self.base_dir) / self.experiment_name,
-            # prefix='__running__',
-        )
+        self._save_dir = make_unique_dir(Path(self.base_dir) / self.experiment_name)
 
         self._run_name = self._save_dir.name
 
