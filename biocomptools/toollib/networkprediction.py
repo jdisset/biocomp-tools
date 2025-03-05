@@ -548,7 +548,6 @@ class NetworkPrediction(DataSource):
 
             input_dim = self._collection_input_offsets[i + 1] - self._collection_input_offsets[i]
 
-
             # create function to get data for this collection point
             get_xy_fn = self._create_collection_xy_function(
                 i,
@@ -592,7 +591,6 @@ class NetworkPrediction(DataSource):
                 'model_signature': self.network_model.model.signature(),
                 'network': network,
                 'network_info': network_info,
-                'built_network': network.network,
                 'n_predictions': len(self.predict_at[network_idx]),
                 'network_index': network_idx,
             }

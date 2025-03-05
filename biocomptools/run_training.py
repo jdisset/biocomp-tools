@@ -135,6 +135,15 @@ class TrainingProgram(BaseModel):
     _run_name: Optional[str] = None
 
     @property
+    def _engine(self):
+        """Lazy-load the database engine when needed (otherwise unpicklable)."""
+        from biocomptools.toollib.models import get_biocompdb_sqlite_engine
+        from biocomptools.toollib.common import config
+        _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
+        return _db_engine
+
+    # Then update db_session to use this property
+    @property
     def db_session(self):
         return Session(self._engine)
 
@@ -150,7 +159,7 @@ class TrainingProgram(BaseModel):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self._lib = load_lib()
-        self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
+        # self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
 
         self.base_dir = str(Path(self.base_dir).expanduser().resolve())
 
@@ -197,13 +206,7 @@ class TrainingProgram(BaseModel):
             'dracon hash': hashes.get('dracon', 'unknown'),
         }
 
-    def run(self):
-        # Prepare output directory
-        self._training_dir = self._save_dir / 'training'
-        self._training_dir.mkdir(exist_ok=True, parents=True)
-        with open(self._training_dir / 'training_program_dump.yaml', 'w') as f:
-            f.write(self._yamldump)
-
+    def _build_dman(self):
         # Build data manager from data_conf
         self._training_dman = build_data_manager(
             lib=self.parts_library,
@@ -212,6 +215,15 @@ class TrainingProgram(BaseModel):
             data_conf=self.data_conf,
             dataset=self.training_set,
         )
+
+    def run(self):
+        # Prepare output directory
+        self._training_dir = self._save_dir / 'training'
+        self._training_dir.mkdir(exist_ok=True, parents=True)
+        with open(self._training_dir / 'training_program_dump.yaml', 'w') as f:
+            f.write(self._yamldump)
+
+        self._build_dman()
 
         # Initialize loggers
         logger.debug(

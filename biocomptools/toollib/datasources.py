@@ -75,9 +75,17 @@ class DBSource(DataSource, NetworkSet):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self._lib = load_lib()
-        self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
-        with Session(self._engine) as session:
+        with self.db_session as session:
             self.run_selectors(session)
+
+    @property
+    def _engine(self):
+        """Lazy-load the database engine when needed (otherwise unpicklable)."""
+        from biocomptools.toollib.models import get_biocompdb_sqlite_engine
+        from biocomptools.toollib.common import config
+
+        _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
+        return _db_engine
 
     @property
     def db_session(self):
@@ -100,7 +108,6 @@ class DBSource(DataSource, NetworkSet):
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
         metadata = self.metadata
         metadata['network'] = network
-        metadata['built_network'] = actual_network
         metadata['network_info'] = network.network_info
         metadata['source_type'] = 'DB'
 

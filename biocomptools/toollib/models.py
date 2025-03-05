@@ -219,6 +219,28 @@ class Network(BiocompDB, table=True):
 
         return titlestr
 
+    def __getstate__(self):
+        """Return state values to be pickled."""
+        clean_state = {}
+
+        for key, value in self.__dict__.items():
+            if key in ('_sa_instance_state', '_network'):
+                continue
+            if key in ('recipe', 'collections', 'predictions'):
+                continue
+            if key.startswith('_') and 'network' in key.lower():
+                continue
+
+            clean_state[key] = value
+
+        return clean_state
+
+    def __setstate__(self, state):
+        """Restore state from the unpickled state values."""
+        self.__dict__.update(state)
+
+        self._network = None
+
 
 class Recipe(BiocompDB, table=True):
     name: str = Field(primary_key=True)
