@@ -26,11 +26,11 @@ NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
 
 class RowSubFigureLayout(FigureLayout):
-    figsize: Tuple[int, int] = (16, 8)
+    figsize: Tuple[int, int] = (20, 10)
     nrows: int = 2
     ncols: int = 1
-    hspace: float = 0.0
-    wspace: float = 0.2
+    hspace: float = 0.4
+    wspace: float = 0.4
     height_ratios: List[float] = [1.25, 1]
 
     def make_figure(self):
@@ -49,7 +49,7 @@ class InnerNodesFigureSpec(FigureSpec):
     title: Optional[str] = 'Inner Nodes and Embeddings'
     output_file: Optional[str] = 'inner_nodes.png'
     layout: FigureLayout = Field(default_factory=RowSubFigureLayout)
-    dpi: int = 300
+    dpi: int = 200
 
     def save_figure(self, figax: FigAx) -> None:
         assert self.output_file is not None
@@ -70,8 +70,6 @@ class InnerNodesFigure(Figure):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     n_samples: int = 150000
     figure_spec: FigureSpec = Field(default_factory=InnerNodesFigureSpec)
-    wspace: float = 0.4
-    hspace: float = 0.4
 
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
 
