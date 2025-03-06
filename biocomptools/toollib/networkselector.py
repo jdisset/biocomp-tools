@@ -11,7 +11,7 @@ import biocomptools.toollib.models as md
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
-
+from biocomp.utils import load_lib
 
 logger = get_logger(__name__)
 
@@ -88,7 +88,7 @@ class NetworkSelector(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
-        validate_default=True,
+        # validate_default=True,
     )
 
     experiment_name: Optional[str | Regex] = None
@@ -284,7 +284,7 @@ class NetworkSet(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
-        validate_default=True,
+        # validate_default=True,
     )
 
     @model_validator(mode='before')
@@ -435,12 +435,123 @@ class CustomFilter(NetworkFilter):
 
 
 class CleanupFilter(NetworkFilter):
-    """Filter NetworkSets based on specific cleanup values"""
+    """General cleanup. Remove networs with:
+    - multiple ERN rec
+    - missing complementary ERN parts
+    - recombinases
+    """
 
-    # - remove mismatch ERN - Recs
-    # - remove splits, meaning multiple recs for same ERN
-    # - anything with recombinase
-    ...
+    def _find_twice_same_rec(self, net_info, lib):
+        appears_twice = []
+        all_parts = net_info['all_parts']
+        for i, p1 in enumerate(all_parts):
+            for pname, pcat in p1.items():
+                if pcat == 'ERN_recog_site_5p':
+                    # make sure this part doesn't appear in any other TU
+                    for j, p2 in enumerate(all_parts):
+                        if i == j:
+                            continue
+                        if pname in p2:
+                            if pname not in appears_twice:
+                                appears_twice.append(pname)
+                            break
+        return appears_twice
+
+    def _find_missing_complementary_parts(self, net_info, lib):
+        missing = {}
+        all_parts = net_info['all_parts']
+
+        def find_missing_part(part_name, part_col, complementary_col, valid_types=None):
+            if valid_types is None:
+                valid_types = ['ERN']
+
+            rows = lib.sequestrons[part_col].eq(part_name) & lib.sequestrons.type.isin(valid_types)
+            if rows.any():
+                complementaries = lib.sequestrons[rows][complementary_col].values
+                found = False
+                for j, tp2 in enumerate(all_parts):
+                    if any([p in tp2 for p in complementaries]):
+                        found = True
+                        break
+                if not found:
+                    missing[part_name] = complementaries.tolist()
+
+        for tp in all_parts:
+            parts = set(tp.keys())
+            for p in parts:
+                find_missing_part(p, 'positive_part', 'negative_part')
+                find_missing_part(p, 'negative_part', 'positive_part')
+
+        return missing
+
+    def _find_invalid_sequestron_types(self, net_info, lib, valid_types=None):
+        invalid_pairs = []
+        if valid_types is None:
+            valid_types = ['ERN']
+        invalid_types = set(lib.sequestrons.type.unique()) - set(valid_types)
+        invalid_rows = lib.sequestrons.type.isin(invalid_types)
+        invalid_parts = []
+        for _, row in lib.sequestrons[invalid_rows].iterrows():
+            involved_parts = set([row.positive_part, row.negative_part])
+            invalid_parts.append(involved_parts)
+        all_parts = net_info['all_parts']
+        all_parts = set([p for tp in all_parts for p in tp.keys()])
+        for ip in invalid_parts:
+            if ip.issubset(all_parts):
+                invalid_pairs.append(ip)
+        return invalid_pairs
+
+    def _find_invalid_part_categories(self, net_info, lib, invalid_categories=None):
+        invalid_parts = []
+        if invalid_categories is None:
+            invalid_categories = [
+                'inverted_seq',
+                'rcb_rec_5p',
+                'rcb_rec_3p',
+                'recombinase_bwd',
+                'recombinase_fwd',
+                'ERN_recog_site_3p',
+            ]
+        all_parts = net_info['all_parts']
+        for tp in all_parts:
+            for p, c in tp.items():
+                if c in invalid_categories:
+                    invalid_parts.append(p)
+        return invalid_parts
+
+    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+        network, _ = network_id.fetch_network_and_datafile(session)
+        net_info = network.network_info
+        lib = load_lib()
+        twice_same_rec = self._find_twice_same_rec(net_info, lib)
+        if twice_same_rec:
+            logger.warning(
+                f"Network {network_id} has multiple ERN recognition sites: {twice_same_rec}. Skipping."
+            )
+            return False
+
+        missing_parts = self._find_missing_complementary_parts(net_info, lib)
+        if missing_parts:
+            logger.warning(
+                f"Network {network_id} has missing complementary parts: {missing_parts}. Skipping."
+            )
+            return False
+
+        invalid_types = self._find_invalid_sequestron_types(net_info, lib)
+        if invalid_types:
+            logger.warning(
+                f"Network {network_id} has invalid sequestron types: {invalid_types}. Skipping."
+            )
+            return False
+
+        invalid_categories = self._find_invalid_part_categories(net_info, lib)
+        if invalid_categories:
+            logger.warning(
+                f"Network {network_id} has parts from invalid categories: {invalid_categories}. Skipping."
+            )
+            return False
+
+        return True
 
 
 class UorfFilter(NetworkFilter):

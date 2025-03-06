@@ -150,7 +150,11 @@ class Network(BiocompDB, table=True):
     collections: List["CollectionNetwork"] = Relationship(back_populates="network")
     predictions: List["Prediction"] = Relationship(back_populates="network")
 
-    _network: Optional[bc.network.Network] = PrivateAttr(default=None)
+    _network: Optional[bc.network.Network] = None
+
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        self._network = None
 
     @classmethod
     def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
@@ -168,7 +172,7 @@ class Network(BiocompDB, table=True):
 
     @property
     def network(self):
-        if self._network is None:
+        if not hasattr(self, '_network') or self._network is None:
             self.build(lib=ut.load_lib())
         assert self._network is not None
         return self._network

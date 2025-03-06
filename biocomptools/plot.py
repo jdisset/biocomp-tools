@@ -39,6 +39,10 @@ from biocomptools.toollib.networkselector import (
     NetworkSetUnion,
     NetworkSetIntersection,
     NetworkSetDifference,
+    NetworkFilter,
+    CleanupFilter,
+    CustomFilter,
+    UorfFilter,
 )
 
 from dracon.utils import dict_like
@@ -73,6 +77,10 @@ DEFAULT_TYPES = [
     InnerNodesFigure,
     InnerNodesFigureSpec,
     bundle_uorf_data,
+    NetworkFilter,
+    CleanupFilter,
+    CustomFilter,
+    UorfFilter,
 ]
 
 ##────────────────────────────────────────────────────────────────────────────}}}

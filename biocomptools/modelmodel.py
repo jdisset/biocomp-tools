@@ -151,7 +151,8 @@ class NetworkModel(BaseModel):
 
     def model_post_init(self, *args, **kwargs):
         """initialize model after validation"""
-        # ensure network is a list
+        super().model_post_init(*args, **kwargs)
+        # ensure nework is a list
         if not isinstance(self.network, list):
             self.network = [self.network]
 

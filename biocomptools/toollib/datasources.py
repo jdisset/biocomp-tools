@@ -8,6 +8,7 @@ from biocomp.utils import (
     ArbitraryModel,
     load_lib,
 )
+
 from pathlib import Path
 import biocomp as bc
 from biocomp.plotutils import PlotData
