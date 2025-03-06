@@ -525,28 +525,28 @@ class CleanupFilter(NetworkFilter):
         lib = load_lib()
         twice_same_rec = self._find_twice_same_rec(net_info, lib)
         if twice_same_rec:
-            logger.warning(
+            logger.info(
                 f"Network {network_id} has multiple ERN recognition sites: {twice_same_rec}. Skipping."
             )
             return False
 
         missing_parts = self._find_missing_complementary_parts(net_info, lib)
         if missing_parts:
-            logger.warning(
+            logger.info(
                 f"Network {network_id} has missing complementary parts: {missing_parts}. Skipping."
             )
             return False
 
         invalid_types = self._find_invalid_sequestron_types(net_info, lib)
         if invalid_types:
-            logger.warning(
+            logger.info(
                 f"Network {network_id} has invalid sequestron types: {invalid_types}. Skipping."
             )
             return False
 
         invalid_categories = self._find_invalid_part_categories(net_info, lib)
         if invalid_categories:
-            logger.warning(
+            logger.info(
                 f"Network {network_id} has parts from invalid categories: {invalid_categories}. Skipping."
             )
             return False
