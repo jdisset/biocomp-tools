@@ -7,6 +7,7 @@ from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.datasources import DataSource
+from pathlib import Path
 
 
 logger = get_logger(__name__)
@@ -58,19 +59,20 @@ class NetworkPrediction(DataSource):
         BeforeValidator(validate_ground_truth),
     ] = None
 
-    # node collection capabilities
-    collection_points: Optional[List[NodeSpec]] = None
+    collection_points: Optional[List[NodeSpec]] = None  # collection points to examine inner nodes
 
-    # prediction control parameters
     seed: int = 0
     max_evals: int = 300000
     use_output_as_input: bool = False
     z_value: Union[Literal['uniform'], float] = 'uniform'
     disable_variational: bool = True
 
-    already_latent: bool = False
+    save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
-    # internal state
+    already_latent: bool = False  # no need to rescale if the input data is already in latent space
+
+    metadata: Dict[str, Any] = {}
+
     _yhats: Optional[List[np.ndarray]] = None
     _x: Optional[List[np.ndarray]] = None
     _gtruths: Optional[List[Optional[np.ndarray]]] = None
@@ -80,6 +82,7 @@ class NetworkPrediction(DataSource):
     _collection_out: Optional[np.ndarray] = None
     _collection_input_offsets: Optional[List[int]] = None
     _collection_output_offsets: Optional[List[int]] = None
+    _network_stats: Optional[List[Dict[str, Any]]] = None
 
     def model_post_init(self, *args, **kwargs):
         """initialize the model after validation"""
@@ -88,6 +91,8 @@ class NetworkPrediction(DataSource):
         logger.debug(
             f"predict_at: {len(self.predict_at)} arrays, shapes: {[x.shape for x in self.predict_at]}"
         )
+
+        assert isinstance(self.network_model.network, list)
 
         # validate number of networks matches input data
         if len(self.predict_at) != len(self.network_model.network):
@@ -115,6 +120,24 @@ class NetworkPrediction(DataSource):
         logger.debug(
             f"aligned_ground_truth shapes: {[None if gt is None else gt.shape for gt in self._aligned_ground_truth]}"
         )
+
+    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkPrediction':
+        """create a new networkprediction with a different model"""
+        logger.debug(f"creating new networkprediction with model {model.signature()=}")
+
+        # create new instance with updated network model
+        new = self.model_copy(update={'network_model': self.network_model.with_model(model)})
+        new._yhats = None  # clear the cache
+        new._network_stats = None  # clear the stats cache
+
+        logger.debug(
+            f"created networkprediction with model signature {new.network_model.model.signature()=}"
+        )
+        return new
+
+    def with_csv_output_path(self, path: str) -> 'NetworkPrediction':
+        """set path to save prediction statistics to a CSV file"""
+        return self.model_copy(update={'save_csv_to': path})
 
     def _shuffle_inputs(self):
         """shuffle inputs and ground truth with the same random order"""
@@ -177,23 +200,11 @@ class NetworkPrediction(DataSource):
 
         return aligned_predict_at, aligned_ground_truth
 
-    def with_shared_from_model(self, model: BiocompModel) -> 'NetworkPrediction':
-        """create a new networkprediction with a different model"""
-        logger.debug(f"creating new networkprediction with model {model.signature()=}")
-
-        # create new instance with updated network model
-        new = self.model_copy(update={'network_model': self.network_model.with_model(model)})
-        new._yhats = None  # clear the cache
-
-        logger.debug(
-            f"created networkprediction with model signature {new.network_model.model.signature()=}"
-        )
-        return new
-
     def _compute_collection_indices(self):
         """compute index offsets for each collection point"""
         input_offsets = [0]
         output_offsets = [0]
+        assert self.collection_points is not None
 
         for point in self.collection_points:
             input_indices, output_indices = self.network_model.get_node_indices(
@@ -249,6 +260,9 @@ class NetworkPrediction(DataSource):
         )
 
         self._process_prediction_results(network_outputs, effective_max_evals)
+
+        # calculate and store network statistics
+        self._network_stats = self._calculate_all_network_stats()
 
     def _create_collection_xy_function(
         self,
@@ -333,7 +347,13 @@ class NetworkPrediction(DataSource):
 
             # compute predictions if not already computed
             if not hasattr(self, '_yhats') or self._yhats is None:
+                logger.debug("computing all network predictions")
                 self.compute_all_network_predictions()
+                if self.save_csv_to:
+                    logger.debug("saving prediction statistics to CSV")
+                    self.save_csv()
+                else:
+                    logger.debug("no save_csv_to path provided")
 
             assert isinstance(self._x, list)
             assert isinstance(self._yhats, list)
@@ -356,8 +376,10 @@ class NetworkPrediction(DataSource):
             assert isinstance(output_pos, int)
             logger.debug(f"output_pos: {output_pos}")
 
-            # calculate and store prediction statistics
-            self._calculate_prediction_stats(network_idx, pdata, yhat, gt, output_pos)
+            stats = self.get_network_stats()
+            assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
+            pdata.metadata['prediction_stats'] = stats[network_idx].copy()
+            pdata.metadata.update(self.metadata)
 
             if self.use_output_as_input:
                 logger.debug("using output as input, returning yhat as both x and y")
@@ -407,59 +429,129 @@ class NetworkPrediction(DataSource):
             f"""network {network_idx} evaluated over {prediction_stats['samples']} samples:
                 - mse: {prediction_stats['mse']:.3f}
                 - rmse: {prediction_stats['rmse']:.3f}
-                - mean: {prediction_stats['mean']:.3f}
-                - std: {prediction_stats['std']:.3f}
-                - min: {prediction_stats['min']:.3f}
-                - max: {prediction_stats['max']:.3f}"""
+                - mean: {prediction_stats['latent_mean']:.3f}
+                - std: {prediction_stats['latent_std']:.3f}
+                - min: {prediction_stats['latent_min']:.3f}
+                - max: {prediction_stats['latent_max']:.3f}
+                """
         )
 
         logger.debug(f"Random samples:\n{df.round(3).to_string()}")
 
-    def _calculate_prediction_stats(
-        self,
-        network_idx: int,
-        pdata: PlotData,
-        yhat: np.ndarray,
-        gt: Optional[np.ndarray],
-        output_pos: np.ndarray,
+    def _calculate_network_stats(
+        self, network_idx, network, yhat, gt, output_pos, nb_points_in_eval
     ):
-        """calculate prediction statistics and store them in metadata"""
-        logger.debug(f"calculating stats for network {network_idx}")
-
+        """calculate statistics for a single network"""
         # transform to latent space for statistics
         rescaler = self.network_model.model.rescaler
         latent_yhats = np.asarray(rescaler.fwd(yhat))
-        logger.debug(f"latent_yhats shape: {latent_yhats.shape}")
-
         latent_yhat = latent_yhats[:, output_pos]
-        logger.debug(f"latent_yhat shape: {latent_yhat.shape}")
-
-        latent_gt = None
-        if gt is not None:
-            latent_gt = np.asarray(rescaler.fwd(gt).flatten())
-            logger.debug(f"latent_gt shape: {latent_gt.shape}")
 
         # calculate basic statistics
-        prediction_stats = {
-            'samples': yhat.shape[0],
-            'mean': float(latent_yhat.mean()),
-            'std': float(latent_yhat.std()),
-            'min': float(latent_yhat.min()),
-            'max': float(latent_yhat.max()),
+        xp_name = None
+        try:
+            xp_name = network.recipe.experiment.name
+        except AttributeError:
+            pass
+        recipe_name = None
+        try:
+            recipe_name = network.recipe.name
+        except AttributeError:
+            pass
+        network_name = getattr(network, 'name', f"Network_{network_idx}")
+        network_stats = {
+            'xp_name': xp_name,
+            'recipe_name': recipe_name,
+            'network_name': network_name,
+            'eval_npoints': nb_points_in_eval,
+            'samples': yhat.shape[0],  # number of actual prediction points used
+            'mse': None,
+            'rmse': None,
+            'latent_mean': float(latent_yhat.mean()),
+            'latent_std': float(latent_yhat.std()),
+            'latent_min': float(latent_yhat.min()),
+            'latent_max': float(latent_yhat.max()),
         }
 
         # add comparison stats if ground truth available
-        if latent_gt is not None:
+        if gt is not None:
+            latent_gt = np.asarray(rescaler.fwd(gt).flatten())
             mse = float(np.mean((latent_yhat - latent_gt) ** 2))
-            prediction_stats['mse'] = mse
-            prediction_stats['rmse'] = float(np.sqrt(mse))
+            network_stats['mse'] = mse
+            network_stats['rmse'] = float(np.sqrt(mse))
+
+            # log sample comparisons for debugging
             assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
             latent_x = rescaler.fwd(x)
-            self._log_stats(network_idx, prediction_stats, latent_gt, latent_yhat, latent_x)
+            self._log_stats(network_idx, network_stats, latent_gt, latent_yhat, latent_x)
 
-        # store in plot data
-        pdata.metadata['prediction_stats'] = prediction_stats
+        return network_stats
+
+    def _calculate_all_network_stats(self) -> List[Dict[str, Any]]:
+        """calculate statistics for all networks and return as a list of dictionaries"""
+        all_stats = []
+
+        for i, network in enumerate(self.network_model.network):
+            # extract network info
+            network_name = getattr(network, 'name', f"Network_{i}")
+            nb_points_in_eval = len(self.predict_at[i])
+
+            # get prediction data
+            yhat = self._yhats[i]
+            gt = self._gtruths[i]
+
+            # get output position
+            output_pos = 0
+            try:
+                _, output_pos, _, _ = get_reordered_protein_names(network.network)
+            except ValueError:
+                continue
+
+            # calculate statistics in latent space
+            network_stats = self._calculate_network_stats(
+                i, network, yhat, gt, output_pos, nb_points_in_eval
+            )
+            all_stats.append(network_stats)
+
+        return all_stats
+
+    def get_network_stats(self):
+        """get statistics for all networks, computing if necessary"""
+        if not hasattr(self, '_network_stats') or self._network_stats is None:
+            if not hasattr(self, '_yhats') or self._yhats is None:
+                self.compute_all_network_predictions()
+            else:
+                # just calculate stats if predictions already exist
+                self._network_stats = self._calculate_all_network_stats()
+
+        return self._network_stats
+
+    def save_csv(self):
+        """save prediction statistics to a CSV file"""
+        logger.debug("saving prediction statistics to CSV")
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.error("pandas is required to save prediction statistics to CSV")
+            return
+
+        stats = self.get_network_stats()
+        df = pd.DataFrame(stats)
+
+        # update df with content of self.extra_metadata
+        for key, value in self.metadata.items():
+            df[key] = value
+
+        logger.debug(f"prediction statistics DataFrame:\n{df.to_string()}")
+
+        try:
+            save_to = Path(self.save_csv_to)
+            save_to.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(save_to, index=False)
+            logger.info(f"saved prediction statistics to {save_to}")
+        except Exception as e:
+            logger.error(f"failed to save CSV to {self.save_csv_to}: {e}")
 
     def _normalize_input_order(self) -> List[Optional[List[int]]]:
         """normalize input_order to ensure it's consistent across networks"""
