@@ -20,14 +20,15 @@ from biocomp.library import PartsLibrary
 
 
 from biocomptools.trainutils import (
-    Logger,
-    PlotLogger,
-    EnhancedConsoleLogger,
     plot_loss,
     make_unique_dir,
     add_metadata,
     get_best_smoothed_loss_id,
 )
+
+from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
+from biocomptools.toollib.loggers.plotlogger import PlotLogger
+from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
 
 from sqlmodel import Session
 from datetime import datetime
@@ -57,7 +58,6 @@ from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
 from biocomptools.plot import NetworkPrediction
 
-import biocomptools.toollib.models as md
 
 setup_logging(force=False)
 logger = get_logger(__name__)
@@ -80,6 +80,8 @@ DEFAULT_TYPES = [
     BiocompModel,
     PlotLogger,
     EnhancedConsoleLogger,
+    ConsoleLogger,
+    FunctionLogger,
 ] + PLOT_TYPES
 
 DEFAULT_TYPES = list(set(DEFAULT_TYPES))

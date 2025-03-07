@@ -1,18 +1,19 @@
-from biocomptools.logging_config import get_logger, setup_logging
 import mlflow
 import sys
-import logging
 from pathlib import Path
 import json
 from typing import Any, List, Optional, Tuple, Callable
 from pydantic import Field, ConfigDict, BaseModel
 import numpy as np
 from dracon.deferred import DeferredNode
-from biocomptools.trainutils import Logger
 from biocomptools.toollib.common import config
+from biocomptools.toollib.loggers.logger import Logger
 
+
+from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
+
 
 class MLflowLogger(Logger):
     """
@@ -169,11 +170,13 @@ class MLflowLogger(Logger):
             self._log_datamanager_info()
 
         except Exception as e:
-            logger.error(f"Failed to set up MLflow experiment: {e}")
+            logger.error("Failed to set up MLflow experiment")
+            logger.exception(e)
             return
 
     def _log_training_config(self):
         """Log all configuration objects and metadata"""
+        t0 = time.time()
         logger.debug("Logging training configuration")
         assert self._training_program is not None
 
@@ -209,8 +212,11 @@ class MLflowLogger(Logger):
 
             mlflow.log_text(self._training_program._yamldump, "fullconfig.yaml")
 
+            logger.debug(f"Done logging training configuration. Took {time.time() - t0:.2f}s")
+
         except Exception as e:
-            logger.error(f"Failed to log training config: {e}", exc_info=True)
+            logger.error("Failed to log training config")
+            logger.exception(e)
 
     def _log_datamanager_info(self):
         """Log information about the training and validation datasets"""
@@ -235,7 +241,8 @@ class MLflowLogger(Logger):
                 mlflow.log_dict(dataset_info, "dataset_info.json")
 
         except Exception as e:
-            logger.error(f"Failed to log dataset info: {e}")
+            logger.error("Failed to log dataset info")
+            logger.exception(e)
 
     def _log_checkpoint(self, step: int, params: Any, losses: Optional[List[np.ndarray]] = None):
         """Log model checkpoint and register if it's the best model"""
@@ -256,12 +263,15 @@ class MLflowLogger(Logger):
 
             # Log the model file as an artifact
             if model_path.exists():
+                logger.debug(f"Logging model checkpoint for step {step}")
                 mlflow.log_artifact(str(model_path), f"models/step_{step}")
+                logger.debug("Done logging model checkpoint")
             else:
                 logger.error(f"Failed to save model checkpoint for step {step}")
 
         except Exception as e:
-            logger.error(f"Failed to log model checkpoint: {e}")
+            logger.error("Failed to log model checkpoint")
+            logger.exception(e)
 
     def _log_artifacts_in_dir(self, dir_path: Path):
         """Log artifacts from a directory, maintaining proper relative paths"""
