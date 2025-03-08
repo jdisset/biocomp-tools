@@ -2,7 +2,6 @@
 import biocomp.utils as ut
 from pathlib import Path
 import xxhash
-from omegaconf import DictConfig, ListConfig
 import subprocess
 
 # using base58 instead of base64 because it's url-safe
@@ -47,8 +46,6 @@ U = TypeVar('U')
 ListOrSingle = Union[List[T], T]
 Pair = Tuple[T, T]
 DictOrList = Union[Dict[U, T], List[T]]
-DictLike = Union[Dict, DictConfig]
-AnyConfig = Union[DictConfig, ListConfig]
 
 
 def dict_like(obj) -> bool:

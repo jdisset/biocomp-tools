@@ -441,7 +441,9 @@ class CleanupFilter(NetworkFilter):
     - recombinases
     """
 
-    def _find_twice_same_rec(self, net_info, lib):
+    def _find_twice_same_rec_with_different_rna(self, net_info, lib):
+        # TODO: right now it's just checking for multiple ERN rec sites
+        # need to make sure the mRNA is different before rejecting
         appears_twice = []
         all_parts = net_info['all_parts']
         for i, p1 in enumerate(all_parts):
@@ -523,12 +525,13 @@ class CleanupFilter(NetworkFilter):
         network, _ = network_id.fetch_network_and_datafile(session)
         net_info = network.network_info
         lib = load_lib()
-        twice_same_rec = self._find_twice_same_rec(net_info, lib)
-        if twice_same_rec:
-            logger.info(
-                f"Network {network_id} has multiple ERN recognition sites: {twice_same_rec}. Skipping."
-            )
-            return False
+
+        # twice_same_rec = self._find_twice_same_rec(net_info, lib)
+        # if twice_same_rec:
+        #     logger.info(
+        #         f"Network {network_id} has multiple ERN recognition sites: {twice_same_rec}. Skipping."
+        #     )
+        #     return False
 
         missing_parts = self._find_missing_complementary_parts(net_info, lib)
         if missing_parts:

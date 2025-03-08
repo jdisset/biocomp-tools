@@ -7,6 +7,7 @@ from pydantic import Field, ConfigDict, BaseModel
 import numpy as np
 from dracon.deferred import DeferredNode
 from biocomptools.toollib.common import config
+import time
 from biocomptools.toollib.loggers.logger import Logger
 
 

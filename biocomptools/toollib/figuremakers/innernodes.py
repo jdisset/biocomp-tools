@@ -440,7 +440,7 @@ class InnerNodesFigure(Figure):
                 npoints = len(allX[0])
                 sample_idx = np.random.choice(npoints, min(subsample_size, npoints), replace=False)
                 for j, (X, Y, c, legend) in enumerate(zip(allX, allY, colors, legends)):
-                    ax.scatter(X[sample_idx], Y[sample_idx], s=4, alpha=0.05, linewidth=0, c=c)
+                    ax.scatter(X[sample_idx], Y[sample_idx], s=4, alpha=0.05, linewidth=0, color=c)
 
                     # calculate trend line using KNN
                     tree = KDTree(X)
