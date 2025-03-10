@@ -2,12 +2,11 @@ from sqlmodel import Field, SQLModel, create_engine, Relationship, Session
 from typing import List, Optional, Annotated, Any, TypeAlias, Union, Type, TypeVar, Generator
 import sqlalchemy as sa
 from sqlalchemy import Column, JSON
-import datetime
 from pydantic import BaseModel, BeforeValidator, PrivateAttr
 from pathlib import Path
+from biocomptools.toollib.common import config
 import biocomp.utils as ut
 import biocomp as bc
-import logging
 
 from biocomptools.logging_config import get_logger
 
@@ -29,13 +28,6 @@ ListOr = List[T] | T
 
 class BiocompDB(SQLModel, registry=sa.orm.registry()):
     pass
-
-
-class Collection(BiocompDB, table=True):
-    name: str = Field(primary_key=True)
-    description: Optional[str] = None
-
-    networks: List["CollectionNetwork"] = Relationship(back_populates="collection")
 
 
 class Experiment(BiocompDB, table=True):
@@ -83,28 +75,6 @@ class Experiment(BiocompDB, table=True):
         return recipes
 
 
-class TrainingRun(BiocompDB, table=True):
-    name: str = Field(default=None, primary_key=True)
-    date_started: Optional[datetime.date] = Field(default_factory=datetime.date.today)
-    duration: Optional[float] = None
-    training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    wb_project: str
-    wb_run_name: str
-    artifact_path: ForcedOptionalStr
-    end_loss: Optional[float] = None
-    base_compute_config_name: Optional[str] = None
-    biocomp_git_hash: str
-    biocomp_version: str
-    compute_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    data_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    description: Optional[str] = None
-    wb_run_id: Optional[str] = None
-    best_replicate: Optional[int] = None
-    export_dir: Optional[str] = None
-
-    predictions: List["Prediction"] = Relationship(back_populates="training_run")
-
-
 class Calibration(BiocompDB, table=True):
     fullname: str = Field(primary_key=True)
     pipeline: dict = Field(default_factory=dict, sa_column=Column(JSON))
@@ -147,14 +117,27 @@ class Network(BiocompDB, table=True):
     network_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     recipe: Optional["Recipe"] = Relationship(back_populates="networks")
-    collections: List["CollectionNetwork"] = Relationship(back_populates="network")
-    predictions: List["Prediction"] = Relationship(back_populates="network")
 
     _network: Optional[bc.network.Network] = None
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self._network = None
+
+    def safe_copy(self):
+        """
+        Copy the network object without any SQLAlchemy references.
+        """
+        new_obj = Network(
+            name=self.name,
+            recipe_name=self.recipe_name,
+            network_info=self.network_info,
+        )
+
+        if self._network is not None:
+            new_obj._network = self._network.model_copy()
+
+        return new_obj
 
     @classmethod
     def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
@@ -177,7 +160,7 @@ class Network(BiocompDB, table=True):
         assert self._network is not None
         return self._network
 
-    def build(self, lib, use_cache=None):
+    def build(self, lib, use_cache=config.paths.cache.networks):
         recipe = self.recipe  # should lazy load
         if recipe is None:
             logger.error(f"Recipe for network {self.name} not found. Skipping build.")
@@ -343,24 +326,6 @@ class Recipe(BiocompDB, table=True):
             self.networks.extend(network_models)
 
         return network_models
-
-
-class Prediction(BiocompDB, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    plot_path: ForcedStr
-    pred_error: Optional[str] = None
-    training_run_name: str = Field(foreign_key="trainingrun.name")
-    network_name: str = Field(foreign_key="network.name")
-
-    training_run: Optional[TrainingRun] = Relationship(back_populates="predictions")
-    network: Optional[Network] = Relationship(back_populates="predictions")
-
-
-class CollectionNetwork(BiocompDB, table=True):
-    collection_name: str = Field(foreign_key="collection.name", primary_key=True)
-    network_name: str = Field(foreign_key="network.name", primary_key=True)
-    collection: Optional[Collection] = Relationship(back_populates="networks")
-    network: Optional[Network] = Relationship(back_populates="collections")
 
 
 def get_biocompdb_sqlite_engine(db_path, echo=False):
