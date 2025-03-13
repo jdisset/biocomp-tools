@@ -2,12 +2,9 @@
 !set_default nslices: 30
 !set_default threshold: 0.225
 !set_default opacity: 0.25
+!set_default zlims: [0, 0.6]
 
-!set_default plotvars:
-  zlims: [0, 0.6]
-  vlims: [0, 0.6]
-
-!set_default slices: ${linspace(plotvars['zlims'][0], plotvars['zlims'][1], int(nslices))}
+!set_default slices: ${linspace(zlims[0], zlims[1], int(nslices))}
 !define plot_title: ${D.metadata.get('title', D.metadata["network"].title())}
 
 plot_config:

@@ -1,5 +1,5 @@
 ### {{{                          --     import     --
-import biocomp.utils as ut
+from tqdm import tqdm
 from pathlib import Path
 import xxhash
 import subprocess
@@ -33,7 +33,7 @@ def maybetqdm(x, min_len=5, **kw):
     if isinstance(x, zip):
         x = list(x)
     if len(x) > min_len:
-        return ut.tqdm(x, **kw)
+        return tqdm(x, **kw)
     return x
 
 

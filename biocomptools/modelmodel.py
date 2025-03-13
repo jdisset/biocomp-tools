@@ -1,11 +1,10 @@
 from pydantic import BaseModel, ConfigDict, model_validator, BeforeValidator, Field
-from typing import Optional, List, Union, Dict, Tuple, Any, Callable, TypeAlias
+from dracon.utils import ser_debug
+from typing import Optional, List, Union, Tuple, Callable
 import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.random import PRNGKey
 from pathlib import Path
 import pickle
+import biocomp as bc
 import xxhash
 from typing import Annotated
 import biocomp.compute as cmp
@@ -14,19 +13,19 @@ import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config, dict_like
-import biocomp.utils as ut
+from biocomp.utils import load_lib, ArbitraryModel
 from tqdm import tqdm
 
 logger = get_logger(__name__)
-lib = ut.load_lib()
-
-NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
+lib = load_lib()
 
 
 def load_params(maybe_path):
     """load parameters from file or use directly if already a parameter tree"""
+    from biocomp.jaxutils import tree_to_np
+
     if isinstance(maybe_path, pr.ParameterTree):  # already loaded
-        return ut.tree_to_np(maybe_path)
+        return tree_to_np(maybe_path)
 
     if isinstance(maybe_path, str):
         if maybe_path.startswith('mlflow-'):
@@ -35,7 +34,7 @@ def load_params(maybe_path):
             maybe_path = Path(maybe_path)
 
     with open(maybe_path, 'rb') as f:
-        return ut.tree_to_np(pickle.load(f))
+        return tree_to_np(pickle.load(f))
 
 
 def get_shared_params(params):
@@ -68,7 +67,7 @@ class NodeSpec(BaseModel):
     node_id: int
 
 
-class BiocompModel(ut.ArbitraryModel):
+class BiocompModel(ArbitraryModel):
     """model containing compute configuration, rescaler, and shared parameters"""
 
     compute_config: cmp.ComputeConfig
@@ -137,7 +136,7 @@ class NetworkModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
-    network: md.Network | list[md.Network]
+    network: bc.Network | list[bc.Network]
 
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
@@ -152,14 +151,10 @@ class NetworkModel(BaseModel):
     def model_post_init(self, *args, **kwargs):
         """initialize model after validation"""
         super().model_post_init(*args, **kwargs)
+
         # ensure nework is a list
         if not isinstance(self.network, list):
             self.network = [self.network]
-
-        # build networks if needed
-        for n in self.network:
-            if hasattr(n, 'recipe') and n.recipe is not None:
-                n.build(lib=lib, use_cache=config.paths.cache.networks)
 
         # initialize stack and parameters
         self.build_stack()
@@ -168,7 +163,9 @@ class NetworkModel(BaseModel):
     def build_stack(self):
         """build compute stack from networks"""
         try:
-            self._stack = cmp.ComputeStack([n._network for n in self.network])
+            import jax
+
+            self._stack = cmp.ComputeStack(networks=self.network)
             self._stack.build(self.model.compute_config)
             self._batch_apply = jax.jit(
                 jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
@@ -179,6 +176,8 @@ class NetworkModel(BaseModel):
 
     def update_params(self):
         """update parameters from model and initialize local parameters"""
+        from jax.random import PRNGKey
+
         assert self._stack is not None
         try:
             init_params = self._stack.init(PRNGKey(0))
@@ -190,7 +189,7 @@ class NetworkModel(BaseModel):
             if not isinstance(self.network, list):
                 networks = [self.network]
             for n in networks:
-                logger.error(n._network.compute_graph)
+                logger.error(n.compute_graph)
             raise e
         try:
             self._local_params = get_nonshared_params(init_params)
@@ -209,11 +208,14 @@ class NetworkModel(BaseModel):
         logger.debug(f"creating new network model with model {model.signature()=}")
         new_model = self.model_copy(update={'model': model})
         new_model.update_params()
+
+        ser_err = ser_debug(new_model)
+        if not ser_err:
+            logger.debug("No serialization errors in NetworkModel after with_model")
+
         return new_model
 
-    def get_node_indices(
-        self, network_id: int, node_id: int
-    ) -> Tuple[List[NdArray], List[NdArray]]:
+    def get_node_indices(self, network_id: int, node_id: int):
         """
         get input and output indices for a virtual node in the compute stack
 
@@ -248,7 +250,7 @@ class NetworkModel(BaseModel):
 
         return input_indices, output_indices
 
-    def get_network_output_indices(self, network_idx: int) -> Tuple[List[NdArray], List[Any]]:
+    def get_network_output_indices(self, network_idx: int):
         """
         get output indices and shapes for a network
 
@@ -267,7 +269,7 @@ class NetworkModel(BaseModel):
         self,
         X: np.ndarray,
         key=None,
-        max_batch_size=10000,
+        max_batch_size=500,
         disable_variational: bool = True,
         collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
@@ -298,7 +300,7 @@ class NetworkModel(BaseModel):
         self,
         X: np.ndarray,
         key=None,
-        max_batch_size=10000,
+        max_batch_size=500,
         disable_variational: bool = True,
         collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
@@ -317,6 +319,9 @@ class NetworkModel(BaseModel):
         returns:
             predictions
         """
+        import jax
+        import jax.numpy as jnp
+        from jax.random import PRNGKey
 
         if key is None:
             key = PRNGKey(0)
@@ -360,6 +365,8 @@ class NetworkModel(BaseModel):
                 Z_batch = jnp.ones((batch_size, num_z)) * z_value
 
             keys_batch = jax.random.split(batch_key, batch_size)
+
+            # TODO: prevent cache misses for last batch (when it doesn't fill the batch)
 
             out, (_, fullout) = self._batch_apply(
                 params,

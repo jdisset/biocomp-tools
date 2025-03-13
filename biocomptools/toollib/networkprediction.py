@@ -9,7 +9,6 @@ from biocomptools.logging_config import get_logger
 from biocomptools.toollib.datasources import DataSource
 from pathlib import Path
 
-
 logger = get_logger(__name__)
 
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
@@ -62,7 +61,7 @@ class NetworkPrediction(DataSource):
     collection_points: Optional[List[NodeSpec]] = None  # collection points to examine inner nodes
 
     seed: int = 0
-    max_evals: int = 300000
+    max_evals: int = 30000
     use_output_as_input: bool = False
     z_value: Union[Literal['uniform'], float] = 'uniform'
     disable_variational: bool = True
@@ -133,6 +132,7 @@ class NetworkPrediction(DataSource):
         logger.debug(
             f"created networkprediction with model signature {new.network_model.model.signature()=}"
         )
+
         return new
 
     def with_csv_output_path(self, path: str) -> 'NetworkPrediction':
@@ -221,6 +221,7 @@ class NetworkPrediction(DataSource):
 
     def compute_all_network_predictions(self):
         """compute predictions for all networks"""
+
         logger.debug(f"computing predictions with model {self.network_model.signature()}")
         logger.debug(
             f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
@@ -314,13 +315,13 @@ class NetworkPrediction(DataSource):
 
             # store prediction results
             truncated_output = network_output[:effective_max_evals]
-            self._yhats.append(truncated_output)
+            self._yhats.append(np.asarray(truncated_output))
             logger.debug(f"stored yhat shape: {truncated_output.shape}")
 
             # store ground truth if available
             if self.ground_truth[i] is not None:
                 truncated_gt = self._aligned_ground_truth[i][:effective_max_evals]
-                self._gtruths.append(truncated_gt)
+                self._gtruths.append(np.asarray(truncated_gt))
                 logger.debug(f"stored ground truth shape: {truncated_gt.shape}")
             else:
                 self._gtruths.append(None)
@@ -328,7 +329,7 @@ class NetworkPrediction(DataSource):
 
             # store inputs
             truncated_x = x[:effective_max_evals]
-            self._x.append(truncated_x)
+            self._x.append(np.asarray(truncated_x))
             logger.debug(f"stored x shape: {truncated_x.shape}")
 
         # validate results
@@ -369,7 +370,7 @@ class NetworkPrediction(DataSource):
 
             assert isinstance(self.network_model.network, list)
 
-            network = self.network_model.network[network_idx].network
+            network = self.network_model.network[network_idx]
 
             # get output position for this network
             _, output_pos, _, _ = get_reordered_protein_names(network)
@@ -451,12 +452,12 @@ class NetworkPrediction(DataSource):
         xp_name = None
         try:
             xp_name = network.recipe.experiment.name
-        except AttributeError:
+        except Exception:
             pass
         recipe_name = None
         try:
             recipe_name = network.recipe.name
-        except AttributeError:
+        except Exception:
             pass
         network_name = getattr(network, 'name', f"Network_{network_idx}")
         network_stats = {
@@ -504,7 +505,7 @@ class NetworkPrediction(DataSource):
             # get output position
             output_pos = 0
             try:
-                _, output_pos, _, _ = get_reordered_protein_names(network.network)
+                _, output_pos, _, _ = get_reordered_protein_names(network)
             except ValueError:
                 continue
 
@@ -674,13 +675,14 @@ class NetworkPrediction(DataSource):
 
         import biocomp.network
 
-        network_info = biocomp.network.generate_network_info(network.network)
+        network_info = biocomp.network.generate_network_info(network)
 
         metadata.update(
             {
                 'source_type': 'prediction',
                 'seed': self.seed,
                 'model_signature': self.network_model.model.signature(),
+                # 'network': network.copy_safe(),
                 'network': network,
                 'network_info': network_info,
                 'n_predictions': len(self.predict_at[network_idx]),
@@ -702,7 +704,7 @@ class NetworkPrediction(DataSource):
 
         # extract plot data
         plot_data = pu.extract_lazy_plot_data_from_network(
-            network.network,
+            network,
             get_xy_fn,
             input_order=input_order,
             metadata=metadata,

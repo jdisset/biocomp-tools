@@ -12,6 +12,7 @@ from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
 from biocomp.utils import load_lib
+from dracon.utils import ser_debug
 
 logger = get_logger(__name__)
 
@@ -26,37 +27,62 @@ class NetworkDataId(BaseModel):
     network_name: str
     file_path: str
 
-    def __hash__(self):
-        return hash((self.network_name, self.file_path))
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # def __hash__(self):
+    #     return hash((self.network_name, self.file_path))
 
     def fetch_network_and_datafile(self, session) -> Tuple[md.Network, md.DataFile]:
         logger.debug(f"Fetching network and datafile for {self.network_name} - {self.file_path}")
-        network = session.exec(
+
+        # explicit eagerly load all relationships w selectinload
+        network_query = (
             select(md.Network)
             .where(md.Network.name == self.network_name)
             .options(
-                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
                 selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
+                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
                 selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
             )
         )
-        networks = network.all()
-        if len(networks) > 1:
-            logger.error(f"Found multiple networks with name {self.network_name}. Taking first.")
-        network = networks[0] if networks else None
 
-        datafile = session.exec(
+        network = session.exec(network_query).first()
+        if not network:
+            logger.error(f"No network found for {self.network_name}")
+            raise ValueError(f"No network found for {self.network_name}")
+
+        datafile_query = (
             select(md.DataFile)
             .where(md.DataFile.file == self.file_path)
-            .options(selectinload(md.DataFile.calibration))
+            .options(selectinload(md.DataFile.calibration), selectinload(md.DataFile.recipe))
         )
-        datafiles = datafile.all()
-        if len(datafiles) > 1:
-            logger.error(f"Found multiple datafiles with path {self.file_path}. Taking first.")
-        datafile = datafiles[0] if datafiles else None
 
-        assert network, f"No network found for {self.network_name}"
-        assert datafile, f"No datafile found for {self.file_path}"
+        datafile = session.exec(datafile_query).first()
+        if not datafile:
+            logger.error(f"No datafile found for {self.file_path}")
+            raise ValueError(f"No datafile found for {self.file_path}")
+
+        # force access to relationships to make sure they are not lazy-loaded
+        if network.recipe:
+            recipe = network.recipe
+            _ = recipe.name
+            if recipe.experiment:
+                _ = recipe.experiment.name
+            if recipe.networks:
+                _ = len(recipe.networks)
+            if recipe.data_files:
+                _ = len(recipe.data_files)
+
+        session.expunge_all()
+
+        # logger.debug(f"Network and datafile fetched: {network.name} - {datafile.file}")
+        # logger.debug("Running a serialization debug:")
+        net_err = ser_debug(network)
+        df_err = ser_debug(datafile)
+        # if net_err or df_err:
+        #     logger.error("Serialization errors")
+        # else:
+        #     logger.debug("Serialization successful")
 
         return network, datafile
 
@@ -284,8 +310,20 @@ class NetworkSet(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
-        # validate_default=True,
     )
+
+    @property
+    def _engine(self):
+        """Lazy-load the database engine when needed (otherwise unpicklable)."""
+        from biocomptools.toollib.models import get_biocompdb_sqlite_engine
+        from biocomptools.toollib.common import config
+
+        _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
+        return _db_engine
+
+    @property
+    def db_session(self):
+        return Session(self._engine)
 
     @model_validator(mode='before')
     def validate_content(cls, values):
@@ -300,35 +338,44 @@ class NetworkSet(BaseModel):
             values['content'] = content.content
         return values
 
-    def run_selectors(self, session):
+    def run_selectors(self, session=None):
+        sess = session or self.db_session
         new_content = []
         for n in self.content:
             if isinstance(n, NetworkSelector):
                 logger.debug(f"Running selector: {n}")
-                ncontent = n.get_networkdata_ids(session)
+                ncontent = n.get_networkdata_ids(sess)
                 new_content.extend(ncontent)
                 logger.debug(f"Found {len(ncontent)} matching networks")
 
             elif isinstance(n, NetworkSet):
                 # Recursively run selectors on nested NetworkSets
-                n.run_selectors(session)
+                n.run_selectors(sess)
                 new_content.extend(n.content)
             else:
                 assert isinstance(n, NetworkDataId), f"Expected NetworkDataId but got {type(n)}"
                 new_content.append(n)
         self.content = new_content
+        sess.expunge_all()
+        if session is None:
+            sess.close()
 
-    def get_networks_and_data(self, session) -> List[Tuple[md.Network, md.DataFile]]:
+    def get_networks_and_data(self, session=None) -> List[Tuple[md.Network, md.DataFile]]:
+        sess = session or self.db_session
         res = []
         for n in self.content:
             assert isinstance(n, NetworkDataId)
 
             try:
-                r = n.fetch_network_and_datafile(session)
+                r = n.fetch_network_and_datafile(sess)
             except AssertionError as e:
                 logger.error(f"Error fetching network and datafile: {e}. Skipping.")
                 continue
             res.append(r)
+
+        sess.expunge_all()
+        if session is None:
+            sess.close()
 
         return res
 
@@ -354,6 +401,7 @@ class NetworkSetUnion(NetworkSet):
         for s in self.sets:
             s.run_selectors(session)
 
+        session.expunge_all()
         new_content = []
         for s in self.sets:
             new_content.extend(s.content)
@@ -374,6 +422,7 @@ class NetworkSetIntersection(NetworkSet):
         for s in self.sets:
             s.run_selectors(session)
 
+        session.expunge_all()
         new_content = self.sets[0].content
         for s in self.sets[1:]:
             new_content = list(set(new_content) & set(s.content))
@@ -398,6 +447,7 @@ class NetworkSetDifference(NetworkSet):
         self.set1.run_selectors(session)
         self.set2.run_selectors(session)
 
+        session.expunge_all()
         new_content = list(set(self.set1.content) - set(self.set2.content))
         self.content = new_content
 
@@ -410,6 +460,7 @@ class NetworkFilter(NetworkSet):
     def run_selectors(self, session):
         self.source_set.run_selectors(session)
 
+        session.expunge_all()
         self.content = [
             net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
         ]
@@ -428,6 +479,7 @@ class CustomFilter(NetworkFilter):
     def should_keep(self, network_id: NetworkDataId, session) -> bool:
         try:
             network, datafile = network_id.fetch_network_and_datafile(session)
+            session.expunge_all()
             return self.filter_func(network, datafile)
         except Exception as e:
             logger.error(f"Error checking custom filter for network {network_id}: {e}")
@@ -525,6 +577,7 @@ class CleanupFilter(NetworkFilter):
         network, _ = network_id.fetch_network_and_datafile(session)
         net_info = network.network_info
         lib = load_lib()
+        session.expunge_all()
 
         # twice_same_rec = self._find_twice_same_rec(net_info, lib)
         # if twice_same_rec:
@@ -565,6 +618,7 @@ class UorfFilter(NetworkFilter):
     def should_keep(self, network_id: NetworkDataId, session) -> bool:
         try:
             network, _ = network_id.fetch_network_and_datafile(session)
+            session.expunge_all()
 
             # get uORF values from network info
             network_info = network.network_info
@@ -598,7 +652,6 @@ def build_data_manager(
     path_prefix,
     dataset: NetworkSet,
     data_conf: DataConfig = DEFAULT_DATA_CONFIG,
-    network_cache=config.paths.cache.networks,
     data_cache=config.paths.cache.data,
 ) -> DataManager:
     assert all(
@@ -606,12 +659,12 @@ def build_data_manager(
     ), "By now, dataset should only contain NetworkDataId objects"
 
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
+    db_session.expunge_all()
     data = []
     actual_networks = []
 
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
-        n.build(lib, use_cache=network_cache)
-        # n.build(lib)
+        n.build(lib)
         network = n._network
         if isinstance(network, list):
             logger.debug(

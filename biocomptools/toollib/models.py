@@ -1,12 +1,12 @@
-from sqlmodel import Field, SQLModel, create_engine, Relationship, Session
-from typing import List, Optional, Annotated, Any, TypeAlias, Union, Type, TypeVar, Generator
+from sqlmodel import Field, SQLModel, create_engine, Relationship
+from typing import List, Optional, Annotated, Any, TypeVar
 import sqlalchemy as sa
 from sqlalchemy import Column, JSON
-from pydantic import BaseModel, BeforeValidator, PrivateAttr
+from pydantic import BeforeValidator
 from pathlib import Path
 from biocomptools.toollib.common import config
-import biocomp.utils as ut
 import biocomp as bc
+from biocomp.utils import load_lib
 
 from biocomptools.logging_config import get_logger
 
@@ -44,6 +44,20 @@ class Experiment(BiocompDB, table=True):
         if 'control' in sample:
             return sample['control']
         return False
+
+    def safe_copy(self):
+        """
+        Copy the experiment object without any SQLAlchemy references.
+        """
+        new_obj = Experiment(
+            name=self.name,
+            path=self.path,
+            comments=self.comments,
+            content=self.content,
+            errors=self.errors,
+        )
+
+        return new_obj
 
     def find_recipes(
         self,
@@ -94,6 +108,23 @@ class DataFile(BiocompDB, table=True):
     calibration: Optional[Calibration] = Relationship(back_populates="data_files")
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
 
+    def safe_copy(self):
+        """
+        Copy the datafile object without any SQLAlchemy references.
+        """
+        new_obj = DataFile(
+            file=self.file,
+            attrs=self.attrs,
+            calibration_name=self.calibration_name,
+            recipe_name=self.recipe_name,
+            priority=self.priority,
+        )
+
+        # if self.calibration is not None:
+        #     new_obj.calibration = self.calibration.safe_copy()
+
+        return new_obj
+
     def load_data(self, path_prefix=None):
         import pandas as pd
 
@@ -120,6 +151,10 @@ class Network(BiocompDB, table=True):
 
     _network: Optional[bc.network.Network] = None
 
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._network = None
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self._network = None
@@ -133,6 +168,12 @@ class Network(BiocompDB, table=True):
             recipe_name=self.recipe_name,
             network_info=self.network_info,
         )
+
+        # can't copy recipe by accessing the recipe arg
+        # because it would trigger the sqlalchemy BS to be added again
+        # one way would be to use __dict__ directly but I'll just leave it for now
+        # if self.recipe is not None:
+        #     new_obj.recipe = self.recipe.safe_copy()
 
         if self._network is not None:
             new_obj._network = self._network.model_copy()
@@ -155,13 +196,22 @@ class Network(BiocompDB, table=True):
 
     @property
     def network(self):
-        if not hasattr(self, '_network') or self._network is None:
-            self.build(lib=ut.load_lib())
+        if not self.built:
+            self.build(lib=load_lib())
         assert self._network is not None
         return self._network
 
-    def build(self, lib, use_cache=config.paths.cache.networks):
-        recipe = self.recipe  # should lazy load
+    @property
+    def built(self):
+        if self.__pydantic_private__ is None or self.__pydantic_private__.get('_network') is None:
+            return False
+        return self._network is not None
+
+    def build(self, lib, use_cache=config.paths.cache.networks, force=False):
+        if self.built and not force:
+            return self._network
+        # recipe = self.recipe  # should lazy load
+        recipe = self.__dict__.get('recipe')
         if recipe is None:
             logger.error(f"Recipe for network {self.name} not found. Skipping build.")
             return None
@@ -226,6 +276,22 @@ class Recipe(BiocompDB, table=True):
         super().model_post_init(*args, **kwargs)
         self.hash = self.generate_hash()
 
+    def safe_copy(self):
+        """
+        Copy the recipe object without any SQLAlchemy references.
+        """
+        new_obj = Recipe(
+            name=self.name,
+            content=self.content,
+            xp=self.xp,
+            file=self.file,
+        )
+
+        if self.experiment is not None:
+            new_obj.experiment = self.experiment.safe_copy()
+
+        return new_obj
+
     def generate_hash(self):
         import xxhash
         import json
@@ -278,7 +344,7 @@ class Recipe(BiocompDB, table=True):
 
         logger.debug(f"Building recipe {self.name}")
 
-        lib = lib or ut.load_lib()
+        lib = lib or load_lib()
         assert lib is not None
 
         errors = []

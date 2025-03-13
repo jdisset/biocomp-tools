@@ -8,7 +8,7 @@ from dracon.deferred import DeferredNode
 from biocomp import utils as ut
 from biocomp.plotutils import FigureSpec
 from dracon.utils import dict_like
-from pydantic import BaseModel, Field, BeforeValidator
+from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -82,30 +82,22 @@ class PlotConfig(BaseModel):
 ## {{{                         --     plot task     --
 
 
-class PlotTask(ArbitraryModel):
+class PlotTask(BaseModel):
     plot_config: PlotConfig = Field(default_factory=PlotConfig)
     plot_method: Optional[PartialFunction] = None
-    post_plot_callbacks: List[PartialFunction] = []
     auto_callstack_bind: bool = True  # whether to automatically bind callstack params
 
-    # used as default if plot_method has an "ax" parameter that is not bound:
-    ax: Optional[mpl.axes.Axes] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    _ax: Optional[mpl.axes.Axes] = None
 
     def run(self):
         if self.plot_method:
-            kw = {'ax': self.ax} if self.ax else {}
+            kw = {'ax': self._ax} if self._ax else {}
             self.plot_config.prepare_func(
                 plot_method=self.plot_method,
                 auto_callstack_bind=self.auto_callstack_bind,
                 overwrite_kwargs=kw,
             )()
-
-        for cb in self.post_plot_callbacks:
-            resolve_all_lazy(cb, context={'ax': self.ax})
-            logger.debug(f"Running post-plot callback {cb}")
-            kw = {'ax': self.ax} if self.ax else {}
-            cb.set_missing_kwargs(kw)
-            cb()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -118,10 +110,12 @@ def resolve(obj):
     return obj
 
 
-class Figure(ArbitraryModel):
+class Figure(BaseModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_tasks: List[DeferredNode[PlotTask]] = []
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -145,17 +139,19 @@ class Figure(ArbitraryModel):
             for i, t in enumerate(self.plot_tasks):
                 try:
                     logger.debug(f"Constructing plot task {i}")
-                    pt = t.construct(context={"FIG": figax})
+                    tc = t.copy()
+                    pt = tc.construct(context={"FIG": figax})
                     if dict_like(pt):
                         pt = PlotTask(**pt)  # type: ignore
                     pt.plot_config.inherit_from(self.plot_config)
-                    pt.ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
+                    pt._ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
                     logger.debug(f"Task {i} constructed")
 
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
                     # print exception traceback
                     import traceback
+
                     logger.error(traceback.format_exc())
 
                     continue

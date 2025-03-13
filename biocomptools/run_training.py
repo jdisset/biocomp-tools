@@ -1,24 +1,11 @@
 ## {{{                          --     imports     --
-from biocomptools.logging_config import get_logger, setup_logging, print_logger_hierarchy
-import biocomp.utils as ut
+from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.modelmodel import BiocompModel, get_shared_params
-from typing import TypeVar
-import dracon as dr
-from biocomp import train
-from pathlib import Path
-from dracon.deferred import DeferredNode
-import numpy as np
-from typing import List, Optional, Tuple, Annotated
-from pydantic import Field, BaseModel, ConfigDict
-from biocomptools.toollib.common import config, get_package_git_hashes
-from dracon.commandline import make_program, Arg
-import sys
-
 from biocomptools.toollib.datasources import DataSource, DBSource
-from biocomp.train import TrainingConfig
-from biocomp.library import PartsLibrary
-
-
+from biocomptools.toollib.common import config, get_package_git_hashes
+from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
+from biocomptools.toollib.loggers.plotlogger import PlotLogger
+from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
 from biocomptools.trainutils import (
     plot_loss,
     make_unique_dir,
@@ -26,18 +13,25 @@ from biocomptools.trainutils import (
     get_best_smoothed_loss_id,
 )
 
-from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
-from biocomptools.toollib.loggers.plotlogger import PlotLogger
-from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
+from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
+from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
+from biocomp.library import PartsLibrary
+from biocomp.utils import PartialFunction, load_lib, save
+from biocomp.train import TrainingConfig
 
+import dracon as dr
+from dracon.deferred import DeferredNode
+from dracon.commandline import make_program, Arg
+
+import sys
+import numpy as np
+from typing import TypeVar
+from pathlib import Path
+from typing import List, Optional, Annotated
+from pydantic import Field, BaseModel, ConfigDict
 from sqlmodel import Session
 from datetime import datetime
-from biocomp.utils import PartialFunction
 
-from biocomp.utils import (
-    load_lib,
-    save,
-)
 
 from biocomptools.toollib.networkselector import (
     build_data_manager,
@@ -51,9 +45,6 @@ from biocomptools.toollib.networkselector import (
     NetworkSet,
     UorfFilter,
 )
-
-from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
-from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 
 from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
 from biocomptools.plot import NetworkPrediction
@@ -145,7 +136,6 @@ class TrainingProgram(BaseModel):
         _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
         return _db_engine
 
-    # Then update db_session to use this property
     @property
     def db_session(self):
         return Session(self._engine)
@@ -162,13 +152,14 @@ class TrainingProgram(BaseModel):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self._lib = load_lib()
-        # self._engine = md.get_biocompdb_sqlite_engine(config.db.sqlite.path)
-
         self.base_dir = str(Path(self.base_dir).expanduser().resolve())
 
         with self.db_session as session:
             self.training_set.run_selectors(session)
             self.validation_set.run_selectors(session)
+            session.expunge_all()
+            session.close()
+
         self.gen_metadata()
 
         self._save_dir = make_unique_dir(Path(self.base_dir) / self.experiment_name)
@@ -182,7 +173,14 @@ class TrainingProgram(BaseModel):
 
         for logger in self.loggers:
             if isinstance(logger, DeferredNode):
-                logger = logger.construct(context={'training_program': self})
+                logger = logger.construct(
+                    context={
+                        'save_dir': self._save_dir,
+                        'compute_conf': self.compute_conf,
+                        'data_conf': self.data_conf,
+                        'training_set': self.training_set,
+                    }
+                )
             new_loggers.append(logger)
         self.loggers = new_loggers
 
@@ -207,7 +205,6 @@ class TrainingProgram(BaseModel):
         }
 
     def _build_dman(self):
-        # Build data manager from data_conf
         self._training_dman = build_data_manager(
             lib=self.parts_library,
             db_session=self.db_session,
@@ -217,6 +214,8 @@ class TrainingProgram(BaseModel):
         )
 
     def run(self):
+        from biocomp.train import start
+
         # Prepare output directory
         self._training_dir = self._save_dir / 'training'
         self._training_dir.mkdir(exist_ok=True, parents=True)
@@ -231,7 +230,7 @@ class TrainingProgram(BaseModel):
         )
         for logger_obj in self.loggers:
             if isinstance(logger_obj, DeferredNode):
-                logger_obj = logger_obj.construct(context={'training_program': self})
+                logger_obj = logger_obj.construct()
 
             logger.debug(f"Initializing a {type(logger_obj)}")
             logger_obj.initialize(self)
@@ -247,7 +246,7 @@ class TrainingProgram(BaseModel):
             logger_callbacks.extend(callbacks)
 
         # Start training
-        params, loss_history, step_history = train.start(
+        params, loss_history, step_history = start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
@@ -260,32 +259,41 @@ class TrainingProgram(BaseModel):
         for logger_obj in self.loggers:
             logger_obj.finalize()
 
-    def get_best_model(self, all_models, all_losses):
-        import pickle
+    def get_best_model_func(self):
+        from copy import deepcopy
 
-        best_model_id, _ = get_best_smoothed_loss_id(all_losses)
-        logger.debug(f"Best model is replicate number {best_model_id}")
-        params = ut.tree_get(all_models, best_model_id)
-        if params is None:
-            return None
+        compute_conf = deepcopy(self.compute_conf)
+        data_conf = deepcopy(self.data_conf)
 
-        copied_params = pickle.loads(pickle.dumps(params))
+        def get_best_model(all_models, all_losses):
+            from biocomp.jaxutils import tree_get, tree_to_np
+            import pickle
 
-        best_params = get_shared_params(copied_params)
+            best_model_id, _ = get_best_smoothed_loss_id(all_losses)
+            logger.debug(f"Best model is replicate number {best_model_id}")
+            params = tree_get(all_models, best_model_id)
+            if params is None:
+                return None
 
-        if best_params is None:
-            return None
+            copied_params = pickle.loads(pickle.dumps(params))
 
-        model = BiocompModel(
-            compute_config=self.compute_conf,
-            rescaler=self.data_conf.rescaler,
-            shared_params=ut.tree_to_np(best_params),
-        )
+            best_params = get_shared_params(copied_params)
 
-        return model
+            if best_params is None:
+                return None
+
+            model = BiocompModel(
+                compute_config=compute_conf,
+                rescaler=data_conf.rescaler,
+                shared_params=tree_to_np(best_params),
+            )
+
+            return model
+
+        return get_best_model
 
     def save_best(self, all_models, all_losses, save_dir, name='best_model'):
-        model = self.get_best_model(all_models, all_losses)
+        model = self.get_best_model_func()(all_models, all_losses)
         if model is None:
             logger.warning("!!!!!! No best model found !!!!!")
             return

@@ -1,9 +1,8 @@
 ## {{{                          --     imports     --
 from pydantic import model_validator
 from typing import Any, Optional, List
-
+from sqlalchemy.orm.session import make_transient
 import numpy as np
-
 from biocomp.utils import (
     ArbitraryModel,
     load_lib,
@@ -22,6 +21,34 @@ import biocomptools.toollib.models as md
 from biocomptools.logging_config import get_logger
 
 from sqlmodel import Session
+
+from sqlalchemy.inspection import inspect
+
+
+def detach_object_tree(obj):
+    """Recursively detach an object and all its loaded relationships"""
+    make_transient(obj)
+
+    # Get the mapper for this object
+    mapper = inspect(obj.__class__)
+
+    # Process all relationship attributes
+    for relationship_prop in mapper.relationships:
+        # Skip unloaded relationships to avoid triggering lazy loads
+        if not relationship_prop.key in inspect(obj).unloaded:
+            related_obj = getattr(obj, relationship_prop.key)
+
+            # Handle collections (lists, etc.)
+            if relationship_prop.uselist:
+                if related_obj is not None:
+                    for item in related_obj:
+                        detach_object_tree(item)
+            # Handle scalar relationships
+            elif related_obj is not None:
+                detach_object_tree(related_obj)
+
+    return obj
+
 
 config = cm.config
 
@@ -42,14 +69,13 @@ def to_str(data: Any) -> Any:
 
 logger = get_logger(__name__)
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                        --     datasource     --
 
 
 class DataSource(ArbitraryModel):
-    metadata: dict = {}
-
     def get_data(self) -> List[PlotData]:
         raise NotImplementedError('Subclasses must implement get_data')
 
@@ -80,19 +106,6 @@ class DBSource(DataSource, NetworkSet):
             self.run_selectors(session)
 
     @property
-    def _engine(self):
-        """Lazy-load the database engine when needed (otherwise unpicklable)."""
-        from biocomptools.toollib.models import get_biocompdb_sqlite_engine
-        from biocomptools.toollib.common import config
-
-        _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
-        return _db_engine
-
-    @property
-    def db_session(self):
-        return Session(self._engine)
-
-    @property
     def path_prefix(self):
         return Path(config.paths.root).expanduser().resolve()
 
@@ -101,19 +114,22 @@ class DBSource(DataSource, NetworkSet):
             network.build(self._lib)
         except Exception as e:
             logger.error(f"Error building network {network.name}: {e}")
-            return None
+            logger.exception(e)
+            raise
 
         actual_network = network.network
+
         assert isinstance(actual_network, bc.network.Network)
 
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
-        metadata = self.metadata
-        metadata['network'] = network
+        metadata = {}
+
+        # metadata['network'] = network.model_dump()
         metadata['network_info'] = network.network_info
+        metadata['built_network'] = actual_network
         metadata['source_type'] = 'DB'
 
-        metadata = {**metadata, **network.model_dump()}
-        metadata['datafile'] = datafile
+        # metadata['datafile'] = datafile.model_dump()
         metadata['file_stem'] = datafile_path.stem
 
         if not datafile_path.exists():
@@ -148,27 +164,29 @@ class DBSource(DataSource, NetworkSet):
 
         return pdata
 
+    @property
+    def networks_and_datafiles(self):
+        data = self.get_networks_and_data()
+        if not data:
+            msg = f'No data found for {self.content}'
+            raise ValueError(msg)
+        return data
+
     def get_data(self) -> List[PlotData]:
-        with self.db_session as session:
-            data = self.get_networks_and_data(session)
-            if not data:
-                msg = f'No data found for {self.content}'
-                raise ValueError(msg)
-            networks, datafiles = zip(*data)
+        res = []
+        for n, f in maybetqdm(self.networks_and_datafiles, desc='Loading data'):
+            try:
+                d = self.data_from_network(n, f)
+            except Exception as e:
+                logger.error(f"Error loading data for {n.name}: {e}")
+                logger.exception(e)
+                d = None
+                raise
 
-            res = []
+            if d is not None:
+                res.append(d)
 
-            for n, f in maybetqdm(zip(networks, datafiles), desc='Loading recipes'):
-                try:
-                    d = self.data_from_network(n, f)
-                except Exception as e:
-                    logger.error(f"Error loading data for {n.name}: {e}")
-                    d = None
-
-                if d is not None:
-                    res.append(d)
-
-            return res
+        return res
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
