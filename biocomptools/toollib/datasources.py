@@ -124,12 +124,13 @@ class DBSource(DataSource, NetworkSet):
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
         metadata = {}
 
-        # metadata['network'] = network.model_dump()
+        metadata['network'] = network.model_dump()
+        metadata['network_name'] = network.name
         metadata['network_info'] = network.network_info
         metadata['built_network'] = actual_network
         metadata['source_type'] = 'DB'
 
-        # metadata['datafile'] = datafile.model_dump()
+        metadata['datafile'] = datafile.model_dump()
         metadata['file_stem'] = datafile_path.stem
 
         if not datafile_path.exists():

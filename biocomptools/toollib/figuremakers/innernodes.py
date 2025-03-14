@@ -100,66 +100,60 @@ class InnerNodesFigure(Figure):
 
         return {k: v for k, v in zip(cleaned_names, uorf_values)}
 
-    def create_ern_networks(self, ern_names: List[str]) -> List[md.Network]:
+    def create_ern_networks(self, ern_names: List[str]) -> List[Network]:
         """Create networks for ERN visualization"""
         networks = []
         for name in ern_names:
-            net = md.Network.from_network(
-                Network(
-                    cotx=[
-                        CoTransfection(
-                            units=[
-                                Unit(slots=["hEF1a", name]),
-                                Unit(slots=["hEF1a", "mKO2"]),
-                            ]
-                        ),
-                        CoTransfection(
-                            units=[
-                                Unit(slots=["hEF1a", f"{name}_rec", "eYFP"]),
-                                Unit(slots=["hEF1a", "eBFP2"]),
-                            ]
-                        ),
-                    ],
-                    invert_on_build=True,
-                )
-            )
-            networks.append(net)
-        return networks
-
-    def create_uorf_networks(self, uorf_names: List[str]) -> List[md.Network]:
-        """Create networks for uORF visualization"""
-        uorf_nets = [
-            md.Network.from_network(
-                Network(
-                    cotx=[
-                        CoTransfection(
-                            units=[
-                                Unit(slots=["hEF1a", uorf]),
-                                Unit(slots=["hEF1a", "mKO2"]),
-                            ]
-                        ),
-                    ],
-                    invert_on_build=True,
-                )
-            )
-            for uorf in uorf_names
-        ]
-        return uorf_nets
-
-    def create_basic_network(self) -> md.Network:
-        """Create a simple network for basic nodes"""
-        n = md.Network.from_network(
-            Network(
+            net = Network(
                 cotx=[
                     CoTransfection(
                         units=[
-                            Unit(slots=["hEF1a", "eYFP"], source='plsmd0'),
-                            Unit(slots=["hEF1a", "eBFP2"], source='plsmd0'),
+                            Unit(slots=["hEF1a", name]),
+                            Unit(slots=["hEF1a", "mKO2"]),
+                        ]
+                    ),
+                    CoTransfection(
+                        units=[
+                            Unit(slots=["hEF1a", f"{name}_rec", "eYFP"]),
+                            Unit(slots=["hEF1a", "eBFP2"]),
                         ]
                     ),
                 ],
                 invert_on_build=True,
             )
+            networks.append(net)
+        return networks
+
+    def create_uorf_networks(self, uorf_names: List[str]) -> List[Network]:
+        """Create networks for uORF visualization"""
+        uorf_nets = [
+            Network(
+                cotx=[
+                    CoTransfection(
+                        units=[
+                            Unit(slots=["hEF1a", uorf]),
+                            Unit(slots=["hEF1a", "mKO2"]),
+                        ]
+                    ),
+                ],
+                invert_on_build=True,
+            )
+            for uorf in uorf_names
+        ]
+        return uorf_nets
+
+    def create_basic_network(self) -> Network:
+        """Create a simple network for basic nodes"""
+        n = Network(
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(slots=["hEF1a", "eYFP"], source='plsmd0'),
+                        Unit(slots=["hEF1a", "eBFP2"], source='plsmd0'),
+                    ]
+                ),
+            ],
+            invert_on_build=True,
         )
         return n
 

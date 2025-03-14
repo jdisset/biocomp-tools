@@ -681,9 +681,9 @@ class NetworkPrediction(DataSource):
             {
                 'source_type': 'prediction',
                 'seed': self.seed,
+                'network': network.model_dump(),
                 'model_signature': self.network_model.model.signature(),
-                # 'network': network.copy_safe(),
-                'network': network,
+                'network_name': getattr(network, 'name', f"Network_{network_idx}"),
                 'network_info': network_info,
                 'n_predictions': len(self.predict_at[network_idx]),
                 'network_index': network_idx,

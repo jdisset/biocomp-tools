@@ -343,6 +343,7 @@ def main():
             **make_context_from_types(DEFAULT_TYPES),
             'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
         },
+        capture_globals=False,
     )
     assert isinstance(trainprog, TrainingProgram), f"{trainprog=}"
 

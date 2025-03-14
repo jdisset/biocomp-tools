@@ -138,35 +138,25 @@ class Figure(BaseModel):
 
             for i, t in enumerate(self.plot_tasks):
                 try:
-                    logger.debug(f"Constructing plot task {i}")
                     tc = t.copy()
                     pt = tc.construct(context={"FIG": figax})
                     if dict_like(pt):
                         pt = PlotTask(**pt)  # type: ignore
                     pt.plot_config.inherit_from(self.plot_config)
                     pt._ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
-                    logger.debug(f"Task {i} constructed")
 
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
-                    # print exception traceback
-                    import traceback
-
-                    logger.error(traceback.format_exc())
+                    logger.exception(e)
 
                     continue
 
                 try:
-                    logger.debug(f"Resolving plot task {i}")
                     resolve_all_lazy(pt)
                     pt.run()
-                    logger.debug(f"Plot task {i} done")
                 except Exception as e:
-                    import traceback
-
-                    traceback_msg = traceback.format_exc()
                     logger.error(f"Error running plot task {i}: {e}")
-                    logger.error(traceback_msg)
+                    logger.exception(e)
                     continue
 
             self.figure_spec.finalize(figax)  # type: ignore

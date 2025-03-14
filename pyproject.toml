@@ -10,8 +10,8 @@ authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
 dependencies = [
 	"biocomp",
-	"ray",
-	"pathos",
+	# "ray",
+	"multiprocess",
 	"sqlmodel",
 	"pydantic",
 	"xxhash",
