@@ -66,8 +66,6 @@ class InnerNodesFigure(Figure):
     and shows embeddings of different node types.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     n_samples: int = 150000
     figure_spec: FigureSpec = Field(default_factory=InnerNodesFigureSpec)

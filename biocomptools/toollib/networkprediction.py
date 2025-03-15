@@ -1,4 +1,5 @@
 from pydantic.functional_validators import BeforeValidator
+from pydantic import BaseModel, Field, model_validator, ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
 import jax.numpy as jnp
@@ -49,6 +50,8 @@ class NetworkPrediction(DataSource):
     - comparing predictions to ground truth
     - generating plot data for visualization
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     predict_at: Annotated[Union[np.ndarray, List[np.ndarray]], BeforeValidator(validate_predict_at)]
     network_model: NetworkModel

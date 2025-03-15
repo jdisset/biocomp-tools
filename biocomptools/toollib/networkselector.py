@@ -13,6 +13,8 @@ from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
 from biocomp.utils import load_lib
 from dracon.utils import ser_debug
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import core_schema
 
 logger = get_logger(__name__)
 
@@ -28,9 +30,6 @@ class NetworkDataId(BaseModel):
     file_path: str
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-
-    # def __hash__(self):
-    #     return hash((self.network_name, self.file_path))
 
     def fetch_network_and_datafile(self, session) -> Tuple[md.Network, md.DataFile]:
         logger.debug(f"Fetching network and datafile for {self.network_name} - {self.file_path}")
@@ -75,19 +74,34 @@ class NetworkDataId(BaseModel):
 
         session.expunge_all()
 
-        # logger.debug(f"Network and datafile fetched: {network.name} - {datafile.file}")
-        # logger.debug("Running a serialization debug:")
-        net_err = ser_debug(network)
-        df_err = ser_debug(datafile)
-        # if net_err or df_err:
-        #     logger.error("Serialization errors")
-        # else:
-        #     logger.debug("Serialization successful")
-
         return network, datafile
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+## {{{                         --     selector     --
+
+
 class Regex(str):
+    """A string that should be treated as a regex pattern."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(cls),
+                core_schema.chain_schema(
+                    [
+                        core_schema.str_schema(),
+                        core_schema.no_info_plain_validator_function(cls),
+                    ]
+                ),
+            ]
+        )
+
     def __new__(cls, string):
         return super().__new__(cls, string)
 
@@ -101,21 +115,11 @@ def maybe_regex(s: str) -> str:
         return re.escape(s)
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                         --     selector     --
 class NetworkSelector(BaseModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
     This class allows to batch select networks based on their names, recipes, experiments, etc.
     """
-
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-        # validate_default=True,
-    )
 
     experiment_name: Optional[str | Regex] = None
     recipe_name: Optional[str | Regex] = None
@@ -138,7 +142,6 @@ class NetworkSelector(BaseModel):
         """
 
         try:
-            # Build the base query
             query = (
                 select(md.Network)
                 .join(md.Recipe)
@@ -150,7 +153,6 @@ class NetworkSelector(BaseModel):
                 )
             )
 
-            # Apply filters
             if self.experiment_name:
                 logger.debug(f"Applying experiment filter: {self.experiment_name}")
                 if isinstance(self.experiment_name, Regex):
@@ -160,24 +162,24 @@ class NetworkSelector(BaseModel):
 
             if self.recipe_name:
                 if isinstance(self.recipe_name, Regex):
-                    # For regex, we'll just use the pattern directly since it might include custom matching
+                    # for regex, we'll just use the pattern directly since it might include custom matching
                     query = query.where(col(md.Recipe.name).regexp_match(self.recipe_name))
                 else:
-                    # For exact string match, we need to find the recipe with format "{exp_name}_{recipe_name}"
+                    # for exact string match, we need to find the recipe with format "{exp_name}_{recipe_name}"
                     if self.experiment_name:
                         if isinstance(self.experiment_name, Regex):
-                            # If experiment_name is a regex, we can't construct the exact recipe name
-                            # So we'll need to use a regex that matches the end of the string
+                            # if experiment_name is a regex, we can't construct the exact recipe name
+                            # so we'll need to use a regex that matches the end of the string
                             query = query.where(
                                 col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                             )
                         else:
-                            # If we have exact experiment name, we can construct the full recipe name
+                            # if we have exact experiment name, we can construct the full recipe name
                             query = query.where(
                                 md.Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
                             )
                     else:
-                        # If no experiment name is provided, match any experiment prefix
+                        # if no experiment name is provided, match any experiment prefix
                         query = query.where(
                             col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
@@ -195,7 +197,7 @@ class NetworkSelector(BaseModel):
                 msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}. Query: {query}. Ignoring."
                 logger.error(msg)
 
-            # Filter by output name if specified
+            # filter by output name if specified
             if self.output_name is not None:
                 original_count = len(networks)
                 networks = [
@@ -205,7 +207,6 @@ class NetworkSelector(BaseModel):
                     == self.output_name.upper()
                 ]
 
-            # Process networks and collect data
             network_and_data = []
 
             for network in networks:
@@ -220,20 +221,13 @@ class NetworkSelector(BaseModel):
                             .where(md.DataFile.recipe_name == network.recipe_name)
                         )
 
-                        # Add calibration name filter based on type
+                        # add calibration name filter based on type
                         if isinstance(self.calibration_name, Regex):
                             datafile_query = datafile_query.where(
                                 col(md.DataFile.calibration_name).regexp_match(
                                     self.calibration_name
                                 )
                             )
-
-                            # # case insensitive version:
-                            # datafile_query = datafile_query.where(
-                            #     func.upper(col(md.DataFile.calibration_name)).regexp_match(
-                            #         self.calibration_name
-                            #     )
-                            # )
 
                         else:
                             datafile_query = datafile_query.where(
@@ -306,11 +300,6 @@ class NetworkSelector(BaseModel):
 
 class NetworkSet(BaseModel):
     content: List[Union[NetworkDataId, NetworkSelector, "NetworkSet"]] = []
-
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-    )
 
     @property
     def _engine(self):

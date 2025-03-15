@@ -3,10 +3,7 @@ from pydantic import model_validator
 from typing import Any, Optional, List
 from sqlalchemy.orm.session import make_transient
 import numpy as np
-from biocomp.utils import (
-    ArbitraryModel,
-    load_lib,
-)
+from biocomp.utils import load_lib
 
 from pathlib import Path
 import biocomp as bc
@@ -19,8 +16,8 @@ import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm, make_pretty_input_names
 import biocomptools.toollib.models as md
 from biocomptools.logging_config import get_logger
+from pydantic import BaseModel
 
-from sqlmodel import Session
 
 from sqlalchemy.inspection import inspect
 
@@ -75,7 +72,7 @@ logger = get_logger(__name__)
 ## {{{                        --     datasource     --
 
 
-class DataSource(ArbitraryModel):
+class DataSource(BaseModel):
     def get_data(self) -> List[PlotData]:
         raise NotImplementedError('Subclasses must implement get_data')
 

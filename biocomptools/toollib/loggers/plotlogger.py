@@ -30,11 +30,29 @@ class PlotLogger(Logger):
                 if best_model is not None:
                     logger.debug(f"Got best model with signature: {best_model.signature()}")
 
-            logger.info(f'Plotting at step {step}')
+            logger.info(f'Plotting logger called at step {step}')
+            logger.debug(f'Plotting logger has {len(self.jobs)} jobs')
+
+            import dracon as dr
+            from dracon.asizeof import asizeof
 
             for job in self.jobs:
-                ser_debug(job)
                 j = job.copy(reroot=True)
+
+                # nr = dr.utils.node_repr(
+                #     j,
+                #     enable_colors=True,
+                #     show_biggest_context=5,
+                # )
+                # print(nr)
+                # print(f'Job size: {asizeof(j) / 1e6:.2f} MB')
+                # print(f'Job.context.size: {asizeof(j.context) / 1e6:.2f} MB')
+                # print(f'Job._full_composition.size: {asizeof(j._full_composition) / 1e6:.2f} MB')
+                # print(f'Job._loader.size: {asizeof(j._loader) / 1e6:.2f} MB')
+                # ser_debug(j._loader, 'sizeof', max_size_mb=1)
+                # ser_debug(j._loader.context, 'sizeof', max_size_mb=1)
+                # ser_debug(j._full_composition, 'sizeof', max_size_mb=1)
+
                 try:
                     if best_model is not None:
                         constructed_job = j.construct(

@@ -1,11 +1,10 @@
 !set_default axnum: null
-!set_default nslices: 30
+!set_default nslices: 10
 !set_default threshold: 0.225
 !set_default opacity: 0.25
 !set_default zlims: [0, 0.6]
 
 !set_default slices: ${linspace(zlims[0], zlims[1], int(nslices))}
-!define plot_title: ${D.metadata.get('title', D.metadata["network"].title())}
 
 plot_config:
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
@@ -16,6 +15,7 @@ plot_config:
         k: 1000
         min_points: 25
         radius: 0.12
+
       smooth_3d_params:
         draw_colorbar: false
         show_inner_spines: false
@@ -23,7 +23,8 @@ plot_config:
         show_front_face_ticks: true
         smooth_2d_params:
           knn_grid_params:
-            grid_resolution: 80
+            grid_resolution: 50
+            # grid_resolution: 80
           heatmap_params:
             opacity: ${float(opacity)}
             show_image: True
@@ -42,4 +43,3 @@ plot_method:
     ytitle: ${get_pretty_axis_label(1, D)}
     ztitle: ${get_pretty_axis_label(2, D)}
     vtitle: ${D.output_name}
-    title: ${plot_title}

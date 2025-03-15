@@ -3,7 +3,7 @@ from typing import Any, List, Dict, Optional, Annotated
 import matplotlib as mpl
 from dracon.draconstructor import resolve_all_lazy
 from biocomp.datautils import DataRescaler
-from biocomp.utils import PartialFunction, ArbitraryModel
+from biocomp.utils import PartialFunction
 from dracon.deferred import DeferredNode
 from biocomp import utils as ut
 from biocomp.plotutils import FigureSpec

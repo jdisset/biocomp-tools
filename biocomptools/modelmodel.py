@@ -193,7 +193,9 @@ class NetworkModel(BaseModel):
             raise e
         try:
             self._local_params = get_nonshared_params(init_params)
-            self._params = pr.ParameterTree.merge(self.model.shared_params, self._local_params)
+            self._params = load_params(
+                pr.ParameterTree.merge(self.model.shared_params, self._local_params)
+            )
         except Exception as e:
             logger.error(f"error updating params: {e}")
             logger.error(f"networks: {self.network}")

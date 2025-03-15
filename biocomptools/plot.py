@@ -2,6 +2,8 @@
 
 from biocomptools.logging_config import get_logger, setup_logging
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from tqdm import tqdm
+from biocomptools.toollib.common import maybetqdm
 
 import dracon as dr
 from dracon.utils import ser_debug
@@ -157,13 +159,6 @@ def get_pretty_axis_label(i: int, d: DataSource) -> str:
     return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
 
 
-def _init_worker():
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    os.environ["JAX_PLATFORMS"] = "cpu"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-    setup_logging()
-
-
 def _make_figure(figure_data):
     figure, i, total, kw = figure_data
     t0 = time.time()
@@ -191,7 +186,7 @@ def _make_figure(figure_data):
     t1 = time.time()
     opath = f.figure_spec.output_path
     logger.info(f"[{i}/{total}] Figure {opath} completed in {t1 - t0:.2f}s")
-    return i
+    return i, opath
 
 
 class PlotJob(BaseModel):
@@ -201,7 +196,7 @@ class PlotJob(BaseModel):
     parallel_mode: Annotated[
         Literal['multiprocess', 'ray', 'none'],
         Arg(help='Parallel mode to use (multiprocess, ray, none)'),
-    ] = 'multiprocess'
+    ] = 'ray'
 
     clear_figure_context_keys: Annotated[
         List[str], Arg(help='Clear these keys from the figure context')
@@ -220,7 +215,10 @@ class PlotJob(BaseModel):
                     del fig.context[k]
 
         t0 = time.time()
-        fig_copies = [f.copy(reroot=True) for f in self.figures]
+        fig_copies = [
+            f.copy(reroot=True)
+            for f in maybetqdm(self.figures, min_len=20, desc='Copying figure tasks')
+        ]
         tcopy = time.time()
         logger.debug(f"Figure copies took {tcopy - t0:.2f}s")
 
@@ -233,11 +231,12 @@ class PlotJob(BaseModel):
             import multiprocess as mp
             import os
 
+            def _init_worker():
+                os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+                os.environ["JAX_PLATFORMS"] = "cpu"
+                setup_logging()
+
             mp.set_start_method('spawn', force=True)  # type: ignore
-            child_env = dict(os.environ)
-            child_env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-            child_env["JAX_PLATFORMS"] = "cpu"
-            child_env["CUDA_VISIBLE_DEVICES"] = "1"
             with mp.Pool(self.nworkers, initializer=_init_worker) as pool:
                 import numpy
 
@@ -254,23 +253,29 @@ class PlotJob(BaseModel):
         elif self.parallel_mode == 'ray':
             logger.debug(f"Using ray with {self.nworkers} workers")
             import ray
+            import memray
+
+            time_ray_start = time.time()
 
             if not ray.is_initialized():
-                ray.init(
+                context = ray.init(
                     num_cpus=self.nworkers,
                     runtime_env={
                         'env_vars': {
                             'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
                             'JAX_PLATFORMS': 'cpu',
-                            'CUDA_VISIBLE_DEVICES': '1',
                         }
                     },
                 )
+                logger.info(f"Ray context: {context}")
+                logger.info(f"Ray dashboard at: {context.dashboard_url}")
 
+            # much faster to put all copies in a single ref even if each process will have to copy it
             all_copies_ref = ray.put(fig_copies)
 
             @ray.remote
             def _make_figure_ray(i):
+                # with memray.Tracker(f"/tmp/ray/session_latest/logs/{i}_mem_profile.bin"):
                 make_figure_args = (
                     ray.get(all_copies_ref)[i],
                     i + 1,
@@ -279,11 +284,29 @@ class PlotJob(BaseModel):
                 )
                 return _make_figure(make_figure_args)
 
-            ray_refs = [_make_figure_ray.remote(i) for i in range(total_figures)]
-            results = ray.get(ray_refs)
+            task_refs = [_make_figure_ray.remote(i) for i in range(total_figures)]
+
+            time_ray_work_submit = time.time()
+            logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")
+
+            def wait_iterator(task_refs):
+                while task_refs:
+                    done, task_refs = ray.wait(task_refs, num_returns=1)
+                    yield ray.get(done[0])
+
+            results = [
+                r
+                for r in tqdm(
+                    wait_iterator(task_refs),
+                    total=total_figures,
+                    desc='Generating figures',
+                )
+            ]
+            fpaths = '\n  - ' + '\n  - '.join([str(p) for _, p in results])
+            logger.debug(f"Generated {len(results)} figures:{fpaths}")
 
         t1 = time.time()
-        logger.info(f"Plot job of {total_figures} figures completed in {t1 - t0:.2f}s")
+        logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
 
         return
 

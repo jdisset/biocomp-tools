@@ -1,13 +1,10 @@
 import matplotlib as mpl
-from dracon.deferred import DeferredNode
 from dracon.draconstructor import resolve_all_lazy
 from typing import TypeVar, Union
 from collections import defaultdict
-from pathlib import Path
-from copy import deepcopy
 from typing import List, Optional, Dict, Any, Tuple
-from biocomp.utils import PartialFunction, ArbitraryModel
-from biocomp.plotutils import FigureSpec, SimpleLayout, GridLayout
+from biocomp.utils import PartialFunction
+from biocomp.plotutils import GridLayout
 from biocomptools.toollib.plot import PlotTask, PlotConfig, Figure, load_default_plotconf
 from biocomp.plotutils import PlotData
 from biocomptools.logging_config import get_logger
