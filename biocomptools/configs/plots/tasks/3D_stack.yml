@@ -1,5 +1,5 @@
 !set_default axnum: null
-!set_default nslices: 10
+!set_default nslices: 25
 !set_default threshold: 0.225
 !set_default opacity: 0.25
 !set_default zlims: [0, 0.6]
@@ -21,10 +21,16 @@ plot_config:
         show_inner_spines: false
         show_slice_ticks: false
         show_front_face_ticks: true
+        xaxis_labelpad: 10
+        yaxis_labelpad: 10
+        cube_edge_props:
+          bottom_right:
+            zaxis_title:
+              offset: [55, 0]
+
         smooth_2d_params:
           knn_grid_params:
-            grid_resolution: 50
-            # grid_resolution: 80
+            grid_resolution: 70
           heatmap_params:
             opacity: ${float(opacity)}
             show_image: True
