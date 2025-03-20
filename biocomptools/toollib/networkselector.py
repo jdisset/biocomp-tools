@@ -483,8 +483,6 @@ class CleanupFilter(NetworkFilter):
     """
 
     def _find_twice_same_rec_with_different_rna(self, net_info, lib):
-        # TODO: right now it's just checking for multiple ERN rec sites
-        # need to make sure the mRNA is different before rejecting
         appears_twice = []
         all_parts = net_info['all_parts']
         for i, p1 in enumerate(all_parts):
@@ -495,8 +493,15 @@ class CleanupFilter(NetworkFilter):
                         if i == j:
                             continue
                         if pname in p2:
-                            if pname not in appears_twice:
-                                appears_twice.append(pname)
+                            # reject unless it's the same content
+                            # TODO: technically we should allow different untranscribed regions
+                            # but in the current experiments they are always the same
+                            # so if there's a difference in the parts
+                            p1set = set(p1.keys())
+                            p2set = set(p2.keys())
+                            if p1set != p2set:
+                                if pname not in appears_twice:
+                                    appears_twice.append(pname)
                             break
         return appears_twice
 
@@ -568,10 +573,10 @@ class CleanupFilter(NetworkFilter):
         lib = load_lib()
         session.expunge_all()
 
-        # twice_same_rec = self._find_twice_same_rec(net_info, lib)
+        # twice_same_rec = self._find_twice_same_rec_with_different_rna(net_info, lib)
         # if twice_same_rec:
         #     logger.info(
-        #         f"Network {network_id} has multiple ERN recognition sites: {twice_same_rec}. Skipping."
+        #         f"Network {network_id} has multiple ERN recognition sites with diff rna: {twice_same_rec}. Skipping."
         #     )
         #     return False
 

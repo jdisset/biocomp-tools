@@ -4,6 +4,8 @@ from biocomptools.logging_config import get_logger, setup_logging
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from tqdm import tqdm
 from biocomptools.toollib.common import maybetqdm
+import numpy as np
+import memray
 
 import dracon as dr
 from dracon.utils import ser_debug
@@ -202,6 +204,8 @@ class PlotJob(BaseModel):
         List[str], Arg(help='Clear these keys from the figure context')
     ] = []
 
+    max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 80
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def run(self):
@@ -215,18 +219,21 @@ class PlotJob(BaseModel):
                     del fig.context[k]
 
         t0 = time.time()
-        fig_copies = [
-            f.copy(reroot=True)
-            for f in maybetqdm(self.figures, min_len=20, desc='Copying figure tasks')
-        ]
-        tcopy = time.time()
-        logger.debug(f"Figure copies took {tcopy - t0:.2f}s")
+
+        random_order = np.random.permutation(total_figures)
 
         if self.nworkers <= 1 or self.parallel_mode == 'none' or total_figures <= 1:
+            fig_copies = [
+                self.figures[i].copy(reroot=True)
+                for i in maybetqdm(random_order, min_len=20, desc='Copying figure tasks')
+            ]
             for i, f in enumerate(fig_copies):
                 _make_figure((f, i + 1, total_figures, {"overwrite": overwrite}))
 
         elif self.parallel_mode == 'multiprocess':
+            raise NotImplementedError(
+                "Multiprocess is not supported at the moment. Use ray instead."
+            )
             logger.debug(f"Using multiprocess with {self.nworkers} workers")
             import multiprocess as mp
             import os
@@ -238,22 +245,17 @@ class PlotJob(BaseModel):
 
             mp.set_start_method('spawn', force=True)  # type: ignore
             with mp.Pool(self.nworkers, initializer=_init_worker) as pool:
-                import numpy
-
-                random_order = numpy.random.permutation(total_figures)
-
                 results = pool.map(
                     _make_figure,
                     [
-                        (fig_copies[i], i + 1, total_figures, {"overwrite": overwrite})
-                        for i in random_order
+                        (f, i + 1, total_figures, {"overwrite": overwrite})
+                        for i, f in enumerate(fig_copies)
                     ],
                 )
 
         elif self.parallel_mode == 'ray':
             logger.debug(f"Using ray with {self.nworkers} workers")
             import ray
-            import memray
 
             time_ray_start = time.time()
 
@@ -270,45 +272,57 @@ class PlotJob(BaseModel):
                 logger.info(f"Ray context: {context}")
                 logger.info(f"Ray dashboard at: {context.dashboard_url}")
 
-            # much faster to put all copies in a single ref even if each process will have to copy it
-            all_copies_ref = ray.put(fig_copies)
-
-            @ray.remote
-            def _make_figure_ray(i):
-                # with memray.Tracker(f"/tmp/ray/session_latest/logs/{i}_mem_profile.bin"):
-                make_figure_args = (
-                    ray.get(all_copies_ref)[i],
-                    i + 1,
-                    total_figures,
-                    {"overwrite": overwrite},
-                )
-                return _make_figure(make_figure_args)
-
-            task_refs = [_make_figure_ray.remote(i) for i in range(total_figures)]
-
-            time_ray_work_submit = time.time()
-            logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")
-
             def wait_iterator(task_refs):
                 while task_refs:
                     done, task_refs = ray.wait(task_refs, num_returns=1)
                     yield ray.get(done[0])
 
-            results = [
-                r
-                for r in tqdm(
-                    wait_iterator(task_refs),
-                    total=total_figures,
-                    desc='Generating figures',
-                )
-            ]
-            fpaths = '\n  - ' + '\n  - '.join([str(p) for _, p in results])
-            logger.debug(f"Generated {len(results)} figures:{fpaths}")
+            # much faster to put all copies in a single ref even if each process will have to copy it
+            batch_idx = 0
+            num_batches = (total_figures + self.max_batch_size - 1) // self.max_batch_size
+            batch_start = 0
+            while batch_start < total_figures:
+                batch_idx += 1
+                batch_len = min(self.max_batch_size, total_figures - batch_start)
+                fig_copies = [
+                    self.figures[i].copy(reroot=True)
+                    for i in maybetqdm(
+                        random_order[batch_start : batch_start + batch_len],
+                        min_len=10,
+                        desc=f'Copying figure tasks for batch {batch_idx}/{num_batches}',
+                    )
+                ]
+                copies_ref = ray.put(fig_copies)
+                batch_start += batch_len
+
+                @ray.remote
+                def _make_figure_ray(i, copies_ref=copies_ref):
+                    make_figure_args = (
+                        ray.get(copies_ref)[i],
+                        i + 1,
+                        total_figures,
+                        {"overwrite": overwrite},
+                    )
+                    return _make_figure(make_figure_args)
+
+                task_refs = [_make_figure_ray.remote(i) for i in range(batch_len)]
+
+                time_ray_work_submit = time.time()
+                logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")
+
+                results = [
+                    r
+                    for r in tqdm(
+                        wait_iterator(task_refs),
+                        total=batch_len,
+                        desc=f'Generating figures from batch {batch_idx + 1}/{num_batches}',
+                    )
+                ]
+                fpaths = '\n  - ' + '\n  - '.join([str(p) for _, p in results])
+                logger.debug(f"Generated {len(results)} figures:{fpaths}")
 
         t1 = time.time()
         logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
-
-        return
 
 
 plot_extra_context = {

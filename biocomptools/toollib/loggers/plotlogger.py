@@ -1,4 +1,5 @@
 ## {{{                          --     imports     --
+import memray
 
 from dracon.deferred import DeferredNode
 from typing import List, Tuple, Callable
@@ -19,7 +20,16 @@ class PlotLogger(Logger):
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         get_best_model = training_program.get_best_model_func()
 
-        def plot_callback(step, training_config, step_history=None, **kwargs):
+        def plot_callback(
+            step,
+            training_config,
+            step_history=None,
+            stack=None,
+            xbatches=None,
+            ybatches=None,
+            **kwargs,
+        ):
+            # with memray.Tracker("./plotlogger_memray_profile.bin"):
             logger.debug(f"\n==== PlotLogger callback at step {step} ====")
             best_model = None
             if step_history is not None:
@@ -38,21 +48,6 @@ class PlotLogger(Logger):
 
             for job in self.jobs:
                 j = job.copy(reroot=True)
-
-                # nr = dr.utils.node_repr(
-                #     j,
-                #     enable_colors=True,
-                #     show_biggest_context=5,
-                # )
-                # print(nr)
-                # print(f'Job size: {asizeof(j) / 1e6:.2f} MB')
-                # print(f'Job.context.size: {asizeof(j.context) / 1e6:.2f} MB')
-                # print(f'Job._full_composition.size: {asizeof(j._full_composition) / 1e6:.2f} MB')
-                # print(f'Job._loader.size: {asizeof(j._loader) / 1e6:.2f} MB')
-                # ser_debug(j._loader, 'sizeof', max_size_mb=1)
-                # ser_debug(j._loader.context, 'sizeof', max_size_mb=1)
-                # ser_debug(j._full_composition, 'sizeof', max_size_mb=1)
-
                 try:
                     if best_model is not None:
                         constructed_job = j.construct(
@@ -60,6 +55,10 @@ class PlotLogger(Logger):
                                 **plot_extra_context,
                                 'best_model': best_model,
                                 'step': step,
+                                # 'step_history': step_history,
+                                # 'stack': stack,
+                                # 'xbatches': xbatches,
+                                # 'ybatches': ybatches,
                             },
                         )
                         if not isinstance(constructed_job, PlotJob):

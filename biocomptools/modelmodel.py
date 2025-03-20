@@ -138,6 +138,8 @@ class NetworkModel(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: bc.Network | list[bc.Network]
 
+    max_points_per_batch: int = 150000
+
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
     _batch_apply: Optional[Callable] = None
@@ -220,13 +222,6 @@ class NetworkModel(BaseModel):
     def get_node_indices(self, network_id: int, node_id: int):
         """
         get input and output indices for a virtual node in the compute stack
-
-        parameters:
-            network_id: index of the network
-            node_id: id of the node within the network
-
-        returns:
-            tuple of (input_indices, output_indices) where each is a list of arrays
         """
         if self._stack is None:
             raise ValueError("stack not built")
@@ -236,21 +231,25 @@ class NetworkModel(BaseModel):
         node = layer.nodes[n_id]
 
         input_indices = []
+        input_shapes = []
         if layer.f_input_shapes:  # skip for input layer
             for input_slot in range(len(layer.f_input_shapes)):
                 start_idx = self._stack.get_node_input_start_index(node, input_slot)
                 input_shape = layer.f_input_shapes[input_slot]
                 length = int(np.prod(input_shape))
                 input_indices.append(np.arange(start_idx, start_idx + length))
+                input_shapes.append(input_shape)
 
         output_indices = []
+        output_shapes = []
         for output_slot in range(len(layer.f_out_shapes)):
             start_idx = self._stack.get_node_output_start_index(node, output_slot)
             output_shape = layer.f_out_shapes[output_slot]
             length = int(np.prod(output_shape))
             output_indices.append(np.arange(start_idx, start_idx + length))
+            output_shapes.append(output_shape)
 
-        return input_indices, output_indices
+        return (input_indices, input_shapes), (output_indices, output_shapes)
 
     def get_network_output_indices(self, network_idx: int):
         """
@@ -271,7 +270,7 @@ class NetworkModel(BaseModel):
         self,
         X: np.ndarray,
         key=None,
-        max_batch_size=500,
+        max_points_per_batch=None,
         disable_variational: bool = True,
         collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
@@ -290,9 +289,8 @@ class NetworkModel(BaseModel):
         scaled_result, collections = self.predict(
             scaled_X,
             key=key,
-            max_batch_size=max_batch_size,
+            max_points_per_batch=max_points_per_batch,
             disable_variational=disable_variational,
-            collection_points=collection_points,
             z_value=z_value,
         )
         scaled_yhat = self.model.rescaler.inv(scaled_result)
@@ -302,35 +300,41 @@ class NetworkModel(BaseModel):
         self,
         X: np.ndarray,
         key=None,
-        max_batch_size=500,
+        max_points_per_batch=None,
         disable_variational: bool = True,
-        collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
-    ) -> np.ndarray:
+    ):
         """
         make predictions using the model
 
         parameters:
             X: input data
             key: random key for predictions
-            max_batch_size: maximum batch size for predictions
+            max_points_per_batch: maximum number of output points per batch
             disable_variational: whether to disable variational parameters
-            collection_points: list of points to collect data from
+
+            collection_points: list of points to collect data from. Each point is a NodeSpec,
+            meaning a network id and node id that will be used to index the full, flattened, running output of the network
+            in order to collect input/output data from these specific nodes. Super useful for debugging and visualization
+            (required for inner node plots)
+
             z_value: value for z latents, either 'uniform' or a float
 
         returns:
-            predictions
+            predictions (the "regular" output of the network stack) and collections (input/output data from specific nodes)
         """
         import jax
         import jax.numpy as jnp
-        from jax.random import PRNGKey
+
+        max_points_per_batch = max_points_per_batch or self.max_points_per_batch
 
         if key is None:
-            key = PRNGKey(0)
+            key = jax.random.PRNGKey(0)
         if isinstance(key, int):
-            key = PRNGKey(key)
+            key = jax.random.PRNGKey(key)
 
         # prepare parameters
+        assert self._params is not None
         params = self._params
         if disable_variational:
             logger.debug("disabling variational embeddings")
@@ -338,28 +342,34 @@ class NetworkModel(BaseModel):
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
 
-        # determine collection indices
-        collect_in_indices, collect_out_indices = self.prepare_collection_indices(collection_points)
-        logger.debug(f"collect_in_indices: {collect_in_indices}")
-        logger.debug(f"collect_out_indices: {collect_out_indices}")
+        assert self._stack is not None and self._stack.total_nb_of_outputs is not None
+        outputs_per_sample = int(self._stack.total_nb_of_outputs)
+        effective_batch_size = max(1, max_points_per_batch // outputs_per_sample)
 
-        # prepare for batched prediction
         num_z = self._params["global/number_of_quantile_variables"]
         n_samples = X.shape[0]
-        n_batches = (n_samples + max_batch_size - 1) // max_batch_size
-        logger.debug(
-            f"predicting {n_samples} samples in {n_batches} batches, with {len(self.network)} networks. signature: {self.signature()}"
-        )
+        n_batches = (n_samples + effective_batch_size - 1) // effective_batch_size
+
+        # pad X for even batch sizes
+        padded_samples = n_batches * effective_batch_size
+        pad_size = padded_samples - n_samples
+
+        if pad_size > 0:
+            padding_shape = list(X.shape)
+            padding_shape[0] = pad_size
+            padding = np.zeros(padding_shape, dtype=X.dtype)
+            X_padded = np.concatenate([X, padding], axis=0)
+        else:
+            X_padded = X
 
         # make predictions in batches
         all_yhats = []
-        collections_x = []
-        collections_y = []
+        all_fullouts = []
         batch_keys = jax.random.split(key, n_batches)
         for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="predicting"):
-            start_idx = i * max_batch_size
-            end_idx = min((i + 1) * max_batch_size, n_samples)
-            batch_size = end_idx - start_idx
+            start_idx = i * effective_batch_size
+            end_idx = (i + 1) * effective_batch_size
+            batch_size = effective_batch_size
 
             if z_value == 'uniform':
                 Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
@@ -368,38 +378,23 @@ class NetworkModel(BaseModel):
 
             keys_batch = jax.random.split(batch_key, batch_size)
 
-            # TODO: prevent cache misses for last batch (when it doesn't fill the batch)
-
+            assert self._batch_apply is not None
             out, (_, fullout) = self._batch_apply(
                 params,
-                X[start_idx:end_idx],
+                X_padded[start_idx:end_idx],
                 Z_batch,
                 keys_batch,
                 None,
                 None,
             )
 
-            if len(collect_out_indices) > 0:
-                collections_y_batch = np.asarray(fullout[:, collect_out_indices])
-                collections_x_batch = np.asarray(fullout[:, collect_in_indices])
-                collections_x.append(collections_x_batch)
-                collections_y.append(collections_y_batch)
+            all_yhats.append(np.asarray(out))
+            all_fullouts.append(fullout)
 
-            yhat_batch = np.asarray(out)
-            all_yhats.append(yhat_batch)
+        yhat = np.concatenate(all_yhats, axis=0)[:n_samples]
+        fullout = np.concatenate(all_fullouts, axis=0)[:n_samples]
 
-        # combine batches
-        yhat = np.concatenate(all_yhats, axis=0)
-
-        if len(collections_x) > 0:
-            collections = (
-                np.concatenate(collections_x, axis=0),
-                np.concatenate(collections_y, axis=0),
-            )
-        else:
-            collections = (None, None)
-
-        return yhat, collections
+        return yhat, fullout
 
     def prepare_collection_indices(
         self,
@@ -421,7 +416,7 @@ class NetworkModel(BaseModel):
         collect_in_indices = []
         if collection_points:
             for point in collection_points:
-                collect_in_idx, collect_out_idx = self.get_node_indices(
+                (collect_in_idx, _), (collect_out_idx, _) = self.get_node_indices(
                     point.network_id, point.node_id
                 )
                 collect_in_indices.extend(collect_in_idx)
@@ -434,54 +429,15 @@ class NetworkModel(BaseModel):
 
     def split_outputs_per_network(
         self, yhat: np.ndarray, max_samples: Optional[int] = None
-    ) -> List[np.ndarray]:
-        """
-        split a stacked output into per-network outputs
-
-        parameters:
-            yhat: stacked output array
-            max_samples: maximum number of samples to include (for truncation)
-
-        returns:
-            list of per-network output arrays
-        """
-        if self._stack is None:
-            raise ValueError("stack not built")
-
-        network_outputs = []
-        output_start_id = 0
-
+    ) -> list[np.ndarray]:
         # TODO: when we use different collection points than the regular output,
         # we can't simply split by network_output_indices. we need to figure out the
         # shape of each output collection
-        for i, _ in enumerate(self.network):
-            # get output shapes for this network
-            _, output_shapes = self._stack.get_network_output_indices(i)
-            assert isinstance(output_shapes, list)
 
-            # process each output
-            outputs = []
-            for output_shape in output_shapes:
-                nout = np.prod(output_shape)
-                output = yhat[:, output_start_id : output_start_id + nout].reshape(
-                    -1, *output_shape
-                )
-                outputs.append(output)
-                output_start_id += nout
+        if self._stack is None:
+            raise ValueError("stack not built")
 
-            if not all(output.shape == outputs[0].shape for output in outputs):
-                raise ValueError(
-                    f"Outputs have different shapes: {[output.shape for output in outputs]}"
-                )
-            network_output = np.concatenate(outputs, axis=1)
-
-            # truncate if needed
-            if max_samples is not None and max_samples < network_output.shape[0]:
-                network_output = network_output[:max_samples]
-
-            network_outputs.append(network_output)
-
-        return network_outputs
+        return self._stack.split_stack_outputs_per_network(np.asarray(yhat), max_samples)
 
     def visualize_stack(self, output_path='/tmp/stackviz.html'):
         """visualize the compute stack as html"""

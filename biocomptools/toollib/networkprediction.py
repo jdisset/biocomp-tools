@@ -64,7 +64,7 @@ class NetworkPrediction(DataSource):
     collection_points: Optional[List[NodeSpec]] = None  # collection points to examine inner nodes
 
     seed: int = 0
-    max_evals: int = 30000
+    max_evals: int = 300000
     use_output_as_input: bool = False
     z_value: Union[Literal['uniform'], float] = 'uniform'
     disable_variational: bool = True
@@ -80,10 +80,6 @@ class NetworkPrediction(DataSource):
     _gtruths: Optional[List[Optional[np.ndarray]]] = None
     _aligned_x: Optional[List[np.ndarray]] = None
     _aligned_ground_truth: Optional[List[Optional[np.ndarray]]] = None
-    _collection_in: Optional[np.ndarray] = None
-    _collection_out: Optional[np.ndarray] = None
-    _collection_input_offsets: Optional[List[int]] = None
-    _collection_output_offsets: Optional[List[int]] = None
     _network_stats: Optional[List[Dict[str, Any]]] = None
 
     def model_post_init(self, *args, **kwargs):
@@ -203,25 +199,6 @@ class NetworkPrediction(DataSource):
 
         return aligned_predict_at, aligned_ground_truth
 
-    def _compute_collection_indices(self):
-        """compute index offsets for each collection point"""
-        input_offsets = [0]
-        output_offsets = [0]
-        assert self.collection_points is not None
-
-        for point in self.collection_points:
-            input_indices, output_indices = self.network_model.get_node_indices(
-                point.network_id, point.node_id
-            )
-
-            total_input_indices = sum(len(idx) for idx in input_indices)
-            total_output_indices = sum(len(idx) for idx in output_indices)
-
-            input_offsets.append(input_offsets[-1] + total_input_indices)
-            output_offsets.append(output_offsets[-1] + total_output_indices)
-
-        return input_offsets, output_offsets
-
     def compute_all_network_predictions(self):
         """compute predictions for all networks"""
 
@@ -243,20 +220,12 @@ class NetworkPrediction(DataSource):
             else self.network_model.predict_unscaled
         )
 
-        stacked_yhats, collection_values = predict_f(
+        stacked_yhats, self._fullout = predict_f(
             stacked_x,
             key=self.seed,
-            collection_points=self.collection_points,
             z_value=self.z_value,
             disable_variational=self.disable_variational,
         )
-
-        self._collection_in, self._collection_out = collection_values
-
-        if self.collection_points and self._collection_in is not None:
-            self._collection_input_offsets, self._collection_output_offsets = (
-                self._compute_collection_indices()
-            )
 
         # split the outputs by network
         network_outputs = self.network_model.split_outputs_per_network(
@@ -265,44 +234,7 @@ class NetworkPrediction(DataSource):
 
         self._process_prediction_results(network_outputs, effective_max_evals)
 
-        # calculate and store network statistics
         self._network_stats = self._calculate_all_network_stats()
-
-    def _create_collection_xy_function(
-        self,
-        collection_idx: int,
-        input_start: int,
-        input_end: int,
-        output_start: int,
-        output_end: int,
-    ) -> Callable[[PlotData], Tuple[np.ndarray, np.ndarray]]:
-        """create a function to get x and y data for a specific collection point"""
-
-        def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
-            logger.debug(f"getting xy for collection point {collection_idx}")
-
-            # compute predictions if not already computed
-            if not hasattr(self, '_collection_in') or self._collection_in is None:
-                self.compute_all_network_predictions()
-
-            if self._collection_in is None or self._collection_out is None:
-                raise ValueError("No collection data available")
-
-            # extract the specific collection point data
-            x = self._collection_in[:, input_start:input_end]
-
-            all_y = self._collection_out[:, output_start:output_end]
-
-            # for compatibility with PlotData, we need to pick just one column from y
-            y = all_y[:, 0:1]
-
-            logger.debug(f"x shape: {x.shape}, y shape: {y.shape}, all_y shape: {all_y.shape}")
-
-            pdata.metadata['full_y'] = all_y
-
-            return x, y
-
-        return get_xy
 
     def _process_prediction_results(self, network_outputs: List[np.ndarray], max_evals: int):
         """process and store prediction results"""
@@ -510,6 +442,7 @@ class NetworkPrediction(DataSource):
             try:
                 _, output_pos, _, _ = get_reordered_protein_names(network)
             except ValueError:
+                logger.warning(f"no protein names found for network {network_name}, skipping stats")
                 continue
 
             # calculate statistics in latent space
@@ -617,19 +550,65 @@ class NetworkPrediction(DataSource):
         """get plot data for collection points in lazy evaluation mode"""
         logger.debug(f"getting collection data lazily for model {self.network_model.signature()}")
 
+        assert self.collection_points is not None
+
         plot_data_list = []
 
         # compute index offsets for each collection point if needed
-        if not hasattr(self, '_collection_input_offsets') or self._collection_input_offsets is None:
-            if not hasattr(self, '_collection_in') or self._collection_in is None:
-                self.compute_all_network_predictions()
-
-        if self._collection_in is None or self._collection_out is None:
-            logger.warning("No collection data available, returning empty list")
-            return []
+        if not hasattr(self, '_fullout') or self._fullout is None:
+            self.compute_all_network_predictions()
 
         # create plot data for each collection point
         for i, collection_point in enumerate(self.collection_points):
+            (collect_in_idx, input_shapes), (collect_out_idx, output_shapes) = (
+                self.network_model.get_node_indices(
+                    collection_point.network_id,
+                    collection_point.node_id,
+                )
+            )
+
+            def get_xy_fn(
+                pdata: PlotData,
+                collection_point=collection_point,
+                collect_in_idx=collect_in_idx,
+                collect_out_idx=collect_out_idx,
+                input_shapes=input_shapes,
+                output_shapes=output_shapes,
+            ) -> Tuple[NdArray, NdArray]:
+                if not hasattr(self, '_fullout') or self._fullout is None:
+                    self.compute_all_network_predictions()
+
+                assert self._fullout is not None
+
+                flatx = self._fullout[:, collect_in_idx]
+                logger.debug(f"collection input shapes: {input_shapes}")
+                logger.debug(f"collection output shapes: {output_shapes}")
+                logger.debug(f"flatx shape: {flatx.shape}")
+                logger.debug(f"flatx: {flatx}")
+                x = []
+                for s in input_shapes:
+                    n = np.prod(s)
+                    x.append(flatx[:, :n].reshape(-1, *s))
+                    flatx = flatx[:, n:]
+                logger.debug(f"x: {x}")
+
+                flaty = self._fullout[:, collect_out_idx]
+                y = []
+                for s in output_shapes:
+                    n = np.prod(s)
+                    y.append(flaty[:, :n].reshape(-1, *s))
+                    flaty = flaty[:, n:]
+
+                pdata.metadata['collection_point'] = collection_point
+                pdata.metadata['full_x'] = x
+                pdata.metadata['full_y'] = y
+
+                return flatx, flaty[:, 0:1]
+
+            output_name = f"Node {collection_point.network_id}:{collection_point.node_id}"
+
+            input_names = [f"In {i}" for i in range(len(input_shapes))]
+
             metadata = {
                 'source_type': 'collection',
                 'seed': self.seed,
@@ -638,27 +617,6 @@ class NetworkPrediction(DataSource):
                 'network_id': collection_point.network_id,
                 'node_id': collection_point.node_id,
             }
-
-            assert isinstance(self._collection_input_offsets, list)
-            assert isinstance(self._collection_output_offsets, list)
-
-            input_dim = self._collection_input_offsets[i + 1] - self._collection_input_offsets[i]
-
-            # create function to get data for this collection point
-            get_xy_fn = self._create_collection_xy_function(
-                i,
-                self._collection_input_offsets[i],
-                self._collection_input_offsets[i + 1],
-                self._collection_output_offsets[i],
-                self._collection_output_offsets[i + 1],
-            )
-
-            # create plot data with placeholder input and output names
-            input_names = [
-                f"node_{collection_point.network_id}_{collection_point.node_id}_{i}"
-                for i in range(input_dim)
-            ]
-            output_name = f"node_{collection_point.network_id}_{collection_point.node_id}"
 
             plot_data = LazyPlotData(
                 get_xy=get_xy_fn,
