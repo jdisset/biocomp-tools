@@ -161,34 +161,32 @@ def get_pretty_axis_label(i: int, d: DataSource) -> str:
     return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
 
 
-def _make_figure(figure_data):
-    figure, i, total, kw = figure_data
-    t0 = time.time()
-
+def construct_figure(figure_node):
     try:
-        t_copy_start = time.time()
-
-        f = figure.construct()
-
-        if dict_like(f):
-            f = Figure(**f)  # type: ignore
-
-        t_copy_end = time.time()
-        logger.debug(f"Figure {i} construction took {t_copy_end - t_copy_start:.2f}s")
-        assert isinstance(f, Figure), f"Expected Figure, got {type(f)}"
-
-        f.run(**kw)
+        figure = figure_node.construct()
+        if dict_like(figure):
+            figure = Figure(**figure)  # type: ignore
+        assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
     except Exception as e:
-        logger.error(f"Error making figure: {e}")
+        logger.error(f"Error constructing figure: {e}")
         logger.exception(e)
-        return
+        raise
+    return figure
 
-    plt.close('all')
 
-    t1 = time.time()
-    opath = f.figure_spec.output_path
-    logger.info(f"[{i}/{total}] Figure {opath} completed in {t1 - t0:.2f}s")
-    return i, opath
+def run_figure(f, **kw):
+    try:
+        t0 = time.time()
+        f.run(**kw)
+        plt.close('all')
+        t1 = time.time()
+        opath = f.figure_spec.output_path
+        # logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
+    except Exception as e:
+        logger.error(f"Error running figure: {e}")
+        logger.exception(e)
+        raise
+    return str(opath)
 
 
 class PlotJob(BaseModel):
@@ -227,31 +225,22 @@ class PlotJob(BaseModel):
                 self.figures[i].copy(reroot=True)
                 for i in maybetqdm(random_order, min_len=20, desc='Copying figure tasks')
             ]
-            for i, f in enumerate(fig_copies):
-                _make_figure((f, i + 1, total_figures, {"overwrite": overwrite}))
+            constructed_figures = [
+                construct_figure(fig)
+                for fig in maybetqdm(fig_copies, min_len=5, desc='Constructing figures')
+            ]
+
+            out_paths = [
+                run_figure(f, overwrite=overwrite)
+                for f in maybetqdm(constructed_figures, min_len=2, desc='Running figures')
+            ]
+            outpathstr = '\n  - ' + '\n  - '.join(out_paths)
+            logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
 
         elif self.parallel_mode == 'multiprocess':
             raise NotImplementedError(
                 "Multiprocess is not supported at the moment. Use ray instead."
             )
-            logger.debug(f"Using multiprocess with {self.nworkers} workers")
-            import multiprocess as mp
-            import os
-
-            def _init_worker():
-                os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-                os.environ["JAX_PLATFORMS"] = "cpu"
-                setup_logging()
-
-            mp.set_start_method('spawn', force=True)  # type: ignore
-            with mp.Pool(self.nworkers, initializer=_init_worker) as pool:
-                results = pool.map(
-                    _make_figure,
-                    [
-                        (f, i + 1, total_figures, {"overwrite": overwrite})
-                        for i, f in enumerate(fig_copies)
-                    ],
-                )
 
         elif self.parallel_mode == 'ray':
             logger.debug(f"Using ray with {self.nworkers} workers")
@@ -288,37 +277,40 @@ class PlotJob(BaseModel):
                     self.figures[i].copy(reroot=True)
                     for i in maybetqdm(
                         random_order[batch_start : batch_start + batch_len],
-                        min_len=10,
+                        min_len=20,
                         desc=f'Copying figure tasks for batch {batch_idx}/{num_batches}',
                     )
                 ]
-                copies_ref = ray.put(fig_copies)
+
                 batch_start += batch_len
 
-                @ray.remote
-                def _make_figure_ray(i, copies_ref=copies_ref):
-                    make_figure_args = (
-                        ray.get(copies_ref)[i],
-                        i + 1,
-                        total_figures,
-                        {"overwrite": overwrite},
+                constructed_figures = [
+                    construct_figure(fig)
+                    for fig in maybetqdm(
+                        fig_copies,
+                        min_len=5,
+                        desc=f'Constructing figures for batch {batch_idx}/{num_batches}',
                     )
-                    return _make_figure(make_figure_args)
+                ]
 
-                task_refs = [_make_figure_ray.remote(i) for i in range(batch_len)]
+                @ray.remote
+                def run_figure_ray(f):
+                    return run_figure(f, overwrite=overwrite)
+
+                task_refs = [run_figure_ray.remote(fig) for fig in constructed_figures]
 
                 time_ray_work_submit = time.time()
                 logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")
 
-                results = [
-                    r
-                    for r in tqdm(
+                results = list(
+                    tqdm(
                         wait_iterator(task_refs),
                         total=batch_len,
-                        desc=f'Generating figures from batch {batch_idx + 1}/{num_batches}',
+                        desc=f'Generating figures in batch {batch_idx}/{num_batches}',
                     )
-                ]
-                fpaths = '\n  - ' + '\n  - '.join([str(p) for _, p in results])
+                )
+
+                fpaths = '\n  - ' + '\n  - '.join(results)
                 logger.debug(f"Generated {len(results)} figures:{fpaths}")
 
         t1 = time.time()

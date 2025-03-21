@@ -117,40 +117,48 @@ class Figure(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    _ptasks: Optional[List[PlotTask]] = None
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
-        self.figure_spec = resolve(self.figure_spec)
-        self.plot_config = resolve(self.plot_config)
+        self.plot_tasks = [task.copy(reroot=True) for task in self.plot_tasks]
+
+    def prepare(self):
+        with mpl.rc_context(rc=self.plot_config.rc_context):
+            try:
+                self._figax = self.figure_spec.make_figure()
+            except Exception as e:
+                logger.error(f"Error making figure axes: {e}")
+                logger.exception(e)
+                return
+
+            self._ptasks = []
+            for i, tc in enumerate(self.plot_tasks):
+                try:
+                    pt = tc.construct(context={"FIG": self._figax})
+                    if dict_like(pt):
+                        pt = PlotTask(**pt)  # type: ignore
+                    pt.plot_config.inherit_from(self.plot_config)
+
+                    # default ax, can be overridden in the plot_method:
+                    pt._ax = self._figax.flat_ax[i]
+                    self._ptasks.append(pt)
+                except Exception as e:
+                    logger.error(f"Error constructing plot task {i}: {e}")
+                    logger.exception(e)
+                    continue
 
     def run(self, overwrite: bool = True):
         if not overwrite and self.figure_spec.output_path.exists():
             logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
             return
 
+        if self._ptasks is None:
+            self.prepare()
+        assert isinstance(self._ptasks, list)
+
         with mpl.rc_context(rc=self.plot_config.rc_context):
-            try:
-                logger.debug("Making FigAx")
-                figax = self.figure_spec.make_figure()
-                logger.debug(f"FigAx for {self.figure_spec.output_path} made")
-            except Exception as e:
-                logger.error(f"Error making figure: {e}")
-                return
-
-            for i, t in enumerate(self.plot_tasks):
-                try:
-                    tc = t.copy()
-                    pt = tc.construct(context={"FIG": figax})
-                    if dict_like(pt):
-                        pt = PlotTask(**pt)  # type: ignore
-                    pt.plot_config.inherit_from(self.plot_config)
-                    pt._ax = figax.flat_ax[i]  # default ax, can be overridden in the plot_method
-
-                except Exception as e:
-                    logger.error(f"Error constructing plot task {i}: {e}")
-                    logger.exception(e)
-
-                    continue
-
+            for i, pt in enumerate(self._ptasks):
                 try:
                     resolve_all_lazy(pt)
                     pt.run()
@@ -159,7 +167,7 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
-            self.figure_spec.finalize(figax)  # type: ignore
+            self.figure_spec.finalize(self._figax)  # type: ignore
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
