@@ -272,8 +272,9 @@ class NetworkModel(BaseModel):
         key=None,
         max_points_per_batch=None,
         disable_variational: bool = True,
-        collection_points: Optional[List[NodeSpec]] = None,
         z_value: Union[str, float] = 'uniform',
+        collect_in_indices: Optional[np.ndarray] = None,
+        collect_out_indices: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         predict but rescale input data to latent space before prediction
@@ -292,6 +293,8 @@ class NetworkModel(BaseModel):
             max_points_per_batch=max_points_per_batch,
             disable_variational=disable_variational,
             z_value=z_value,
+            collect_in_indices=collect_in_indices,
+            collect_out_indices=collect_out_indices,
         )
         scaled_yhat = self.model.rescaler.inv(scaled_result)
         return scaled_yhat, collections
@@ -303,6 +306,8 @@ class NetworkModel(BaseModel):
         max_points_per_batch=None,
         disable_variational: bool = True,
         z_value: Union[str, float] = 'uniform',
+        collect_in_indices: Optional[np.ndarray] = None,
+        collect_out_indices: Optional[np.ndarray] = None,
     ):
         """
         make predictions using the model
@@ -364,7 +369,8 @@ class NetworkModel(BaseModel):
 
         # make predictions in batches
         all_yhats = []
-        all_fullouts = []
+        all_collected_in = []
+        all_collected_out = []
         batch_keys = jax.random.split(key, n_batches)
         for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="predicting"):
             start_idx = i * effective_batch_size
@@ -388,13 +394,29 @@ class NetworkModel(BaseModel):
                 None,
             )
 
-            all_yhats.append(np.asarray(out))
-            all_fullouts.append(fullout)
+            all_yhats.append(np.asarray(out, dtype=np.float32))
+            if collect_in_indices is not None:
+                all_collected_in.append(
+                    np.asarray(fullout[:, collect_in_indices], dtype=np.float32)
+                )
+            if collect_out_indices is not None:
+                all_collected_out.append(
+                    np.asarray(fullout[:, collect_out_indices], dtype=np.float32)
+                )
 
-        yhat = np.concatenate(all_yhats, axis=0)[:n_samples]
-        fullout = np.concatenate(all_fullouts, axis=0)[:n_samples]
+        yhat = np.concatenate(all_yhats, axis=0, dtype=np.float32)[:n_samples]
+        collected_in = (
+            np.concatenate(all_collected_in, axis=0, dtype=np.float32)[:n_samples]
+            if collect_in_indices is not None
+            else None
+        )
+        collected_out = (
+            np.concatenate(all_collected_out, axis=0, dtype=np.float32)[:n_samples]
+            if collect_out_indices is not None
+            else None
+        )
 
-        return yhat, fullout
+        return yhat, (collected_in, collected_out)
 
     def prepare_collection_indices(
         self,

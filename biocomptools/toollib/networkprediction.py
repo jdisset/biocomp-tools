@@ -18,7 +18,9 @@ NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 def validate_predict_at(v: Any) -> List[np.ndarray]:
     """convert single numpy array to list of arrays"""
     if isinstance(v, np.ndarray):
-        return [v]
+        return [np.asarray(v, dtype=np.float32)]
+    if isinstance(v, list) and all(isinstance(x, np.ndarray) for x in v):
+        return [np.asarray(x, dtype=np.float32) for x in v]
     return v
 
 
@@ -27,7 +29,9 @@ def validate_ground_truth(v: Any) -> Optional[List[Optional[np.ndarray]]]:
     if v is None:
         return None
     if isinstance(v, np.ndarray):
-        return [v]
+        return [np.asarray(v, dtype=np.float32)]
+    if isinstance(v, list) and all(isinstance(x, (np.ndarray, type(None))) for x in v):
+        return [np.asarray(x, dtype=np.float32) if x is not None else None for x in v]
     return v
 
 
@@ -220,11 +224,31 @@ class NetworkPrediction(DataSource):
             else self.network_model.predict_unscaled
         )
 
-        stacked_yhats, self._fullout = predict_f(
+        collect_in_idx = []
+        collect_out_idx = []
+        self._input_shapes = []
+        self._output_shapes = []
+        if self.collection_points is not None and len(self.collection_points) > 0:
+            # create collection points data for each collection point
+            for collection_point in self.collection_points:
+                (in_idx, input_shapes), (out_idx, output_shapes) = (
+                    self.network_model.get_node_indices(
+                        collection_point.network_id,
+                        collection_point.node_id,
+                    )
+                )
+                collect_in_idx.append(in_idx)
+                collect_out_idx.append(out_idx)
+                self._input_shapes.append(input_shapes)
+                self._output_shapes.append(output_shapes)
+
+        stacked_yhats, (self._collected_in, self._collected_out) = predict_f(
             stacked_x,
             key=self.seed,
             z_value=self.z_value,
             disable_variational=self.disable_variational,
+            collect_in_indices=np.asarray(collect_in_idx).flatten() if collect_in_idx else None,
+            collect_out_indices=np.asarray(collect_out_idx).flatten() if collect_out_idx else None,
         )
 
         # split the outputs by network
@@ -250,13 +274,13 @@ class NetworkPrediction(DataSource):
 
             # store prediction results
             truncated_output = network_output[:effective_max_evals]
-            self._yhats.append(np.asarray(truncated_output))
+            self._yhats.append(np.asarray(truncated_output, dtype=np.float32))
             logger.debug(f"stored yhat shape: {truncated_output.shape}")
 
             # store ground truth if available
             if self.ground_truth[i] is not None:
                 truncated_gt = self._aligned_ground_truth[i][:effective_max_evals]
-                self._gtruths.append(np.asarray(truncated_gt))
+                self._gtruths.append(np.asarray(truncated_gt, dtype=np.float32))
                 logger.debug(f"stored ground truth shape: {truncated_gt.shape}")
             else:
                 self._gtruths.append(None)
@@ -264,7 +288,7 @@ class NetworkPrediction(DataSource):
 
             # store inputs
             truncated_x = x[:effective_max_evals]
-            self._x.append(np.asarray(truncated_x))
+            self._x.append(np.asarray(truncated_x, dtype=np.float32))
             logger.debug(f"stored x shape: {truncated_x.shape}")
 
         # validate results
@@ -380,7 +404,7 @@ class NetworkPrediction(DataSource):
         """calculate statistics for a single network"""
         # transform to latent space for statistics
         rescaler = self.network_model.model.rescaler
-        latent_yhats = np.asarray(rescaler.fwd(yhat))
+        latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
         latent_yhat = latent_yhats[:, output_pos]
 
         # calculate basic statistics
@@ -411,7 +435,7 @@ class NetworkPrediction(DataSource):
 
         # add comparison stats if ground truth available
         if gt is not None:
-            latent_gt = np.asarray(rescaler.fwd(gt).flatten())
+            latent_gt = np.asarray(rescaler.fwd(gt).flatten(), dtype=np.float32)
             mse = float(np.mean((latent_yhat - latent_gt) ** 2))
             network_stats['mse'] = mse
             network_stats['rmse'] = float(np.sqrt(mse))
@@ -555,32 +579,40 @@ class NetworkPrediction(DataSource):
         plot_data_list = []
 
         # compute index offsets for each collection point if needed
-        if not hasattr(self, '_fullout') or self._fullout is None:
+        if not hasattr(self, '_collected_in') or self._collected_in is None:
             self.compute_all_network_predictions()
+
+        assert self._collected_in is not None
+        assert len(self._collected_in) == len(self.collection_points) == len(self._input_shapes)
+        assert self._collected_out is not None
+        assert len(self._collected_out) == len(self.collection_points) == len(self._output_shapes)
+
+        in_sizes, out_sizes = [], []
+        for inshapes, outshapes in zip(self._input_shapes, self._output_shapes):
+            in_sizes.append(np.sum([np.prod(s) for s in inshapes]))
+            out_sizes.append(np.sum([np.prod(s) for s in outshapes]))
+        in_offsets = np.cumsum([0] + in_sizes[:-1])
+        out_offsets = np.cumsum([0] + out_sizes[:-1])
+
+        collect_in_idx = [in_offsets[i] + np.arange(in_sizes[i]) for i in range(len(in_sizes))]
+        collect_out_idx = [out_offsets[i] + np.arange(out_sizes[i]) for i in range(len(out_sizes))]
 
         # create plot data for each collection point
         for i, collection_point in enumerate(self.collection_points):
-            (collect_in_idx, input_shapes), (collect_out_idx, output_shapes) = (
-                self.network_model.get_node_indices(
-                    collection_point.network_id,
-                    collection_point.node_id,
-                )
-            )
 
             def get_xy_fn(
                 pdata: PlotData,
                 collection_point=collection_point,
-                collect_in_idx=collect_in_idx,
-                collect_out_idx=collect_out_idx,
-                input_shapes=input_shapes,
-                output_shapes=output_shapes,
+                input_shapes=self._input_shapes[i],
+                output_shapes=self._output_shapes[i],
             ) -> Tuple[NdArray, NdArray]:
-                if not hasattr(self, '_fullout') or self._fullout is None:
+                if not hasattr(self, '_collected_in') or self._collected_in is None:
                     self.compute_all_network_predictions()
+                assert self._collected_in is not None
+                assert self._collected_out is not None
 
-                assert self._fullout is not None
-
-                flatx = self._fullout[:, collect_in_idx]
+                flatx = self._collected_in[:, collect_in_idx[i]]
+                flaty = self._collected_out[:, collect_out_idx[i]]
                 logger.debug(f"collection input shapes: {input_shapes}")
                 logger.debug(f"collection output shapes: {output_shapes}")
                 logger.debug(f"flatx shape: {flatx.shape}")
@@ -592,7 +624,6 @@ class NetworkPrediction(DataSource):
                     flatx = flatx[:, n:]
                 logger.debug(f"x: {x}")
 
-                flaty = self._fullout[:, collect_out_idx]
                 y = []
                 for s in output_shapes:
                     n = np.prod(s)
@@ -607,7 +638,7 @@ class NetworkPrediction(DataSource):
 
             output_name = f"Node {collection_point.network_id}:{collection_point.node_id}"
 
-            input_names = [f"In {i}" for i in range(len(input_shapes))]
+            input_names = [f"In {i}" for i in range(len(self._input_shapes[i]))]
 
             metadata = {
                 'source_type': 'collection',
