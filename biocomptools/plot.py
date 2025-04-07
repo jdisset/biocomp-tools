@@ -194,7 +194,7 @@ class PlotJob(BaseModel):
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
     skip_existing: Annotated[bool, Arg(help='Overwrite existing figures')] = False
     parallel_mode: Annotated[
-        Literal['multiprocess', 'ray', 'none'],
+        Literal['ray', 'none'],
         Arg(help='Parallel mode to use (multiprocess, ray, none)'),
     ] = 'ray'
 
@@ -202,7 +202,7 @@ class PlotJob(BaseModel):
         List[str], Arg(help='Clear these keys from the figure context')
     ] = []
 
-    max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 80
+    max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 32
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -237,11 +237,6 @@ class PlotJob(BaseModel):
             outpathstr = '\n  - ' + '\n  - '.join(out_paths)
             logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
 
-        elif self.parallel_mode == 'multiprocess':
-            raise NotImplementedError(
-                "Multiprocess is not supported at the moment. Use ray instead."
-            )
-
         elif self.parallel_mode == 'ray':
             logger.debug(f"Using ray with {self.nworkers} workers")
             import ray
@@ -266,7 +261,6 @@ class PlotJob(BaseModel):
                     done, task_refs = ray.wait(task_refs, num_returns=1)
                     yield ray.get(done[0])
 
-            # much faster to put all copies in a single ref even if each process will have to copy it
             batch_idx = 0
             num_batches = (total_figures + self.max_batch_size - 1) // self.max_batch_size
             batch_start = 0
@@ -293,11 +287,14 @@ class PlotJob(BaseModel):
                     )
                 ]
 
-                @ray.remote
-                def run_figure_ray(f):
-                    return run_figure(f, overwrite=overwrite)
+                fig_refs = ray.put(constructed_figures)
 
-                task_refs = [run_figure_ray.remote(fig) for fig in constructed_figures]
+                @ray.remote
+                def run_figure_ray(i, fig_regs=fig_refs):
+                    fig = ray.get(fig_regs)[i]
+                    return run_figure(fig, overwrite=overwrite)
+
+                task_refs = [run_figure_ray.remote(i) for i in range(len(constructed_figures))]
 
                 time_ray_work_submit = time.time()
                 logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")

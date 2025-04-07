@@ -247,8 +247,10 @@ class NetworkPrediction(DataSource):
             key=self.seed,
             z_value=self.z_value,
             disable_variational=self.disable_variational,
-            collect_in_indices=np.asarray(collect_in_idx).flatten() if collect_in_idx else None,
-            collect_out_indices=np.asarray(collect_out_idx).flatten() if collect_out_idx else None,
+            collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
+            collect_out_indices=np.concatenate(collect_out_idx).flatten()
+            if collect_out_idx
+            else None,
         )
 
         # split the outputs by network
@@ -583,9 +585,9 @@ class NetworkPrediction(DataSource):
             self.compute_all_network_predictions()
 
         assert self._collected_in is not None
-        assert len(self._collected_in) == len(self.collection_points) == len(self._input_shapes)
+        assert len(self.collection_points) == len(self._input_shapes)
         assert self._collected_out is not None
-        assert len(self._collected_out) == len(self.collection_points) == len(self._output_shapes)
+        assert len(self.collection_points) == len(self._output_shapes)
 
         in_sizes, out_sizes = [], []
         for inshapes, outshapes in zip(self._input_shapes, self._output_shapes):

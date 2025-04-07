@@ -429,7 +429,7 @@ class NetworkModel(BaseModel):
             collection_points: list of points to collect data from
 
         returns:
-            tuple of (collect_in_indices, collect_out_indices)
+            tuple of (collect_in_indices, collect_out_indices`)`
         """
         if collection_points is None:
             return [], []

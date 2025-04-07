@@ -72,6 +72,7 @@ logging:
     biocomptools.toollib.networkselector: DEBUG
     biocomptools.toollib.networkprediction: DEBUG
     biocomptools.toollib.models: DEBUG
+    biocomptools.toollib.figuremakers.innernodes: DEBUG
     biocomptools.toollib.plot: DEBUG
     biocomptools.toollib.trainutils: DEBUG
     biocomptools.mlflowlogger: DEBUG
@@ -80,8 +81,10 @@ logging:
     biocomp.train: DEBUG
 
     biocomp: INFO
+    biocomp.nodes: DEBUG
+    biocomp.quantization: DEBUG
     biocomp.compute: INFO
-    biocomp.nodes: INFO
+
     dracon.commandline: INFO
     dracon.instructions: INFO
     matplotlib: WARNING
