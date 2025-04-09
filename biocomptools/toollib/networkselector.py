@@ -484,7 +484,7 @@ class CleanupFilter(NetworkFilter):
 
     def _find_twice_same_rec_with_different_rna(self, net_info, lib):
         appears_twice = []
-        all_parts = net_info['all_parts']
+        all_parts = net_info['all_parts'].values()
         for i, p1 in enumerate(all_parts):
             for pname, pcat in p1.items():
                 if pcat == 'ERN_recog_site_5p':
@@ -507,7 +507,7 @@ class CleanupFilter(NetworkFilter):
 
     def _find_missing_complementary_parts(self, net_info, lib):
         missing = {}
-        all_parts = net_info['all_parts']
+        all_parts = net_info['all_parts'].values()
 
         def find_missing_part(part_name, part_col, complementary_col, valid_types=None):
             if valid_types is None:
@@ -542,7 +542,7 @@ class CleanupFilter(NetworkFilter):
         for _, row in lib.sequestrons[invalid_rows].iterrows():
             involved_parts = set([row.positive_part, row.negative_part])
             invalid_parts.append(involved_parts)
-        all_parts = net_info['all_parts']
+        all_parts = net_info['all_parts'].values()
         all_parts = set([p for tp in all_parts for p in tp.keys()])
         for ip in invalid_parts:
             if ip.issubset(all_parts):
@@ -560,7 +560,7 @@ class CleanupFilter(NetworkFilter):
                 'recombinase_fwd',
                 'ERN_recog_site_3p',
             ]
-        all_parts = net_info['all_parts']
+        all_parts = net_info['all_parts'].values()
         for tp in all_parts:
             for p, c in tp.items():
                 if c in invalid_categories:
