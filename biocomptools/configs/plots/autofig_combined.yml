@@ -1,0 +1,38 @@
+# plots the data and predictions from a network model side by side
+#
+# REQUIRED VARIABLES:
+# - model
+# - plot_data : the ground truth plot_data object
+
+!Figure
+!set_default output_dir: ./prediction_figures
+!set_default file_prefix: ""
+!define suffix: ${'_'.join(plot_data.metadata['network_info']['dependent_outputs'])}
+
+!define gtruth: ${plot_data.metadata['ground_truth_data']}
+
+plot_config: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
+
+figure_spec:
+  output_dir: ${output_dir}
+  output_file: ${file_prefix + plot_data.metadata['file_stem'] + '_' + suffix + '_combined_pred.pdf'}
+  title: ${plot_data.metadata['file_stem']}
+  layout: !SimpleLayout
+    cols: 2
+
+plot_tasks:
+  - !define D: ${gtruth}
+    !define axnum: 0
+    <<: !include pkg:biocomptools:configs/plots/tasks/auto
+    <<{+<}:
+      plot_method:
+        kwargs:
+          title: "Ground Truth"
+
+  - !define D: ${plot_data}
+    !define axnum: 1
+    <<: !include pkg:biocomptools:configs/plots/tasks/auto
+    <<{+<}:
+      plot_method:
+        kwargs:
+          title: "Predictions (rmse: ${str(round(D.metadata[prediction_stats']['rmse'], 4))})"
