@@ -48,7 +48,7 @@ callstack_params:
 
   mkfig_params:
     dpi: 300
-    size: [30, 3]
+    size: [20, 4]
 
   plot_network_params:
     density_quantile_threshold: 0.05

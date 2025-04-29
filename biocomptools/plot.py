@@ -157,13 +157,19 @@ def debug_figures(figures):
 
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
     if "pretty_inputs" in d.metadata:
-        return f'$\\mathbf{{X_{i+1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
-    return f'$\\mathbf{{X_{i+1}}}$ ({d.input_names[i]})'
+        return f'$\\mathbf{{X_{i + 1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
+    return f'$\\mathbf{{X_{i + 1}}}$ ({d.input_names[i]})'
+
+
+def urlencoded(s: str) -> str:
+    import urllib.parse
+
+    return urllib.parse.quote(s, safe='')
 
 
 def construct_figure(figure_node):
     try:
-        figure = figure_node.construct()
+        figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
         if dict_like(figure):
             figure = Figure(**figure)  # type: ignore
         assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
@@ -317,6 +323,7 @@ class PlotJob(BaseModel):
 plot_extra_context = {
     **make_context_from_types(DEFAULT_TYPES),
     'get_pretty_axis_label': get_pretty_axis_label,
+    'urlencoded': urlencoded,
     'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
 }
 

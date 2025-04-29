@@ -35,7 +35,7 @@ class Experiment(BiocompDB, table=True):
     path: ForcedStr
     comments: Optional[str] = None
     content: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    errors: str = Field(default_factory=str)
+    errors: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     recipes: List["Recipe"] = Relationship(back_populates="experiment")
 
@@ -81,9 +81,9 @@ class Experiment(BiocompDB, table=True):
             recipe = Recipe.from_file(
                 filepath, xp_name=self.name, path_prefix=path_prefix, **kwargs
             )
-            assert (
-                recipe.content.get('name') == s['recipe']
-            ), f"Recipe name mismatch {recipe.content.get('name')} != {s['recipe']}"
+            assert recipe.content.get('name') == s['recipe'], (
+                f"Recipe name mismatch {recipe.content.get('name')} != {s['recipe']}"
+            )
             assert s['recipe'] not in recipes, f"Duplicate recipe name {s['recipe']}"
             recipes.append(recipe)
         return recipes
@@ -107,6 +107,15 @@ class DataFile(BiocompDB, table=True):
 
     calibration: Optional[Calibration] = Relationship(back_populates="data_files")
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
+
+    @property
+    def url_encoded_filepath(self):
+        """
+        Returns the file path as a URL encoded string.
+        """
+        import urllib.parse
+
+        return urllib.parse.quote(self.file)
 
     def safe_copy(self):
         """
@@ -265,7 +274,7 @@ class Recipe(BiocompDB, table=True):
     xp: Optional[str] = Field(foreign_key="experiment.name", default=None)
     file: ForcedOptionalStr = None
 
-    errors: str = Field(default_factory=str)
+    errors: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     # Relationships
     experiment: Optional[Experiment] = Relationship(back_populates="recipes")
