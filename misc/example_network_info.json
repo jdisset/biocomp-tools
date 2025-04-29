@@ -1,0 +1,375 @@
+[
+  {
+    "sequestron_type": "none",
+    "architecture": 0,
+    "ern_names": [],
+    "uorf_values": [],
+    "uorf_names": [],
+    "genes": [ "eBFP2", "mKO2", "mMaroon1" ],
+    "markers": [ "mMaroon1" ],
+    "output_proteins": [ "eBFP2", "mKO2", "mMaroon1" ],
+    "dependent_outputs": [ "eBFP2", "mKO2" ],
+    "cotx": [
+      [ [ "mMaroon1", 0 ], [ 1, 2 ] ]
+    ],
+    "cotx_str": "mMaroon1: -> 1:2",
+    "ern_names_str": 0,
+    "all_parts": {
+      "L1.ST1-2_mKO2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKO2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_mMaroon1_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mMaroon1": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_EBFP2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2023-12-15_PguCsy4_PosTU_DOXEON_L2_mKO2_EBFP2"
+  },
+  {
+    "sequestron_type": "ERN",
+    "architecture": "cascade",
+    "ern_names": [ "PgU", "CasE" ],
+    "uorf_values": [ [ 0, 0 ], [ 0, 0 ] ],
+    "uorf_names": [
+      "PgU ERN: No uORF",
+      "PgU REC: No uORF",
+      "CasE ERN: No uORF",
+      "CasE REC: No uORF"
+    ],
+    "genes": [ "1xiRFP720", "CasE", "PgU", "eBFP2", "mKO2", "mNeonGreen" ],
+    "markers": [ "1xiRFP720", "eBFP2", "mKO2" ],
+    "output_proteins": [ "1xiRFP720", "eBFP2", "mKO2", "mNeonGreen" ],
+    "dependent_outputs": [ "mNeonGreen" ],
+    "cotx": [
+      [ [ "PgU", "eBFP2" ], [ 1, 1 ] ],
+      [ [ "PgU_{RS}\\_CasE", "mKO2" ], [ 1, 1 ] ],
+      [ [ "CasE_{RS}\\_mNeonGreen", "1xiRFP720" ], [ 1, 1 ] ]
+    ],
+    "cotx_str": "PgU:eBFP2 -> 1:1\nPgU_{RS}\\_CasE:mKO2 -> 1:1\nCasE_{RS}\\_mNeonGreen:1xiRFP720 -> 1:1",
+    "ern_names_str": "PgU, CasE",
+    "all_parts": {
+      "L1.ST1-2_0x_pguCas13_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "PgU": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_1x_iRFP720_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "1xiRFP720": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_pguR_CasE_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "PgU_rec": "ERN_recog_site_5p",
+        "CasE": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_CasER_mNG_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_EBFP2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_mKO2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKO2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2023-10-01_Cascades_CCv4_CascadePguCasE"
+  },
+  {
+    "sequestron_type": "ERN",
+    "architecture": "triple region",
+    "ern_names": [ "CasE", "Csy4", "PgU" ],
+    "uorf_values": [ [ 0, 0 ], [ 0, 0 ], [ 0, 0 ] ],
+    "uorf_names": [
+      "CasE ERN: No uORF",
+      "CasE REC: No uORF",
+      "Csy4 ERN: No uORF",
+      "Csy4 REC: No uORF",
+      "PgU ERN: No uORF",
+      "PgU REC: No uORF"
+    ],
+    "genes": [
+      "CasE",
+      "Csy4",
+      "PgU",
+      "eBFP2",
+      "mKO2",
+      "mMaroon1",
+      "mNeonGreen"
+    ],
+    "markers": [ "eBFP2", "mKO2", "mMaroon1" ],
+    "output_proteins": [ "eBFP2", "mKO2", "mMaroon1", "mNeonGreen" ],
+    "dependent_outputs": [ "mNeonGreen" ],
+    "cotx": [
+      [
+        [
+          "CasE_{RS}\\_mNeonGreen",
+          "Csy4_{RS}\\_mNeonGreen",
+          "PgU",
+          "eBFP2"
+        ],
+        [ 2, 1, 4, 2 ]
+      ],
+      [
+        [
+          "Csy4_{RS}\\_mNeonGreen",
+          "PgU_{RS}\\_mNeonGreen",
+          "CasE",
+          "mKO2"
+        ],
+        [ 1, 2, 2, 2 ]
+      ],
+      [ [ "Csy4", "mMaroon1" ], [ 1, 1 ] ]
+    ],
+    "cotx_str": "CasE_{RS}\\_mNeonGreen:Csy4_{RS}\\_mNeonGreen:PgU:eBFP2 -> 2:1:4:2\nCsy4_{RS}\\_mNeonGreen:PgU_{RS}\\_mNeonGreen:CasE:mKO2 -> 1:2:2:2\nCsy4:mMaroon1 -> 1:1",
+    "ern_names_str": "CasE, Csy4, PgU",
+    "all_parts": {
+      "L1.0x_CasE_ST1-2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.0x_Csy4_ST1-2_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "Csy4": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_0x_pguCas13_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "PgU": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_mMaroon1_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mMaroon1": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_CasER_mNG_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_Csy4R_mNG_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "Csy4_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_Csy4R_mNG_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "Csy4_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_EBFP2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_PguR_mNG_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "PgU_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_mKO2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKO2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2024-04-09_BPv7_recombCIR_2I3Nv1_3"
+  },
+  {
+    "sequestron_type": "ERN",
+    "architecture": "cascade",
+    "ern_names": [ "CasE", "Csy4" ],
+    "uorf_values": [ [ 0, 5 ], [ 5, 0 ] ],
+    "uorf_names": [
+      "CasE ERN: No uORF",
+      "CasE REC: weak uORF",
+      "Csy4 ERN: weak uORF",
+      "Csy4 REC: No uORF"
+    ],
+    "genes": [ "1xiRFP720", "CasE", "Csy4", "eBFP2", "mKO2", "mNeonGreen" ],
+    "markers": [ "1xiRFP720", "eBFP2", "mKO2" ],
+    "output_proteins": [ "1xiRFP720", "eBFP2", "mKO2", "mNeonGreen" ],
+    "dependent_outputs": [ "mNeonGreen" ],
+    "cotx": [
+      [ [ "CasE", "eBFP2" ], [ 1, 1 ] ],
+      [ [ "CasE_{RS}\\_Csy4", "mKO2" ], [ 1, 1 ] ],
+      [ [ "Csy4_{RS}\\_mNeonGreen", "1xiRFP720" ], [ 1, 1 ] ]
+    ],
+    "cotx_str": "CasE:eBFP2 -> 1:1\nCasE_{RS}\\_Csy4:mKO2 -> 1:1\nCsy4_{RS}\\_mNeonGreen:1xiRFP720 -> 1:1",
+    "ern_names_str": "CasE, Csy4",
+    "all_parts": {
+      "L1.0x_CasE_ST1-2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_1wCasER_Csy4_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE_rec": "ERN_recog_site_5p",
+        "1w_uORF": "uORF_group",
+        "Csy4": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST1-2_1x_iRFP720_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "1xiRFP720": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_Csy4R_mNG_3": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "Csy4_rec": "ERN_recog_site_5p",
+        "mNeonGreen": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_EBFP2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1.ST2-3_mKO2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKO2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2023-10-01_Cascades_CCv4_1wCasER_Csy4"
+  },
+  {
+    "sequestron_type": "ERN",
+    "architecture": "single",
+    "ern_names": [ "CasE" ],
+    "uorf_values": [ [ 0, 5 ] ],
+    "uorf_names": [ "CasE ERN: No uORF", "CasE REC: weak uORF" ],
+    "genes": [ "CasE", "eBFP2", "eYFP", "mKate" ],
+    "markers": [ "eBFP2", "mKate" ],
+    "output_proteins": [ "eBFP2", "eYFP", "mKate" ],
+    "dependent_outputs": [ "eYFP" ],
+    "cotx": [
+      [ [ "CasE", "mKate" ], [ 1, 1 ] ]
+    ],
+    "cotx_str": "CasE:mKate -> 1:1",
+    "ern_names_str": "CasE",
+    "all_parts": {
+      "L1-CasER1w_eYFP_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE_rec": "ERN_recog_site_5p",
+        "1w_uORF": "uORF_group",
+        "eYFP": "fluo_marker",
+        "RB-PAS": "terminator"
+      },
+      "L1.0x_CasE_ST1-2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "CasE": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.mKate_ST2-3_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKate": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1_eBFP2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2023-02-16_Matrix_(R+CasE0x)+(L2CasER1w_Y+B)"
+  },
+  {
+    "sequestron_type": "ERN",
+    "architecture": "single",
+    "ern_names": [ "Csy4" ],
+    "uorf_values": [ [ 20, 5 ] ],
+    "uorf_names": [ "Csy4 ERN: 2x uORF", "Csy4 REC: weak uORF" ],
+    "genes": [ "Csy4", "eBFP2", "eYFP", "mKate" ],
+    "markers": [ "eBFP2", "mKate" ],
+    "output_proteins": [ "eBFP2", "eYFP", "mKate" ],
+    "dependent_outputs": [ "eYFP" ],
+    "cotx": [
+      [ [ "Csy4", "mKate" ], [ 1, 1 ] ]
+    ],
+    "cotx_str": "Csy4:mKate -> 1:1",
+    "ern_names_str": "Csy4",
+    "all_parts": {
+      "L1-Csy4R1w_eYFP_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "Csy4_rec": "ERN_recog_site_5p",
+        "1w_uORF": "uORF_group",
+        "eYFP": "fluo_marker",
+        "RB-PAS": "terminator"
+      },
+      "L1.2x_Csy4_ST1-2_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "2x_uORF": "uORF_group",
+        "Csy4": "ERN",
+        "L0.T_4560": "terminator"
+      },
+      "L1.mKate_ST2-3_1": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "mKate": "fluo_marker",
+        "L0.T_4560": "terminator"
+      },
+      "L1_eBFP2_2": {
+        "cHS4": "insulator",
+        "hEF1a": "promoter",
+        "eBFP2": "fluo_marker",
+        "L0.T_4560": "terminator"
+      }
+    },
+    "recipe_name": "2023-03-26_MatrixCsy4_(2xCsy4)+(Csy4R1w_Y+B)"
+  }
+]
