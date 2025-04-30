@@ -36,6 +36,41 @@ class PlotConfig(BaseModel):
     callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
     rescaler: Optional[DataRescaler] = None
 
+    def _auto_extract_metadata(
+        self, callstack_conf: dict, plot_method: PartialFunction, size_limit: int = 2000
+    ):
+        """
+        Returns some possibly interesting metadata from the callstack configuration and the plot method.
+        """
+        import json
+
+        def can_dump(obj):
+            try:
+                return len(json.dumps(obj)) < size_limit
+            except Exception as e:
+                logger.debug(f"Can't serialize a {type(obj)}. Won't include it in metadata.")
+                return False
+
+        metadata = {}
+        metadata['plot_method'] = plot_method.get_name()
+
+        if can_dump(callstack_conf):
+            metadata['callstack_conf'] = callstack_conf
+
+        for pval in plot_method.args:
+            if hasattr(pval, 'metadata'):
+                for k, v in pval.metadata.items():
+                    if can_dump(v):
+                        metadata[k] = v
+
+        for _, pval in plot_method.kwargs.items():
+            if hasattr(pval, 'metadata'):
+                for k, v in pval.metadata.items():
+                    if can_dump(v):
+                        metadata[k] = v
+
+        return metadata
+
     def prepare_func(
         self,
         plot_method: PartialFunction,
@@ -51,17 +86,17 @@ class PlotConfig(BaseModel):
         if overwrite_kwargs:
             plot_method.set_missing_kwargs(overwrite_kwargs)
 
+        extracted_metadata = self._auto_extract_metadata(callstack_conf, plot_method)
+
         def prepared_func(
             *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
         ):
             full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
 
-            # logger.debug(f'Plotting with kwargs: {full_kwargs} + {plot_method.kwargs}')
-
             with mpl.rc_context(rc=rc):
                 return plot_method(*args, **full_kwargs)
 
-        return prepared_func
+        return prepared_func, extracted_metadata
 
     def inherit_from(
         self, other: 'PlotConfig', keep_rescaler: bool = True, key: str = '<<{+<}[~<]'
@@ -91,13 +126,19 @@ class PlotTask(BaseModel):
     _ax: Optional[mpl.axes.Axes] = None
 
     def run(self):
+        # generates some metadata and returns it
+        metadata = {}
         if self.plot_method:
             kw = {'ax': self._ax} if self._ax else {}
-            self.plot_config.prepare_func(
+            f, metadata = self.plot_config.prepare_func(
                 plot_method=self.plot_method,
                 auto_callstack_bind=self.auto_callstack_bind,
                 overwrite_kwargs=kw,
-            )()
+            )
+
+            f()
+
+        return metadata
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

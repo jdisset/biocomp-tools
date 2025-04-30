@@ -77,8 +77,6 @@ class NetworkPrediction(DataSource):
 
     already_latent: bool = False  # no need to rescale if the input data is already in latent space
 
-    metadata: Dict[str, Any] = {}
-
     _yhats: Optional[List[np.ndarray]] = None
     _x: Optional[List[np.ndarray]] = None
     _gtruths: Optional[List[Optional[np.ndarray]]] = None
@@ -340,8 +338,8 @@ class NetworkPrediction(DataSource):
 
             stats = self.get_network_stats()
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
+            # add stats to metadata
             pdata.metadata['prediction_stats'] = stats[network_idx].copy()
-            pdata.metadata.update(self.metadata)
 
             if self.use_output_as_input:
                 logger.debug("using output as input, returning yhat as both x and y")
@@ -642,14 +640,18 @@ class NetworkPrediction(DataSource):
 
             input_names = [f"In {i}" for i in range(len(self._input_shapes[i]))]
 
-            metadata = {
-                'source_type': 'collection',
-                'seed': self.seed,
-                'model_signature': self.network_model.model.signature(),
-                'collection_point_index': i,
-                'network_id': collection_point.network_id,
-                'node_id': collection_point.node_id,
-            }
+            metadata = self.metadata.copy()
+
+            metadata.update(
+                {
+                    'source_type': 'collection',
+                    'seed': self.seed,
+                    'model_signature': self.network_model.model.signature(),
+                    'collection_point_index': i,
+                    'network_id': collection_point.network_id,
+                    'node_id': collection_point.node_id,
+                }
+            )
 
             plot_data = LazyPlotData(
                 get_xy=get_xy_fn,
@@ -679,8 +681,14 @@ class NetworkPrediction(DataSource):
                 'model_signature': self.network_model.model.signature(),
                 'network_name': getattr(network, 'name', f"Network_{network_idx}"),
                 'network_info': network_info,
-                'n_predictions': len(self.predict_at[network_idx]),
                 'network_index': network_idx,
+                'prediction_settings': {
+                    'use_output_as_input': self.use_output_as_input,
+                    'z_value': self.z_value,
+                    'disable_variational': self.disable_variational,
+                    'max_evals': self.max_evals,
+                    'n_predictions': len(self.predict_at[network_idx]),
+                },
             }
         )
 

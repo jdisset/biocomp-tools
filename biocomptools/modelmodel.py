@@ -83,6 +83,8 @@ class BiocompModel(ArbitraryModel):
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
+    # signature should be a property that is always dumped
+    @property
     def signature(self):
         """compute unique signature for this model"""
         import base58

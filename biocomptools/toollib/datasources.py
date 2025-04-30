@@ -73,6 +73,8 @@ logger = get_logger(__name__)
 
 
 class DataSource(BaseModel):
+    metadata: dict = {}
+
     def get_data(self) -> List[PlotData]:
         raise NotImplementedError('Subclasses must implement get_data')
 
@@ -119,13 +121,13 @@ class DBSource(DataSource, NetworkSet):
         assert isinstance(actual_network, bc.network.Network)
 
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
-        metadata = {}
+        metadata = self.metadata.copy()
 
         metadata['network'] = network.model_dump()
         metadata['network_name'] = network.name
         metadata['network_info'] = network.network_info
         metadata['built_network'] = actual_network
-        metadata['source_type'] = 'DB'
+        metadata['source_type'] = 'database'
 
         metadata['datafile'] = datafile.model_dump()
         metadata['file_stem'] = datafile_path.stem
@@ -188,5 +190,3 @@ class DBSource(DataSource, NetworkSet):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-

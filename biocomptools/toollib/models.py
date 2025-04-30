@@ -151,6 +151,23 @@ class DataFile(BiocompDB, table=True):
             raise ValueError(f"Unsupported file extension {ext}")
 
 
+class NetworkDataPair(BiocompDB, table=True):
+    network_name: str = Field(foreign_key="network.name", primary_key=True)
+    datafile_name: str = Field(foreign_key="datafile.file", primary_key=True)
+
+    network: Optional["Network"] = Relationship()
+    datafile: Optional["DataFile"] = Relationship()
+    trained_models: List["TrainedModel"] = Relationship(back_populates="training_set")
+
+
+class TrainedModel(BiocompDB, table=True):
+    name: str = Field(primary_key=True)
+    path_to_model: ForcedStr
+    training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    training_set: List[NetworkDataPair] = Relationship(back_populates="trained_models")
+
+
 class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     recipe_name: str = Field(foreign_key="recipe.name")
