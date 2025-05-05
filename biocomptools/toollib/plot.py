@@ -10,6 +10,7 @@ from biocomp.plotutils import FigureSpec
 from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from biocomptools.logging_config import get_logger
+from biocomptools.trainutils import make_json_ready
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -46,9 +47,8 @@ class PlotConfig(BaseModel):
 
         def can_dump(obj):
             try:
-                return len(json.dumps(obj)) < size_limit
+                return len(json.dumps(make_json_ready(obj))) < size_limit
             except Exception as e:
-                logger.debug(f"Can't serialize a {type(obj)}. Won't include it in metadata.")
                 return False
 
         metadata = {}
