@@ -9,6 +9,7 @@ from dracon.deferred import DeferredNode
 from biocomptools.toollib.common import config
 import time
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.trainutils import make_json_ready
 
 
 from biocomptools.logging_config import get_logger
@@ -58,22 +59,6 @@ class MLflowLogger(Logger):
     _training_program: Optional[Any] = None
     _logged_plots: set[str] = set()  # Track logged plots by content hash
     _active_run = None
-
-    def _make_exportable_program_dump(self, trainprog):
-        """Roundtrip to json to iron out any weakref/unpickleable issues with DeferredNodes"""
-
-        def convert(o):
-            if isinstance(o, DeferredNode):
-                return {f'{o.value.tag}': 'deferred'}
-            elif isinstance(o, BaseModel):
-                return o.model_dump()
-            else:
-                logger.error(f"Unhandled type during json serialization: {type(o)}")
-                return str(o)
-
-        dmp = json.dumps(trainprog, default=convert)
-
-        return json.loads(dmp)
 
     def _log_new_artifacts(self):
         """Log any new plots/images/text files that haven't been logged yet"""
@@ -193,21 +178,11 @@ class MLflowLogger(Logger):
             # Log configuration parameters
             mlflow.log_params(
                 {
-                    "training_config": self._make_exportable_program_dump(
-                        self._training_program.training_conf
-                    ),
-                    "compute_config": self._make_exportable_program_dump(
-                        self._training_program.compute_conf
-                    ),
-                    "data_config": self._make_exportable_program_dump(
-                        self._training_program.data_conf
-                    ),
-                    "training_set": self._make_exportable_program_dump(
-                        self._training_program.training_set.content
-                    ),
-                    "validation_set": self._make_exportable_program_dump(
-                        self._training_program.validation_set.content
-                    ),
+                    "training_config": make_json_ready(self._training_program.training_conf),
+                    "compute_config": make_json_ready(self._training_program.compute_conf),
+                    "data_config": make_json_ready(self._training_program.data_conf),
+                    "training_set": make_json_ready(self._training_program.training_set.content),
+                    "validation_set": make_json_ready(self._training_program.validation_set.content),
                 }
             )
 

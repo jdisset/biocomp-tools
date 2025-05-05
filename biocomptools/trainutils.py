@@ -74,15 +74,21 @@ def generate_unique_funny_name(directory: Path | str, prefix: str = '', suffix: 
     return name
 
 
-def get_best_smoothed_loss_id(all_losses: ndArray, sigma: float = 12.0) -> Tuple[int, np.ndarray]:
+def get_best_smoothed_loss_id(
+    all_losses: ndArray, sigma: float = 12.0
+) -> Tuple[int, np.ndarray, float]:
     all_losses = np.asarray(all_losses)
     smoothed_losses = gaussian_filter1d(all_losses, sigma=sigma, mode='nearest')
     # endval = smoothed_losses[:, -1]
-    # instead, take the mean of the last third of the unsmoothed losses
-    endval = np.mean(all_losses[:, -int(all_losses.shape[1] / 3) :], axis=1)
+    # instead, take the mean of the last 10% of the unsmoothed losses
+    avg_window = min(64, int(all_losses.shape[1] / 10))
+    avg_window = max(avg_window, 1)
+    endval = np.mean(all_losses[:, -avg_window:], axis=1)
+
     endval[np.isnan(endval)] = np.inf
     best_loss_id = int(np.argmin(endval))
-    return best_loss_id, smoothed_losses
+    end_loss_value = endval[best_loss_id]
+    return best_loss_id, smoothed_losses, end_loss_value
 
 
 def ffill(arr, mask=None):
@@ -103,7 +109,7 @@ def plot_loss(loss_history: List[np.ndarray]):
 
     nan_mask = np.isnan(all_losses)
     filled_losses = ffill(all_losses)
-    best_loss_id, smoothed_losses = get_best_smoothed_loss_id(filled_losses)
+    best_loss_id, smoothed_losses, _ = get_best_smoothed_loss_id(filled_losses)
 
     yrange = np.nanmax(all_losses) - np.nanmin(all_losses)
 
@@ -173,7 +179,7 @@ def plot_loss(loss_history: List[np.ndarray]):
     return fig, ax
 
 
-def add_metadata(fig, ax, metadata: dict, run_name: str):
+def print_matadata(fig, ax, metadata: dict, run_name: str):
     """Add metadata to the figure in a clean, formatted way"""
     fig.suptitle(f'Run "{run_name}"')
 
@@ -186,6 +192,24 @@ def add_metadata(fig, ax, metadata: dict, run_name: str):
     plt.tight_layout()
 
     return fig
+
+
+def make_json_ready(obj):
+    """Roundtrip to json to iron out any weakref/unpickleable issues with DeferredNodes"""
+    import json
+
+    def convert(o):
+        if isinstance(o, DeferredNode):
+            return {f'{o.value.tag}': 'deferred'}
+        elif isinstance(o, BaseModel):
+            return o.model_dump()
+        else:
+            logger.warning(f"Unhandled type during json serialization: {type(o)}")
+            return str(o)
+
+    dmp = json.dumps(obj, default=convert)
+
+    return json.loads(dmp)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

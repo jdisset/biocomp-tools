@@ -77,6 +77,7 @@ class BiocompModel(ArbitraryModel):
         BeforeValidator(get_shared_params),
         BeforeValidator(load_params),
     ] = Field(default_factory=empty_params)
+    metadata: dict = {}
 
     def save(self, path):
         """save model to file"""

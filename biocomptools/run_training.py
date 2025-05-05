@@ -9,8 +9,9 @@ from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, Co
 from biocomptools.trainutils import (
     plot_loss,
     make_unique_dir,
-    add_metadata,
+    print_matadata,
     get_best_smoothed_loss_id,
+    make_json_ready,
 )
 
 from biocomp.compute import ComputeConfig, DEFAULT_COMPUTE_CONFIG
@@ -197,11 +198,12 @@ class TrainingProgram(BaseModel):
         hashes = get_package_git_hashes(['dracon', 'biocomp', 'biocomptools'])
 
         self._metadata = {
-            'start time': starttime,
+            'start_time': starttime,
             'host': f"{os.environ.get('USER')}@{get_hostmachine()}",
-            'biocomp hash': hashes.get('biocomp', 'unknown'),
-            'biocomptools hash': hashes.get('biocomptools', 'unknown'),
-            'dracon hash': hashes.get('dracon', 'unknown'),
+            'biocomp_hash': hashes.get('biocomp', 'unknown'),
+            'biocomptools_hash': hashes.get('biocomptools', 'unknown'),
+            'dracon_hash': hashes.get('dracon', 'unknown'),
+            'yaml_dump': self._yamldump,
         }
 
     def _build_dman(self):
@@ -253,7 +255,7 @@ class TrainingProgram(BaseModel):
             loggers=logger_callbacks,
         )
 
-        self._metadata['end time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.save_outputs(params, loss_history, self._training_dir)
 
         for logger_obj in self.loggers:
@@ -265,12 +267,33 @@ class TrainingProgram(BaseModel):
         compute_conf = deepcopy(self.compute_conf)
         data_conf = deepcopy(self.data_conf)
 
+        metadata = {}
+        if self._metadata:
+            metadata = self._metadata.copy()
+
+        dman = self._training_dman
+        metadata['run_name'] = self._run_name
+        metadata['experiment_name'] = self.experiment_name
+        metadata['training_set'] = make_json_ready(self.training_set.content)
+        metadata['validation_set'] = make_json_ready(self.validation_set.content)
+        metadata['training_conf'] = make_json_ready(self.training_conf)
+
+        dataman_info = {}
+        dataman_info["network_names"] = [n.name for n in dman.get_networks()]
+        dataman_info["input_dimensions"] = [x.shape[1] for x in dman.get_X()]
+        dataman_info["output_dimensions"] = [y.shape[1] for y in dman.get_Y()]
+        dataman_info["data_config"] = (dman.data_cfg.model_dump(),)
+        metadata['data_manager_info'] = make_json_ready(dataman_info)
+
+        metadata = make_json_ready(metadata)
+
         def get_best_model(all_models, all_losses):
             from biocomp.jaxutils import tree_get, tree_to_np
             import pickle
 
-            best_model_id, _ = get_best_smoothed_loss_id(all_losses)
+            best_model_id, _, end_loss = get_best_smoothed_loss_id(all_losses)
             logger.debug(f"Best model is replicate number {best_model_id}")
+
             params = tree_get(all_models, best_model_id)
             if params is None:
                 return None
@@ -282,10 +305,16 @@ class TrainingProgram(BaseModel):
             if best_params is None:
                 return None
 
+            local_metadata = metadata.copy()
+            local_metadata['replicate_number'] = best_model_id
+            local_metadata['loss_history'] = all_losses[best_model_id]
+            local_metadata['end_loss'] = end_loss
+
             model = BiocompModel(
                 compute_config=compute_conf,
                 rescaler=data_conf.rescaler,
                 shared_params=tree_to_np(best_params),
+                metadata=make_json_ready(local_metadata),
             )
 
             return model
@@ -299,10 +328,9 @@ class TrainingProgram(BaseModel):
             return
         fname = save_dir / f'{name}.pickle'
         model.save(fname)
-
-        model2 = BiocompModel.load(fname)
         logger.debug(f"Saved best model to {fname}")
 
+        # model2 = BiocompModel.load(fname)
         # assert model.shared_params == model2.shared_params
 
     def save_outputs(self, params, loss_history, save_dir: Path):
@@ -316,7 +344,7 @@ class TrainingProgram(BaseModel):
         assert self._metadata, "Metadata not set"
         assert self._run_name, "Run name not set"
 
-        fig = add_metadata(fig, ax, self._metadata, run_name=self._run_name)
+        fig = print_matadata(fig, ax, self._metadata, run_name=self._run_name)
 
         fig.savefig(save_dir / 'summary_loss_plot.pdf')
         # save metadata as json
