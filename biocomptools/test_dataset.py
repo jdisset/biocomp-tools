@@ -34,7 +34,7 @@ from biocomptools.toollib.networkselector import (
     build_data_manager,
     NetworkSelector,
     Regex,
-    NetworkDataId,
+    NetworkDataPair,
     NetworkSetUnion,
     NetworkSetIntersection,
     NetworkSetDifference,
@@ -56,7 +56,7 @@ DEFAULT_TYPES = [
     Regex,
     NetworkSelector,
     NetworkSet,
-    NetworkDataId,
+    NetworkDataPair,
     NetworkSetUnion,
     NetworkSetIntersection,
     NetworkSetDifference,
@@ -120,7 +120,7 @@ class DatasetTester(BaseModel):
             self.training_set.run_selectors(session)
 
         for n in self.training_set.content:
-            assert isinstance(n, NetworkDataId)
+            assert isinstance(n, NetworkDataPair)
 
         logger.info(f"Selectors yielded a total of {len(self.training_set)} networks")
 

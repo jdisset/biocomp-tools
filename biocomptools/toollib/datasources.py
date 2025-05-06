@@ -10,7 +10,7 @@ import biocomp as bc
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
-from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, NetworkDataId
+from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, NetworkDataPair
 
 import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm, make_pretty_input_names
@@ -92,7 +92,7 @@ class DBSource(DataSource, NetworkSet):
     @model_validator(mode='before')
     def validate_content(cls, values):
         content = values.get('content')
-        if isinstance(content, (NetworkSelector, NetworkDataId)):
+        if isinstance(content, (NetworkSelector, NetworkDataPair)):
             values['content'] = [content]
         elif isinstance(content, NetworkSet):
             values['content'] = content.content
@@ -120,14 +120,14 @@ class DBSource(DataSource, NetworkSet):
 
         assert isinstance(actual_network, bc.network.Network)
 
-        datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
+        datafile_path = Path(self.path_prefix / datafile.filename).expanduser().resolve()
         metadata = self.metadata.copy()
 
         metadata['network'] = network.model_dump()
         metadata['network_name'] = network.name
         metadata['network_info'] = network.network_info
         metadata['built_network'] = actual_network
-        metadata['source_type'] = 'database'
+        metadata['datasource_type'] = 'database'
 
         metadata['datafile'] = datafile.model_dump()
         metadata['file_stem'] = datafile_path.stem

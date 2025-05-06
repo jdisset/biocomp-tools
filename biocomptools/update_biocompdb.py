@@ -356,7 +356,7 @@ class BiocompDBUpdater:
 
                         try:
                             dfile = md.DataFile(
-                                file=datafile.relative_to(self.base_dir).as_posix(),
+                                filename=datafile.relative_to(self.base_dir).as_posix(),
                                 attrs=data.attrs,
                                 calibration_name=calib_fullname,
                                 priority=priority,
@@ -405,18 +405,18 @@ class BiocompDBUpdater:
 
                             if not recipe_name:
                                 self.logger.warning(
-                                    f"Missing recipe name in datafile attributes for {dfile.file}"
+                                    f"Missing recipe name in datafile attributes for {dfile.filename}"
                                 )
                                 continue
 
                             if recipe_name not in recipe_lookup:
                                 self.logger.warning(
-                                    f"Recipe '{recipe_name}' from datafile {dfile.file} not found in experiment {xp.name}'s loaded recipes."
+                                    f"Recipe '{recipe_name}' from datafile {dfile.filename} not found in experiment {xp.name}'s loaded recipes."
                                 )
                                 if 'recipe_linking_missing' not in xp.errors:
                                     xp.errors['recipe_linking_missing'] = []
                                 xp.errors['recipe_linking_missing'].append(
-                                    f"Recipe '{recipe_name}' not found for datafile {dfile.file}"
+                                    f"Recipe '{recipe_name}' not found for datafile {dfile.filename}"
                                 )
                                 continue
 
@@ -425,17 +425,17 @@ class BiocompDBUpdater:
                             dfile.recipe_name = target_recipe.name
 
                             self.logger.debug(
-                                f"Linked datafile {dfile.file} to recipe {target_recipe.name}"
+                                f"Linked datafile {dfile.filename} to recipe {target_recipe.name}"
                             )
 
                         except Exception as e:
                             self.logger.error(
-                                f"Error linking recipe for datafile {dfile.file}: {str(e)}"
+                                f"Error linking recipe for datafile {dfile.filename}: {str(e)}"
                             )
                             if 'recipe_linking_error' not in xp.errors:
                                 xp.errors['recipe_linking_error'] = []
                             xp.errors['recipe_linking_error'].append(
-                                f"File: {dfile.file}, Error: {traceback.format_exc()}"
+                                f"File: {dfile.filename}, Error: {traceback.format_exc()}"
                             )
                             continue
 

@@ -644,7 +644,7 @@ class NetworkPrediction(DataSource):
 
             metadata.update(
                 {
-                    'source_type': 'collection',
+                    'datasource_type': 'collection',
                     'seed': self.seed,
                     'model_signature': self.network_model.model.signature(),
                     'collection_point_index': i,
@@ -675,7 +675,7 @@ class NetworkPrediction(DataSource):
 
         metadata.update(
             {
-                'source_type': 'prediction',
+                'datasource_type': 'prediction',
                 'seed': self.seed,
                 'network': network.model_dump(),
                 'model_signature': self.network_model.model.signature(),

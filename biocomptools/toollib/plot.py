@@ -38,7 +38,12 @@ class PlotConfig(BaseModel):
     rescaler: Optional[DataRescaler] = None
 
     def _auto_extract_metadata(
-        self, callstack_conf: dict, plot_method: PartialFunction, size_limit: int = 2000
+        self,
+        callstack_conf: dict,
+        plot_method: PartialFunction,
+        size_limit: int = 2000,
+        *args,
+        **kwargs,
     ):
         """
         Returns some possibly interesting metadata from the callstack configuration and the plot method.
@@ -57,13 +62,16 @@ class PlotConfig(BaseModel):
         if can_dump(callstack_conf):
             metadata['callstack_conf'] = callstack_conf
 
-        for pval in plot_method.args:
+        extra_args = list(args)
+
+        for pval in plot_method.args + extra_args:
             if hasattr(pval, 'metadata'):
                 for k, v in pval.metadata.items():
                     if can_dump(v):
                         metadata[k] = v
 
-        for _, pval in plot_method.kwargs.items():
+        extra_kwargs = list(kwargs.items())
+        for _, pval in list(plot_method.kwargs.items()) + extra_kwargs:
             if hasattr(pval, 'metadata'):
                 for k, v in pval.metadata.items():
                     if can_dump(v):
@@ -86,7 +94,18 @@ class PlotConfig(BaseModel):
         if overwrite_kwargs:
             plot_method.set_missing_kwargs(overwrite_kwargs)
 
-        extracted_metadata = self._auto_extract_metadata(callstack_conf, plot_method)
+        def wrapped_plot_method(*args, **kwargs):
+            # collect metadata after calling the plot method
+            # (better than before, since some args may be modified e.g. lazy-loaded plot data)
+            res = plot_method(*args, **kwargs)
+            metadata = self._auto_extract_metadata(
+                callstack_conf,
+                plot_method,
+                *args,
+                size_limit=2000,
+                **kwargs,
+            )
+            return res, metadata
 
         def prepared_func(
             *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
@@ -94,9 +113,9 @@ class PlotConfig(BaseModel):
             full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
 
             with mpl.rc_context(rc=rc):
-                return plot_method(*args, **full_kwargs)
+                return wrapped_plot_method(*args, **full_kwargs)
 
-        return prepared_func, extracted_metadata
+        return prepared_func
 
     def inherit_from(
         self, other: 'PlotConfig', keep_rescaler: bool = True, key: str = '<<{+<}[~<]'
@@ -130,13 +149,13 @@ class PlotTask(BaseModel):
         metadata = {}
         if self.plot_method:
             kw = {'ax': self._ax} if self._ax else {}
-            f, metadata = self.plot_config.prepare_func(
+            f = self.plot_config.prepare_func(
                 plot_method=self.plot_method,
                 auto_callstack_bind=self.auto_callstack_bind,
                 overwrite_kwargs=kw,
             )
 
-            f()
+            result, metadata = f()
 
         return metadata
 
@@ -199,16 +218,22 @@ class Figure(BaseModel):
         assert isinstance(self._ptasks, list)
 
         with mpl.rc_context(rc=self.plot_config.rc_context):
+            metadata = {}
+            metadata['plot_tasks'] = []
             for i, pt in enumerate(self._ptasks):
                 try:
                     resolve_all_lazy(pt)
-                    pt.run()
+                    pt_metadata = pt.run()
+                    metadata['plot_tasks'].append(pt_metadata)
                 except Exception as e:
                     logger.error(f"Error running plot task {i}: {e}")
                     logger.exception(e)
                     continue
 
+            metadata['figure_spec'] = self.figure_spec
+
             self.figure_spec.finalize(self._figax)  # type: ignore
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

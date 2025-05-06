@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import func
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
-import biocomptools.toollib.models as md
+from biocomptools.toollib.models import NetworkDataPair, Recipe, DataFile, Network
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,67 +17,6 @@ from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
 logger = get_logger(__name__)
-
-
-## {{{                           --     utils     --
-class NetworkDataId(BaseModel):
-    """
-    A network name and datafile path pair.
-    The point is to keep it simple and explicit for repeatable training.
-    """
-
-    network_name: str
-    file_path: str
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    def fetch_network_and_datafile(self, session) -> Tuple[md.Network, md.DataFile]:
-        logger.debug(f"Fetching network and datafile for {self.network_name} - {self.file_path}")
-
-        # explicit eagerly load all relationships w selectinload
-        network_query = (
-            select(md.Network)
-            .where(md.Network.name == self.network_name)
-            .options(
-                selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
-                selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
-                selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
-            )
-        )
-
-        network = session.exec(network_query).first()
-        if not network:
-            logger.error(f"No network found for {self.network_name}")
-            raise ValueError(f"No network found for {self.network_name}")
-
-        datafile_query = (
-            select(md.DataFile)
-            .where(md.DataFile.file == self.file_path)
-            .options(selectinload(md.DataFile.calibration), selectinload(md.DataFile.recipe))
-        )
-
-        datafile = session.exec(datafile_query).first()
-        if not datafile:
-            logger.error(f"No datafile found for {self.file_path}")
-            raise ValueError(f"No datafile found for {self.file_path}")
-
-        # force access to relationships to make sure they are not lazy-loaded
-        if network.recipe:
-            recipe = network.recipe
-            _ = recipe.name
-            if recipe.experiment:
-                _ = recipe.experiment.name
-            if recipe.networks:
-                _ = len(recipe.networks)
-            if recipe.data_files:
-                _ = len(recipe.data_files)
-
-        session.expunge_all()
-
-        return network, datafile
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                         --     selector     --
@@ -126,7 +65,7 @@ class NetworkSelector(BaseModel):
     calibration_name: Optional[str | Regex] = None
     output_name: Optional[str] = None
 
-    def get_networkdata_ids(self, session) -> List[NetworkDataId]:
+    def get_networkdata_ids(self, session) -> List[NetworkDataPair]:
         """
         Retrieve network data IDs based on specified filters.
 
@@ -143,27 +82,27 @@ class NetworkSelector(BaseModel):
 
         try:
             query = (
-                select(md.Network)
-                .join(md.Recipe)
-                .join(md.Experiment)
+                select(Network)
+                .join(Recipe)
+                .join(Experiment)
                 .options(
-                    selectinload(md.Network.recipe).selectinload(md.Recipe.data_files),
-                    selectinload(md.Network.recipe).selectinload(md.Recipe.experiment),
-                    selectinload(md.Network.recipe).selectinload(md.Recipe.networks),
+                    selectinload(Network.recipe).selectinload(Recipe.data_files),
+                    selectinload(Network.recipe).selectinload(Recipe.experiment),
+                    selectinload(Network.recipe).selectinload(Recipe.networks),
                 )
             )
 
             if self.experiment_name:
                 logger.debug(f"Applying experiment filter: {self.experiment_name}")
                 if isinstance(self.experiment_name, Regex):
-                    query = query.where(col(md.Experiment.name).regexp_match(self.experiment_name))
+                    query = query.where(col(Experiment.name).regexp_match(self.experiment_name))
                 else:
-                    query = query.where(md.Experiment.name == self.experiment_name)
+                    query = query.where(Experiment.name == self.experiment_name)
 
             if self.recipe_name:
                 if isinstance(self.recipe_name, Regex):
                     # for regex, we'll just use the pattern directly since it might include custom matching
-                    query = query.where(col(md.Recipe.name).regexp_match(self.recipe_name))
+                    query = query.where(col(Recipe.name).regexp_match(self.recipe_name))
                 else:
                     # for exact string match, we need to find the recipe with format "{exp_name}_{recipe_name}"
                     if self.experiment_name:
@@ -171,17 +110,17 @@ class NetworkSelector(BaseModel):
                             # if experiment_name is a regex, we can't construct the exact recipe name
                             # so we'll need to use a regex that matches the end of the string
                             query = query.where(
-                                col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                                col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                             )
                         else:
                             # if we have exact experiment name, we can construct the full recipe name
                             query = query.where(
-                                md.Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
+                                Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
                             )
                     else:
                         # if no experiment name is provided, match any experiment prefix
                         query = query.where(
-                            col(md.Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                            col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
 
             logger.debug(f"Final network query: {query}")
@@ -216,25 +155,23 @@ class NetworkSelector(BaseModel):
                     if self.calibration_name:
                         logger.debug(f"Applying calibration filter: {self.calibration_name}")
                         datafile_query = (
-                            select(md.DataFile)
-                            .options(selectinload(md.DataFile.calibration))
-                            .where(md.DataFile.recipe_name == network.recipe_name)
+                            select(DataFile)
+                            .options(selectinload(DataFile.calibration))
+                            .where(DataFile.recipe_name == network.recipe_name)
                         )
 
                         # add calibration name filter based on type
                         if isinstance(self.calibration_name, Regex):
                             datafile_query = datafile_query.where(
-                                col(md.DataFile.calibration_name).regexp_match(
-                                    self.calibration_name
-                                )
+                                col(DataFile.calibration_name).regexp_match(self.calibration_name)
                             )
 
                         else:
                             datafile_query = datafile_query.where(
-                                md.DataFile.calibration_name == self.calibration_name
+                                DataFile.calibration_name == self.calibration_name
                             )
 
-                        datafile_query = datafile_query.order_by(col(md.DataFile.priority).desc())
+                        datafile_query = datafile_query.order_by(col(DataFile.priority).desc())
                         logger.debug(f"Datafile query: {datafile_query}")
 
                         try:
@@ -269,9 +206,11 @@ class NetworkSelector(BaseModel):
                     for datafile in datafiles:
                         try:
                             network_and_data.append(
-                                NetworkDataId(network_name=network.name, file_path=datafile.file)
+                                NetworkDataPair(
+                                    network_name=network.name, file_path=datafile.filename
+                                )
                             )
-                            logger.debug(f"Matching data: {datafile.file}")
+                            logger.debug(f"Matching data: {datafile.filename}")
                         except Exception as e:
                             logger.error(
                                 f"Error creating NetworkDataId for {network.name}: {str(e)}"
@@ -299,7 +238,7 @@ class NetworkSelector(BaseModel):
 
 
 class NetworkSet(BaseModel):
-    content: List[Union[NetworkDataId, NetworkSelector, "NetworkSet"]] = []
+    content: List[Union[NetworkDataPair, NetworkSelector, "NetworkSet"]] = []
 
     @property
     def _engine(self):
@@ -321,7 +260,7 @@ class NetworkSet(BaseModel):
             return {'content': values}
         # Handle case where content is single item
         content = values.get('content')
-        if isinstance(content, (NetworkSelector, NetworkDataId, NetworkSet)):
+        if isinstance(content, (NetworkSelector, NetworkDataPair, NetworkSet)):
             values['content'] = [content]
         elif isinstance(content, NetworkSet):
             values['content'] = content.content
@@ -342,21 +281,21 @@ class NetworkSet(BaseModel):
                 n.run_selectors(sess)
                 new_content.extend(n.content)
             else:
-                assert isinstance(n, NetworkDataId), f"Expected NetworkDataId but got {type(n)}"
+                assert isinstance(n, NetworkDataPair), f"Expected NetworkDataId but got {type(n)}"
                 new_content.append(n)
         self.content = new_content
         sess.expunge_all()
         if session is None:
             sess.close()
 
-    def get_networks_and_data(self, session=None) -> List[Tuple[md.Network, md.DataFile]]:
+    def get_networks_and_data(self, session=None) -> List[Tuple[Network, DataFile]]:
         sess = session or self.db_session
         res = []
         for n in self.content:
-            assert isinstance(n, NetworkDataId)
+            assert isinstance(n, NetworkDataPair)
 
             try:
-                r = n.fetch_network_and_datafile(sess)
+                r = (n.network, n.datafile)
             except AssertionError as e:
                 logger.error(f"Error fetching network and datafile: {e}. Skipping.")
                 continue
@@ -427,11 +366,6 @@ class NetworkSetDifference(NetworkSet):
     set1: NetworkSet
     set2: NetworkSet
 
-    # # make sure content is empty
-    # @model_validator(mode='before')
-    # def check_content(self):
-    #     assert not self.content, "content of a SetDifference should be empty"
-
     def run_selectors(self, session):
         self.set1.run_selectors(session)
         self.set2.run_selectors(session)
@@ -454,7 +388,7 @@ class NetworkFilter(NetworkSet):
             net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
         ]
 
-    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+    def should_keep(self, netdata: NetworkDataPair, session) -> bool:
         """
         Determine if a network should be kept in the filtered set.
         Must be implemented by subclasses.
@@ -463,15 +397,13 @@ class NetworkFilter(NetworkSet):
 
 
 class CustomFilter(NetworkFilter):
-    filter_func: Callable[[md.Network, md.DataFile], bool]
+    filter_func: Callable[[Network, DataFile], bool]
 
-    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+    def should_keep(self, netdata: NetworkDataPair, session) -> bool:
         try:
-            network, datafile = network_id.fetch_network_and_datafile(session)
-            session.expunge_all()
-            return self.filter_func(network, datafile)
+            return self.filter_func(netdata.network, netdata.datafile)
         except Exception as e:
-            logger.error(f"Error checking custom filter for network {network_id}: {e}")
+            logger.error(f"Error checking custom filter for network {netdata}: {e}")
             return False
 
 
@@ -567,37 +499,31 @@ class CleanupFilter(NetworkFilter):
                     invalid_parts.append(p)
         return invalid_parts
 
-    def should_keep(self, network_id: NetworkDataId, session) -> bool:
-        network, _ = network_id.fetch_network_and_datafile(session)
-        net_info = network.network_info
+    def should_keep(self, netdata: NetworkDataPair, session) -> bool:
+        assert netdata.network
+        netname = netdata.network_name
+        net_info = netdata.network.network_info
         lib = load_lib()
         session.expunge_all()
-
-        # twice_same_rec = self._find_twice_same_rec_with_different_rna(net_info, lib)
-        # if twice_same_rec:
-        #     logger.info(
-        #         f"Network {network_id} has multiple ERN recognition sites with diff rna: {twice_same_rec}. Skipping."
-        #     )
-        #     return False
 
         missing_parts = self._find_missing_complementary_parts(net_info, lib)
         if missing_parts:
             logger.info(
-                f"Network {network_id} has missing complementary parts: {missing_parts}. Skipping."
+                f"Network {netname} has missing complementary parts: {missing_parts}. Skipping."
             )
             return False
 
         invalid_types = self._find_invalid_sequestron_types(net_info, lib)
         if invalid_types:
             logger.info(
-                f"Network {network_id} has invalid sequestron types: {invalid_types}. Skipping."
+                f"Network {netname} has invalid sequestron types: {invalid_types}. Skipping."
             )
             return False
 
         invalid_categories = self._find_invalid_part_categories(net_info, lib)
         if invalid_categories:
             logger.info(
-                f"Network {network_id} has parts from invalid categories: {invalid_categories}. Skipping."
+                f"Network {netname} has parts from invalid categories: {invalid_categories}. Skipping."
             )
             return False
 
@@ -609,13 +535,12 @@ class UorfFilter(NetworkFilter):
 
     uorf_values: List[Tuple[int, int]] = []
 
-    def should_keep(self, network_id: NetworkDataId, session) -> bool:
+    def should_keep(self, netdata: NetworkDataPair, session) -> bool:
         try:
-            network, _ = network_id.fetch_network_and_datafile(session)
-            session.expunge_all()
+            assert netdata.network
 
             # get uORF values from network info
-            network_info = network.network_info
+            network_info = netdata.network.network_info
 
             if not network_info or 'uorf_values' not in network_info:
                 return False
@@ -624,7 +549,7 @@ class UorfFilter(NetworkFilter):
             # we want single ERN networks
             if len(network_info['uorf_values']) != 1:
                 logger.warning(
-                    f"Unexpected uORF values for {network_id}: {network_info['uorf_values']}. Is it a single ERN?"
+                    f"Unexpected uORF values for {netdata.network}: {network_info['uorf_values']}. Is it a single ERN?"
                 )
                 return False
 
@@ -633,7 +558,7 @@ class UorfFilter(NetworkFilter):
             return uorf_values in self.uorf_values
 
         except Exception as e:
-            logger.error(f"Error checking uORF values for network {network_id}: {e}")
+            logger.error(f"Error checking uORF values for network {netdata.network}: {e}")
             return False
 
 
@@ -648,9 +573,9 @@ def build_data_manager(
     data_conf: DataConfig = DEFAULT_DATA_CONFIG,
     data_cache=config.paths.cache.data,
 ) -> DataManager:
-    assert all(
-        [isinstance(n, NetworkDataId) for n in dataset.content]
-    ), "By now, dataset should only contain NetworkDataId objects"
+    assert all([isinstance(n, NetworkDataPair) for n in dataset.content]), (
+        "By now, dataset should only contain NetworkDataId objects"
+    )
 
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
     db_session.expunge_all()
@@ -668,8 +593,8 @@ def build_data_manager(
             network = [network]
 
         for net in network:
-            data.append(get_network_XY(net, path_prefix / f.file))
-            net.metadata['data_file'] = f.file
+            data.append(get_network_XY(net, path_prefix / f.filename))
+            net.metadata['data_file'] = f.filename
             net.metadata['calibration_name'] = f.calibration.name
             net.metadata['recipe_name'] = f.recipe_name
             actual_networks.append(net)

@@ -2,12 +2,14 @@ from sqlmodel import Field, SQLModel, create_engine, Relationship
 from typing import List, Optional, Annotated, Any, TypeVar
 import sqlalchemy as sa
 from sqlalchemy import Column, JSON
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, BaseModel
+from sqlalchemy import and_
 from pathlib import Path
 from biocomptools.toollib.common import config
 import biocomp as bc
 from biocomp.utils import load_lib
 
+from sqlmodel import select, Session, col
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -98,7 +100,7 @@ class Calibration(BiocompDB, table=True):
 
 
 class DataFile(BiocompDB, table=True):
-    file: str = Field(primary_key=True)
+    filename: str = Field(primary_key=True)
     attrs: dict = Field(default_factory=dict, sa_column=Column(JSON))
     calibration_name: str = Field(foreign_key="calibration.fullname")
     recipe_name: Optional[str] = Field(foreign_key="recipe.name", default=None)
@@ -108,6 +110,8 @@ class DataFile(BiocompDB, table=True):
     calibration: Optional[Calibration] = Relationship(back_populates="data_files")
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
 
+    plotted_in: List["Plot"] = Relationship(back_populates="datafile")
+
     @property
     def url_encoded_filepath(self):
         """
@@ -115,14 +119,14 @@ class DataFile(BiocompDB, table=True):
         """
         import urllib.parse
 
-        return urllib.parse.quote(self.file)
+        return urllib.parse.quote(self.filename)
 
     def safe_copy(self):
         """
         Copy the datafile object without any SQLAlchemy references.
         """
         new_obj = DataFile(
-            file=self.file,
+            filename=self.filename,
             attrs=self.attrs,
             calibration_name=self.calibration_name,
             recipe_name=self.recipe_name,
@@ -137,7 +141,7 @@ class DataFile(BiocompDB, table=True):
     def load_data(self, path_prefix=None):
         import pandas as pd
 
-        filepath = Path(self.file) if path_prefix is None else Path(path_prefix) / self.file
+        filepath = Path(self.filename) if path_prefix is None else Path(path_prefix) / self.filename
         filepath = filepath.expanduser().resolve()
 
         assert filepath.exists(), f"File {filepath} does not exist"
@@ -149,23 +153,6 @@ class DataFile(BiocompDB, table=True):
             return pd.read_parquet(filepath)
         else:
             raise ValueError(f"Unsupported file extension {ext}")
-
-
-class NetworkDataPair(BiocompDB, table=True):
-    network_name: str = Field(foreign_key="network.name", primary_key=True)
-    datafile_name: str = Field(foreign_key="datafile.file", primary_key=True)
-
-    network: Optional["Network"] = Relationship()
-    datafile: Optional["DataFile"] = Relationship()
-    trained_models: List["TrainedModel"] = Relationship(back_populates="training_set")
-
-
-class TrainedModel(BiocompDB, table=True):
-    name: str = Field(primary_key=True)
-    path_to_model: ForcedStr
-    training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-
-    training_set: List[NetworkDataPair] = Relationship(back_populates="trained_models")
 
 
 class Network(BiocompDB, table=True):
@@ -418,6 +405,92 @@ class Recipe(BiocompDB, table=True):
             self.networks.extend(network_models)
 
         return network_models
+
+
+class TrainingSetLink(BiocompDB, table=True):
+    network_name: str = Field(foreign_key="networkdatapair.network_name", primary_key=True)
+    datafile_path: str = Field(foreign_key="networkdatapair.datafile_path", primary_key=True)
+    trained_model_name: str = Field(foreign_key="trainedmodel.name", primary_key=True)
+
+
+class NetworkDataPair(BiocompDB, table=True):
+    network_name: str = Field(foreign_key="network.name", primary_key=True)
+    datafile_path: str = Field(foreign_key="datafile.filename", primary_key=True)
+
+    network: Optional["Network"] = Relationship()
+    datafile: Optional["DataFile"] = Relationship()
+
+    trained_models: List["TrainedModel"] = Relationship(
+        back_populates="training_set",
+        link_model=TrainingSetLink,
+        sa_relationship_kwargs={
+            "primaryjoin": "and_(NetworkDataPair.network_name == TrainingSetLink.network_name, NetworkDataPair.datafile_path == TrainingSetLink.datafile_path)",
+            "secondaryjoin": "TrainedModel.name == TrainingSetLink.trained_model_name",
+        },
+    )
+
+
+class TrainedModel(BiocompDB, table=True):
+    name: str = Field(primary_key=True)
+    path_to_model: ForcedStr
+    training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    training_set: List["NetworkDataPair"] = Relationship(
+        back_populates="trained_models",
+        link_model=TrainingSetLink,
+        sa_relationship_kwargs={
+            "primaryjoin": "TrainedModel.name == TrainingSetLink.trained_model_name",
+            "secondaryjoin": "and_(NetworkDataPair.network_name == TrainingSetLink.network_name, NetworkDataPair.datafile_path == TrainingSetLink.datafile_path)",
+        },
+    )
+
+
+class Prediction(BiocompDB, table=True):
+    id: int = Field(default=None, primary_key=True)
+    network_name: str = Field(foreign_key="network.name")
+    datafile_path: Optional[str] = Field(foreign_key="datafile.filename", default=None)
+
+    trained_model_name: str = Field(foreign_key="trainedmodel.name")
+
+    mse: Optional[float] = None
+    grid_mse: Optional[float] = None
+    normalized_grid_mse: Optional[float] = None
+    n_points: Optional[int] = None
+
+    extra_stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    network: Optional["Network"] = Relationship()
+    datafile: Optional["DataFile"] = Relationship()
+    trained_model: Optional["TrainedModel"] = Relationship()
+
+    plotted_in: List["Plot"] = Relationship(back_populates="prediction")
+
+
+class AxPosition(BaseModel):
+    row: int
+    col: int
+    flat_index: Optional[int] = None
+
+
+class Plot(BiocompDB, table=True):
+    id: int = Field(default=None, primary_key=True)
+
+    from_prediction: Optional[int] = Field(foreign_key="prediction.id", default=None)
+    from_datafile: Optional[str] = Field(foreign_key="datafile.filename", default=None)
+
+    in_figure: Optional[str] = Field(foreign_key="figure.filename", default=None)
+    at_location: Optional[AxPosition] = Field(sa_column=Column(JSON))
+
+    meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    prediction: Optional[Prediction] = Relationship(back_populates="plotted_in")
+    datafile: Optional[DataFile] = Relationship(back_populates="plotted_in")
+
+
+class Figure(BiocompDB, table=True):
+    filename: str = Field(primary_key=True)
+
+    meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
 def get_biocompdb_sqlite_engine(db_path, echo=False):
