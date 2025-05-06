@@ -3,11 +3,13 @@ from pydantic import BaseModel, Field, model_validator, ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
 import jax.numpy as jnp
+from scipy.spatial import KDTree
 from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
 from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.datasources import DataSource
+from biocomp.plotting.plotting_core import get_knn_mean, get_knn_std
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -398,10 +400,49 @@ class NetworkPrediction(DataSource):
 
         logger.debug(f"Random samples:\n{df.round(3).to_string()}")
 
+    def _percentage_stats(
+            self, latent_yhat, latent_gt, latent_x, network_stats
+    ):
+        """
+        Create a grid over the ranges of input
+        For each point in the grid compute the variance of y in the neighbourhood
+        Divide the observed MSE by that
+        """
+        # make a grid [0,1]^n
+        grid = np.vstack([dim.ravel() for dim in
+                          np.meshgrid(*[np.linspace(0,1,10) for _ in range(latent_x.shape[1])])]).T
+        tree = KDTree(latent_x)
+        if latent_gt.ndim == 1:
+            latent_gt = latent_gt[..., np.newaxis]
+        if latent_yhat.ndim == 1:
+            latent_yhat = latent_yhat[..., np.newaxis]
+        logger.debug(f"{latent_x.shape=} {latent_gt.shape=}, {latent_yhat.shape=}, {grid.shape=}")
+        gt_mean = get_knn_mean(grid, latent_gt, tree)[0]
+        gt_stdev = get_knn_std(grid, latent_gt, tree)
+        yhat_mean = get_knn_mean(grid, latent_yhat, tree)[0]
+        yhat_stdev = get_knn_std(grid, latent_yhat, tree)
+        logger.debug(f"{gt_mean.shape=}, {gt_stdev.shape=}, {yhat_mean.shape=}, {yhat_stdev.shape=}")
+        logger.debug(f"{gt_mean.sum()=}, {gt_stdev.sum()=}, {yhat_mean.sum()=}, {yhat_stdev.sum()=}")
+        kl = np.log(yhat_stdev / gt_stdev) + (
+                (yhat_stdev**2 + (yhat_mean - gt_mean)**2) / (2 * gt_stdev**2)
+                - 1/2
+             )
+        se = (yhat_mean - gt_mean)**2
+        kl_mean = kl.sum() / kl.size
+        mse = se.sum() / se.size
+        mse_as_percent = 100 * (1 - np.tanh(mse))
+        network_stats['mse_percent_accuracy'] = mse_as_percent
+        kl_as_percent = 100 * (1 - np.tanh(kl_mean))
+        network_stats['kl_percent_accuracy'] = kl_as_percent
+        logger.debug(f"{kl.shape=} {se.shape=} {kl_mean=} {mse=} {mse_as_percent=} {kl_as_percent=}")
+
+
+
     def _calculate_network_stats(
         self, network_idx, network, yhat, gt, output_pos, nb_points_in_eval
     ):
         """calculate statistics for a single network"""
+
         # transform to latent space for statistics
         rescaler = self.network_model.model.rescaler
         latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
@@ -436,6 +477,8 @@ class NetworkPrediction(DataSource):
         # add comparison stats if ground truth available
         if gt is not None:
             latent_gt = np.asarray(rescaler.fwd(gt).flatten(), dtype=np.float32)
+            logger.debug(f"latent gt shape: {latent_gt.shape}")
+            logger.debug(f"latent yhat shape: {latent_yhat.shape}")
             mse = float(np.mean((latent_yhat - latent_gt) ** 2))
             network_stats['mse'] = mse
             network_stats['rmse'] = float(np.sqrt(mse))
@@ -444,6 +487,7 @@ class NetworkPrediction(DataSource):
             assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
             latent_x = rescaler.fwd(x)
+            self._percentage_stats(latent_yhat, latent_gt, latent_x, network_stats)
             self._log_stats(network_idx, network_stats, latent_gt, latent_yhat, latent_x)
 
         return network_stats
