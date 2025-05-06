@@ -9,6 +9,7 @@ from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.datasources import DataSource
+from biocomp.plotting.plotting_core import get_knn_mean, get_knn_std
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -402,97 +403,40 @@ class NetworkPrediction(DataSource):
         logger.debug(f"Random samples:\n{df.round(3).to_string()}")
 
     def _percentage_stats(
-            self, latent_yhat, latent_gt, latent_x
+            self, latent_yhat, latent_gt, latent_x, network_stats
     ):
         """
         Create a grid over the ranges of input
         For each point in the grid compute the variance of y in the neighbourhood
         Divide the observed MSE by that
         """
-        def get_gaussian_weighted_knn(
-            x,
-            tree,
-            k: int = 500,  # number of neighbors to consider
-            min_points: int = 20,  # minimum number of points to consider a neighborhood. fewer = nan
-            radius: float = 0.1,
-            sigma_in_radius: float = 3,  # sigma of the gaussian kernel in units of radius
-        ):
-            """Get the k-nearest neighbors of x in the tree,
-            and return their indices together with their weights (from a gaussian kernel)."""
-
-            distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
-            empty_neighbor_mask = distances == np.inf
-            nb_points = (~empty_neighbor_mask).sum(axis=1)
-            weights = gausspdf(distances, 0, radius / sigma_in_radius)
-            indices[empty_neighbor_mask] = 0
-            weights[empty_neighbor_mask] = 0
-            weights[nb_points < min_points, :] = np.nan
-
-            return indices, weights
-
-        def get_knn_mean(x, y, tree, **kw):
-            """Get the k-nearest neighbors of x in the tree,
-            and return their weighted average value together with their density."""
-
-            indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
-
-            assert indices.shape == weights.shape
-            normed_w = weights / weights.sum(axis=1)[:, None]
-            weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
-
-            density = np.nansum(weights, axis=1)
-
-            return weighted_mean, density
-
-
-        def get_knn_std(x, y, tree, **kw):
-            """
-            Get the k-nearest neighbors of x in the tree,
-            and return their weighted standard deviation.
-            """
-
-            indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
-            assert indices.shape == weights.shape
-            normed_w = weights / weights.sum(axis=1)[:, None]
-            weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
-
-            # Compute weighted variance (and then std)
-            squared_diff = (y[indices] - weighted_mean[:, None, :]) ** 2
-            weighted_squared_diff = squared_diff * normed_w[:, :, None]
-            variance = weighted_squared_diff.sum(axis=1)
-
-            return np.sqrt(variance)
-
-
         # make a grid [0,1]^n
-        logger.debug(f"latent x shape: {latent_x.shape}")
         grid = np.vstack([dim.ravel() for dim in
                           np.meshgrid(*[np.linspace(0,1,10) for _ in range(latent_x.shape[1])])]).T
-        logger.debug(f"grid shape: {grid.shape}")
         tree = KDTree(latent_x)
-        ses = []
-        kls = []
-        logger.debug(f"latent gt shape: {latent_gt.shape}")
-        logger.debug(f"latent yhat shape: {latent_yhat.shape}")
-        logger.debug(f"grid shape: {grid.shape}")
-        for xval in grid:
-            gt_mean = get_knn_mean(xval, latent_gt, tree)
-            gt_stdev = get_knn_stdev(xval, latent_gt, tree)
-            yhat_mean = get_knn_mean(xval, latent_yhat, tree)
-            yhat_stdev = get_knn_stdev(xval, latent_yhat, tree)
-            kl = np.log(yhat_stdev / gt_stdev) + (
-                    (yhat_stdev**2 + (yhat_mean - gt_mean)**2) / (2 * gt_stdev**2)
-                    - 1/2
-                 )
-            kls.append(kl)
-            se = (yhat_mean - gt_mean)**2
-            ses.append(se)
-        kl_mean = sum(kl) / len(kl)
-        mse = sum(ses) / len(ses)
+        if latent_gt.ndim == 1:
+            latent_gt = latent_gt[..., np.newaxis]
+        if latent_yhat.ndim == 1:
+            latent_yhat = latent_yhat[..., np.newaxis]
+        logger.debug(f"{latent_x.shape=} {latent_gt.shape=}, {latent_yhat.shape=}, {grid.shape=}")
+        gt_mean = get_knn_mean(grid, latent_gt, tree)[0]
+        gt_stdev = get_knn_std(grid, latent_gt, tree)
+        yhat_mean = get_knn_mean(grid, latent_yhat, tree)[0]
+        yhat_stdev = get_knn_std(grid, latent_yhat, tree)
+        logger.debug(f"{gt_mean.shape=}, {gt_stdev.shape=}, {yhat_mean.shape=}, {yhat_stdev.shape=}")
+        logger.debug(f"{gt_mean.sum()=}, {gt_stdev.sum()=}, {yhat_mean.sum()=}, {yhat_stdev.sum()=}")
+        kl = np.log(yhat_stdev / gt_stdev) + (
+                (yhat_stdev**2 + (yhat_mean - gt_mean)**2) / (2 * gt_stdev**2)
+                - 1/2
+             )
+        se = (yhat_mean - gt_mean)**2
+        kl_mean = kl.sum() / kl.size
+        mse = se.sum() / se.size
         mse_as_percent = 100 * (1 - np.tanh(mse))
         network_stats['mse_percent_accuracy'] = mse_as_percent
         kl_as_percent = 100 * (1 - np.tanh(kl_mean))
         network_stats['kl_percent_accuracy'] = kl_as_percent
+        logger.debug(f"{kl.shape=} {se.shape=} {kl_mean=} {mse=} {mse_as_percent=} {kl_as_percent=}")
 
 
 
@@ -545,7 +489,7 @@ class NetworkPrediction(DataSource):
             assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
             latent_x = rescaler.fwd(x)
-            self._percentage_stats(latent_yhat, latent_gt, latent_x)
+            self._percentage_stats(latent_yhat, latent_gt, latent_x, network_stats)
             self._log_stats(network_idx, network_stats, latent_gt, latent_yhat, latent_x)
 
         return network_stats
