@@ -84,17 +84,14 @@ class BiocompModel(ArbitraryModel):
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
-    # signature should be a property that is always dumped
     @property
     def signature(self):
         """compute unique signature for this model"""
-        import base58
+        import biocomptools.toollib.hashutils as bch
 
         paramspickle = pickle.dumps(self.shared_params)
         this_str = str(self.compute_config) + str(self.rescaler) + str(paramspickle)
-        h = xxhash.xxh64(this_str)
-        sig = base58.b58encode(h.digest()).decode()
-        return sig
+        return bch.pronounceable_hash56(this_str)
 
     @classmethod
     def load(cls, path):
@@ -206,13 +203,9 @@ class NetworkModel(BaseModel):
             logger.error(f"networks: {self.network}")
             raise e
 
-    def signature(self):
-        """get unique signature for this model"""
-        return self.model.signature()
-
     def with_model(self, model: BiocompModel) -> 'NetworkModel':
         """create a new network model with a different biocomp model"""
-        logger.debug(f"creating new network model with model {model.signature()=}")
+        logger.debug(f"creating new network model with model {model.signature=}")
         new_model = self.model_copy(update={'model': model})
         new_model.update_params()
 
@@ -221,6 +214,10 @@ class NetworkModel(BaseModel):
             logger.debug("No serialization errors in NetworkModel after with_model")
 
         return new_model
+
+    @property
+    def signature(self):
+        return self.model.signature
 
     def get_node_indices(self, network_id: int, node_id: int):
         """
