@@ -13,8 +13,6 @@ import matplotlib.pyplot as plt
 from numpy import ndarray as ndArray
 from typing import Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict
-from biocomptools.plot import plot_extra_context
-from biocomptools.plot import PlotJob
 
 logger = logging.getLogger(__name__)
 

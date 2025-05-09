@@ -162,7 +162,7 @@ class PlotTask(BaseModel):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                          --     figure     --
+## {{{                          --     figure     --{{{
 
 
 def resolve(obj):
@@ -230,10 +230,9 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
-            metadata['figure_spec'] = self.figure_spec
-
+            self.figure_spec.metadata = metadata
             self.figure_spec.finalize(self._figax)  # type: ignore
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+# }}}

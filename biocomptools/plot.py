@@ -343,6 +343,7 @@ def main():
             '/figures.*',
         ],
         context=plot_extra_context,
+        enable_shorthand_vars=False,
     )
 
     pj.run()
