@@ -3,18 +3,32 @@ from pydantic import BaseModel, Field, model_validator, ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
 import jax.numpy as jnp
-from scipy.spatial import KDTree
 from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
 from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.datasources import DataSource
-from biocomp.plotting.plotting_core import get_knn_mean, get_knn_std
+from biocomp.plotting.plotting_core import (
+    get_knn_mean,
+    get_knn_std,
+    knn_avg,
+    get_gaussian_weighted_knn,
+)
 from pathlib import Path
 
 logger = get_logger(__name__)
 
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
+
+
+def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> np.ndarray:
+    """
+    Create a hypercube grid of points in n dimensions.
+    """
+    assert ndim > 0, "ndim must be greater than 0"
+    assert res > 0, "res must be greater than 0"
+    grid = np.meshgrid(*[np.linspace(xmin, xmax, res) for _ in range(ndim)])
+    return np.vstack([g.ravel() for g in grid]).T
 
 
 def validate_predict_at(v: Any) -> List[np.ndarray]:
@@ -78,6 +92,9 @@ class NetworkPrediction(DataSource):
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
     already_latent: bool = False  # no need to rescale if the input data is already in latent space
+    stats_hypercube_res: int = 70  # resolution for hypercube grid
+    stats_hypercube_min: float = 0.0  # minimum value for hypercube grid
+    stats_hypercube_max: float = 1.0  # maximum value for hypercube grid
 
     _yhats: Optional[List[np.ndarray]] = None
     _x: Optional[List[np.ndarray]] = None
@@ -125,16 +142,12 @@ class NetworkPrediction(DataSource):
 
     def with_shared_from_model(self, model: BiocompModel) -> 'NetworkPrediction':
         """create a new networkprediction with a different model"""
-        logger.debug(f"creating new networkprediction with model {model.signature()=}")
+        logger.debug(f"creating new networkprediction with model {model.signature=}")
 
         # create new instance with updated network model
         new = self.model_copy(update={'network_model': self.network_model.with_model(model)})
         new._yhats = None  # clear the cache
         new._network_stats = None  # clear the stats cache
-
-        logger.debug(
-            f"created networkprediction with model signature {new.network_model.model.signature()=}"
-        )
 
         return new
 
@@ -206,7 +219,7 @@ class NetworkPrediction(DataSource):
     def compute_all_network_predictions(self):
         """compute predictions for all networks"""
 
-        logger.debug(f"computing predictions with model {self.network_model.signature()}")
+        logger.debug(f"computing predictions with model {self.network_model.signature}")
         logger.debug(
             f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
         )
@@ -304,7 +317,7 @@ class NetworkPrediction(DataSource):
 
         def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
             logger.debug(
-                f"getting xy for network {network_idx} with model {self.network_model.signature()}"
+                f"getting xy for network {network_idx} with model {self.network_model.signature}"
             )
 
             # compute predictions if not already computed
@@ -400,43 +413,53 @@ class NetworkPrediction(DataSource):
 
         logger.debug(f"Random samples:\n{df.round(3).to_string()}")
 
-    def _percentage_stats(
-            self, latent_yhat, latent_gt, latent_x, network_stats
-    ):
-        """
-        Create a grid over the ranges of input
-        For each point in the grid compute the variance of y in the neighbourhood
-        Divide the observed MSE by that
-        """
-        # make a grid [0,1]^n
-        grid = np.vstack([dim.ravel() for dim in
-                          np.meshgrid(*[np.linspace(0,1,10) for _ in range(latent_x.shape[1])])]).T
-        tree = KDTree(latent_x)
-        if latent_gt.ndim == 1:
-            latent_gt = latent_gt[..., np.newaxis]
-        if latent_yhat.ndim == 1:
-            latent_yhat = latent_yhat[..., np.newaxis]
-        logger.debug(f"{latent_x.shape=} {latent_gt.shape=}, {latent_yhat.shape=}, {grid.shape=}")
-        gt_mean = get_knn_mean(grid, latent_gt, tree)[0]
-        gt_stdev = get_knn_std(grid, latent_gt, tree)
-        yhat_mean = get_knn_mean(grid, latent_yhat, tree)[0]
-        yhat_stdev = get_knn_std(grid, latent_yhat, tree)
-        logger.debug(f"{gt_mean.shape=}, {gt_stdev.shape=}, {yhat_mean.shape=}, {yhat_stdev.shape=}")
-        logger.debug(f"{gt_mean.sum()=}, {gt_stdev.sum()=}, {yhat_mean.sum()=}, {yhat_stdev.sum()=}")
-        kl = np.log(yhat_stdev / gt_stdev) + (
-                (yhat_stdev**2 + (yhat_mean - gt_mean)**2) / (2 * gt_stdev**2)
-                - 1/2
-             )
-        se = (yhat_mean - gt_mean)**2
-        kl_mean = kl.sum() / kl.size
-        mse = se.sum() / se.size
-        mse_as_percent = 100 * (1 - np.tanh(mse))
-        network_stats['mse_percent_accuracy'] = mse_as_percent
-        kl_as_percent = 100 * (1 - np.tanh(kl_mean))
-        network_stats['kl_percent_accuracy'] = kl_as_percent
-        logger.debug(f"{kl.shape=} {se.shape=} {kl_mean=} {mse=} {mse_as_percent=} {kl_as_percent=}")
+    def _grid_stats(self, latent_yhat, latent_gt, latent_x):
+        grid = make_hypercube(
+            latent_x.shape[1],
+            res=self.stats_hypercube_res,
+            xmin=self.stats_hypercube_min,
+            xmax=self.stats_hypercube_max,
+        )
 
+        # latent_yhat and gt should be at least 2D, i.e. column vectors
+        latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
+        latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
 
+        indices_and_weights = get_gaussian_weighted_knn(latent_x)
+        gt_stdev, gt_mean = get_knn_std(grid, latent_gt, iw=indices_and_weights)
+        yhat_stdev, yhat_mean = get_knn_std(grid, latent_yhat, iw=indices_and_weights)
+
+        grid_mse = np.nanmean((yhat_mean - gt_mean) ** 2)
+        grid_rmse = np.sqrt(grid_mse)
+
+        # some grid-wide statistics
+        gtid_gt_var = np.nanvar(gt_mean)
+        EPSILON = 1e-9
+        grid_r_squared = 1 - (grid_mse / (gtid_gt_var + EPSILON))
+
+        # KL divergence
+        safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
+        safe_yhat_stdev = np.maximum(yhat_stdev, EPSILON)
+        log_term = np.log(safe_yhat_stdev / safe_gt_stdev)
+        numerator_term = safe_gt_stdev**2 + (gt_mean - yhat_mean) ** 2
+        denominator_term = 2 * safe_yhat_stdev**2
+        kl_divergences = log_term + numerator_term / denominator_term - 0.5
+        kl_divergences = np.maximum(kl_divergences, 0.0)  # (even though KL should be non-negative)
+        kl_mean = np.nanmean(kl_divergences)
+        kl_similarities = np.exp(-kl_divergences)  # similarity for each grid point
+        grid_kl_similarity = np.nanmean(kl_similarities) * 100
+
+        stats = {
+            'grid_gt_var': gtid_gt_var,
+            'grid_mse': grid_mse,
+            'grid_rmse': grid_rmse,
+            'grid_kl': kl_mean,
+            'grid_kl_similarity': grid_kl_similarity,
+            'grid_r_squared': grid_r_squared,
+        }
+
+        logger.debug(f"grid stats: {stats}")
+        return stats
 
     def _calculate_network_stats(
         self, network_idx, network, yhat, gt, output_pos, nb_points_in_eval
@@ -487,7 +510,7 @@ class NetworkPrediction(DataSource):
             assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
             latent_x = rescaler.fwd(x)
-            self._percentage_stats(latent_yhat, latent_gt, latent_x, network_stats)
+            network_stats.update(self._grid_stats(latent_yhat, latent_gt, latent_x))
             self._log_stats(network_idx, network_stats, latent_gt, latent_yhat, latent_x)
 
         return network_stats
@@ -586,7 +609,7 @@ class NetworkPrediction(DataSource):
 
     def get_data_lazy(self) -> List[LazyPlotData]:
         """get plot data in lazy evaluation mode"""
-        logger.debug(f"getting data lazily for model {self.network_model.signature()}")
+        logger.debug(f"getting data lazily for model {self.network_model.signature}")
 
         # handle collection points if provided
         if self.collection_points is not None and len(self.collection_points) > 0:
@@ -616,7 +639,7 @@ class NetworkPrediction(DataSource):
 
     def _get_collection_data_lazy(self) -> List[LazyPlotData]:
         """get plot data for collection points in lazy evaluation mode"""
-        logger.debug(f"getting collection data lazily for model {self.network_model.signature()}")
+        logger.debug(f"getting collection data lazily for model {self.network_model.signature}")
 
         assert self.collection_points is not None
 
@@ -690,7 +713,7 @@ class NetworkPrediction(DataSource):
                 {
                     'datasource_type': 'collection',
                     'seed': self.seed,
-                    'model_signature': self.network_model.model.signature(),
+                    'model_signature': self.network_model.model.signature,
                     'collection_point_index': i,
                     'network_id': collection_point.network_id,
                     'node_id': collection_point.node_id,
@@ -722,7 +745,7 @@ class NetworkPrediction(DataSource):
                 'datasource_type': 'prediction',
                 'seed': self.seed,
                 'network': network.model_dump(),
-                'model_signature': self.network_model.model.signature(),
+                'model_signature': self.network_model.model.signature,
                 'network_name': getattr(network, 'name', f"Network_{network_idx}"),
                 'network_info': network_info,
                 'network_index': network_idx,
