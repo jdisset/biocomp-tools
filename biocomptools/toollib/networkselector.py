@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import func
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
-from biocomptools.toollib.models import NetworkDataPair, Recipe, DataFile, Network
+from biocomptools.toollib.models import NetworkDataPair, Recipe, DataFile, Network, Experiment
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
@@ -207,7 +207,7 @@ class NetworkSelector(BaseModel):
                         try:
                             network_and_data.append(
                                 NetworkDataPair(
-                                    network_name=network.name, file_path=datafile.filename
+                                    network_name=network.name, datafile_path=datafile.filename
                                 )
                             )
                             logger.debug(f"Matching data: {datafile.filename}")
@@ -269,6 +269,7 @@ class NetworkSet(BaseModel):
     def run_selectors(self, session=None):
         sess = session or self.db_session
         new_content = []
+        logger.debug(f"Running selectors on {len(self.content)} items")
         for n in self.content:
             if isinstance(n, NetworkSelector):
                 logger.debug(f"Running selector: {n}")
@@ -290,19 +291,45 @@ class NetworkSet(BaseModel):
 
     def get_networks_and_data(self, session=None) -> List[Tuple[Network, DataFile]]:
         sess = session or self.db_session
+        close_session_locally = session is None
+
         res = []
-        for n in self.content:
-            assert isinstance(n, NetworkDataPair)
+        logger.debug(f"Getting networks and data for {len(self.content)} items")
+        for n_pair_data in self.content:
+            assert isinstance(n_pair_data, NetworkDataPair)
+            logger.debug(
+                f"Processing {type(n_pair_data)} {n_pair_data.model_dump(exclude={'network', 'datafile'})}"
+            )
 
             try:
-                r = (n.network, n.datafile)
-            except AssertionError as e:
-                logger.error(f"Error fetching network and datafile: {e}. Skipping.")
+                statement = (
+                    select(Network)
+                    .where(Network.name == n_pair_data.network_name)
+                    .options(selectinload(Network.recipe))
+                )
+                db_network = sess.exec(statement).one_or_none()
+
+                db_datafile = sess.get(DataFile, n_pair_data.datafile_path)
+
+                if not db_network:
+                    raise ValueError(
+                        f"Network '{n_pair_data.network_name}' not found in the database."
+                    )
+                if not db_datafile:
+                    raise ValueError(
+                        f"Datafile '{n_pair_data.datafile_path}' not found in the database."
+                    )
+
+                r = (db_network, db_datafile)
+            except Exception as e:
+                logger.error(
+                    f"Error processing or fetching entities for pair {n_pair_data.model_dump(exclude={'network', 'datafile'})}: {e}. Skipping."
+                )
+                logger.exception(e)
                 continue
             res.append(r)
 
-        sess.expunge_all()
-        if session is None:
+        if close_session_locally:
             sess.close()
 
         return res
@@ -325,7 +352,8 @@ class NetworkSetUnion(NetworkSet):
 
     allow_duplicates: bool = False
 
-    def run_selectors(self, session):
+    def run_selectors(self, session=None):
+        logger.debug(f"Running union on {len(self.sets)} sets")
         for s in self.sets:
             s.run_selectors(session)
 
@@ -346,7 +374,8 @@ class NetworkSetIntersection(NetworkSet):
 
     sets: List[NetworkSet] = []
 
-    def run_selectors(self, session):
+    def run_selectors(self, session=None):
+        logger.debug(f"Running intersection on {len(self.sets)} sets")
         for s in self.sets:
             s.run_selectors(session)
 
@@ -366,7 +395,10 @@ class NetworkSetDifference(NetworkSet):
     set1: NetworkSet
     set2: NetworkSet
 
-    def run_selectors(self, session):
+    def run_selectors(self, session=None):
+        logger.debug(
+            f"Running difference on {len(self.set1.content)} - {len(self.set2.content)} items"
+        )
         self.set1.run_selectors(session)
         self.set2.run_selectors(session)
 
@@ -380,7 +412,8 @@ class NetworkFilter(NetworkSet):
 
     source_set: NetworkSet
 
-    def run_selectors(self, session):
+    def run_selectors(self, session=None):
+        logger.debug(f"Running filter on {len(self.source_set.content)} items")
         self.source_set.run_selectors(session)
 
         session.expunge_all()
