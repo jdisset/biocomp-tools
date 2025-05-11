@@ -2,7 +2,8 @@
 from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.modelmodel import BiocompModel, get_shared_params
 from biocomptools.toollib.datasources import DataSource, DBSource
-from biocomptools.toollib.common import config, get_package_git_hashes
+from biocomptools.toollib.common import config
+from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
 from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger

@@ -91,7 +91,7 @@ class BiocompModel(ArbitraryModel):
 
         paramspickle = pickle.dumps(self.shared_params)
         this_str = str(self.compute_config) + str(self.rescaler) + str(paramspickle)
-        return bch.pronounceable_hash56(this_str)
+        return bch.pronounceable_hash64(this_str)
 
     @classmethod
     def load(cls, path):
