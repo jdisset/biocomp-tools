@@ -58,7 +58,7 @@ def get_git_hash():
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-## {{{              --     markov 4-gram for pronounceable hashes   --
+## {{{              --     markov [3,4,5]-gram for pronounceable hashes   --
 
 B85_COMPRESSED_COUNTS = """
 P)h>@EdT%j2mk;8AplsTh`0a$|NsC0|NjdB6aZ;%WNBk%b1rUhc>w?r08!im000000N8~9000000PMZXlH@v*Cf2+lNK}wS6fY4Ox$50NW7eB7NhX;dKs(8_
@@ -1049,6 +1049,7 @@ uA`uymS0p-l$aNvUzCyx5_e0?DNY577iT0EqyqUG#yXlh3bhIp0IpdxL13pn0~oM4Kxi=s08mQ-0xbhA
 START_SYM = '^'
 VOCAB = [START_SYM] + [chr(i) for i in range(ord('a'), ord('z') + 1)]
 VSIZE = len(VOCAB)
+CHAR_TO_IDX = {c: i for i, c in enumerate(VOCAB)}
 
 
 class NGramMix:
@@ -1056,124 +1057,108 @@ class NGramMix:
         self.indices = indices
         self.values = values
         self.coefs = coefs
-        self.allow_start = allow_start
-
-    def initialize(self):
-        # will build all ddicts:
-        self.count_dicts = []
+        self.allow_start = bool(allow_start)
+        self.prob_dicts = []
         self.n = []
-        for i in range(len(self.indices)):
-            indices = self.indices[i]
-            n = len(indices)
-            values = self.values[i]
-            ddict = defaultdict(lambda: np.zeros(VSIZE, dtype=np.uint16))
+
+        for indices, values in zip(self.indices, self.values):
+            ddict = defaultdict(lambda: np.zeros(VSIZE, dtype=np.float64))
             for idx, val in zip(indices.T, values):
-                ddict[*idx[:-1]][idx[-1]] = val
-            self.count_dicts.append(ddict)
-            self.n.append(n)
+                ddict[tuple(idx[:-1])][idx[-1]] = val
+
+            plaindict = {k: v / np.sum(v) for k, v in ddict.items()}
+
+            self.prob_dicts.append(plaindict)
+            self.n.append(len(indices))
 
     def __call__(self, ctx):
-        EPSILON = 1e-8
-        probs = np.zeros(VSIZE, dtype=np.float32) + EPSILON
-        for n, c, d in zip(self.n, self.coefs, self.count_dicts):
+        probs = np.zeros(VSIZE, dtype=np.float64)
+
+        for n, c, d in zip(self.n, self.coefs, self.prob_dicts):
             if len(ctx) < n - 1:
                 continue
-            print(f"Processing {n}-gram with coef {c}")
-            probs_for_next_char = d[*ctx[-n + 1 :]].astype(np.float32)
-            psums = np.sum(probs_for_next_char)
-            if psums > 0:
-                probs_for_next_char /= psums
-            probs += c * probs_for_next_char
+            probs += c * d.get(tuple(ctx[-n + 1 :]), 0)
+
         if not self.allow_start:
-            probs[0] = 0.0
-        probs /= np.sum(probs)
-        return probs
+            probs[0] = 0
+
+        s = np.sum(probs)
+
+        if s == 0:
+            probs += 1
+            probs[0] = int(self.allow_start)
+            s = VSIZE - 1 + int(self.allow_start)
+
+        return probs / s
+
+    @classmethod
+    def from_b85_str(cls, b85_str):
+        decoded = b85decode(b85_str.replace('\n', '').replace(' ', '').encode('ascii'))
+        flat_indices, flat_values, shapes, coefs = np.load(io.BytesIO(decoded)).values()
+        indices, values, i, j = [], [], 0, 0
+        for shape in shapes.reshape(-1, 2):
+            indices.append(flat_indices[i : i + np.prod(shape)].reshape(shape))
+            values.append(flat_values[j : j + shape[1]])
+            i += np.prod(shape)
+            j += shape[1]
+
+        return cls(indices, values, coefs)
 
 
-def load_b85(data):
-    data = data.replace('\n', '').replace(' ', '').encode('ascii')
-    data = b85decode(data)
-    return np.load(io.BytesIO(data))
-
-
-flat_indices, flat_values, shapes, coefs = load_b85(B85_COMPRESSED_COUNTS).values()
-
-indices = []
-values = []
-shapes = shapes.reshape(-1, 2)
-i, j = 0, 0
-for s in shapes:
-    shape = tuple(s)
-    indices.append(flat_indices[i : i + np.prod(shape)].reshape(shape))
-    i += np.prod(shape)
-    values.append(flat_values[j : j + shape[1]])
-    j += shape[1]
-
-NGRAM = NGramMix(indices, values, coefs)
-NGRAM.initialize()
+NGRAM = NGramMix.from_b85_str(B85_COMPRESSED_COUNTS)
 MAXN = max(NGRAM.n)
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-CHAR_TO_IDX = {c: i for i, c in enumerate(VOCAB)}
-EPS = 1e-8
 
 
 def arithmetic_decode_hash(hashint: int, nbits=32) -> str:
     # arithmetic decoding of the hash into a word
-    assert nbits <= 50, "Can't handle precision > 50 bits"
+    assert nbits <= 50, "Can't handle precision > 50 bits"  # probably be a bit more but...
     MIN_RANGE = np.float64(1 / (2**nbits))
+    value = np.float64(hashint * MIN_RANGE)
+
     ctx = [0] * (MAXN - 1)
     word = ''
 
     low = np.float64(0.0)
     high = np.float64(1.0)
     span = high - low
-    value = np.float64(hashint * MIN_RANGE)
 
     while span > MIN_RANGE:
-        probs = NGRAM(ctx)[1:].astype(np.float64)
-        cdf = np.cumsum(probs, dtype=np.float64)
+        cdf = np.cumsum(NGRAM(ctx))
         span = high - low
-        scaled = (value - low) / span
-        k = np.searchsorted(cdf, scaled)
-        sym_low = cdf[k - 1] if k else 0.0
+
+        k = np.searchsorted(cdf, (value - low) / span)
+
+        sym_low = cdf[k - 1] if k > 0 else 0.0
         sym_high = cdf[k] if k < len(cdf) else 1.0
         high = low + span * sym_high
         low = low + span * sym_low
-        ctx.pop(0)
-        ctx.append(k + 1)
-        word += VOCAB[k + 1]
+
+        ctx = ctx[1:] + [k]
+        word += VOCAB[k]
 
     return word
 
 
 def arithmetic_encode_word(word_str: str, nbits=32) -> int:
-    # arithmetic encoding of the word into a hash
+    # arithmetic encoding of the word into a hash (inverse of the above)
     assert nbits <= 50, "Can't handle precision > 50 bits"
-    ctx = [0] * (N - 1)
+    ctx = [0] * (MAXN - 1)
     low = np.float64(0.0)
     high = np.float64(1.0)
     for char_to_encode in word_str:
-        symbol_vocab_idx = CHAR_TO_IDX[char_to_encode]
-        k_for_cdf = symbol_vocab_idx - 1
-
+        cdf = np.cumsum(NGRAM(ctx))
         span = high - low
 
-        probs = CDICT[*ctx][1:].astype(np.float64) + EPS
-        probs /= probs.sum()
+        k = CHAR_TO_IDX[char_to_encode] - 1
 
-        cdf = np.cumsum(probs)
+        sym_low = cdf[k - 1] if k > 0 else 0.0
+        sym_high = cdf[k] if k < len(cdf) else 1.0
+        high = low + span * sym_high
+        low = low + span * sym_low
 
-        sym_prob_low = cdf[k_for_cdf - 1] if k_for_cdf > 0 else 0.0
-        sym_prob_high = cdf[k_for_cdf]
-
-        high = low + span * sym_prob_high
-        low = low + span * sym_prob_low
-
-        ctx.pop(0)
-        ctx.append(symbol_vocab_idx)
+        ctx = ctx[1:] + [k]
 
     res = int(np.round((low + high) / 2 * (2**nbits)))
     return res
