@@ -2,7 +2,7 @@ from biocomp.library import PartsLibrary
 from biocomp.recipe import get_network_XY
 from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
-from pydantic import BaseModel, Field, BeforeValidator, model_validator, ConfigDict
+from pydantic import BaseModel, Field, BeforeValidator, model_validator, field_validator, ConfigDict
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func
 from sqlmodel import select, Session, col
@@ -91,6 +91,7 @@ class NetworkSelector(BaseModel):
                     selectinload(Network.recipe).selectinload(Recipe.networks),
                 )
             )
+            logger.debug(f"Initial network query: {query}")
 
             if self.experiment_name:
                 logger.debug(f"Applying experiment filter: {self.experiment_name}")
@@ -205,21 +206,25 @@ class NetworkSelector(BaseModel):
                     )
                     for datafile in datafiles:
                         try:
-                            network_and_data.append(
-                                NetworkDataPair(
-                                    network_name=network.name, datafile_path=datafile.filename
-                                )
+                            ndp = NetworkDataPair(
+                                network_name=network.name, datafile_path=datafile.filename
                             )
+                            logger.debug(f"NetworkDataId created: {ndp}")
+                            if ndp.network is None:
+                                ndp.network = network
+                            if ndp.datafile is None:
+                                ndp.datafile = datafile
+                            network_and_data.append(ndp)
                             logger.debug(f"Matching data: {datafile.filename}")
                         except Exception as e:
-                            logger.error(
-                                f"Error creating NetworkDataId for {network.name}: {str(e)}"
-                            )
-                            continue
+                            logger.error(f"Error creating NetworkDataId for {network.name}")
+                            logger.exception(e)
+                            raise
 
                 except Exception as e:
-                    logger.error(f"Error processing network {network.name}: {str(e)}")
-                    continue
+                    logger.error(f"Error processing network {network.name}")
+                    logger.exception(e)
+                    raise
 
             logger.debug(
                 f"Network data retrieval complete. Found {len(network_and_data)} network-data pairs"
@@ -227,8 +232,8 @@ class NetworkSelector(BaseModel):
             return network_and_data
 
         except Exception as e:
-            logger.error(f"Unexpected error in get_networkdata_ids: {str(e)}")
-            raise ValueError(f"Failed to retrieve network data: {str(e)}") from e
+            logger.exception(e)
+            raise
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -253,23 +258,25 @@ class NetworkSet(BaseModel):
     def db_session(self):
         return Session(self._engine)
 
-    @model_validator(mode='before')
-    def validate_content(cls, values):
-        # Handle case where values is a list
-        if isinstance(values, list):
-            return {'content': values}
-        # Handle case where content is single item
-        content = values.get('content')
-        if isinstance(content, (NetworkSelector, NetworkDataPair, NetworkSet)):
-            values['content'] = [content]
-        elif isinstance(content, NetworkSet):
-            values['content'] = content.content
-        return values
+    @field_validator('content', mode='before')
+    @classmethod
+    def route_content(cls, v):
+        def route(obj):
+            if not isinstance(obj, dict):
+                return obj  # already parsed
+            if 'datafile_path' in obj:
+                return NetworkDataPair(**obj)
+            elif 'content' in obj:
+                return NetworkSet(**obj)
+            else:
+                return NetworkSelector(**obj)
+
+        return [route(item) for item in v]
 
     def run_selectors(self, session=None):
         sess = session or self.db_session
+        logger.debug(f"Running selectors on {len(self.content)} items with session {sess}")
         new_content = []
-        logger.debug(f"Running selectors on {len(self.content)} items")
         for n in self.content:
             if isinstance(n, NetworkSelector):
                 logger.debug(f"Running selector: {n}")
@@ -279,13 +286,14 @@ class NetworkSet(BaseModel):
 
             elif isinstance(n, NetworkSet):
                 # Recursively run selectors on nested NetworkSets
+                logger.debug(f"Running nested NetworkSet: {n}")
                 n.run_selectors(sess)
                 new_content.extend(n.content)
             else:
                 assert isinstance(n, NetworkDataPair), f"Expected NetworkDataId but got {type(n)}"
                 new_content.append(n)
         self.content = new_content
-        sess.expunge_all()
+        logger.debug(f"Finished running selectors. Found {len(self.content)} items")
         if session is None:
             sess.close()
 
@@ -353,18 +361,23 @@ class NetworkSetUnion(NetworkSet):
     allow_duplicates: bool = False
 
     def run_selectors(self, session=None):
-        logger.debug(f"Running union on {len(self.sets)} sets")
-        for s in self.sets:
-            s.run_selectors(session)
+        try:
+            logger.debug(f"Running union on {len(self.sets)} sets")
+            logger.debug(f"{self.sets=}")
+            for s in self.sets:
+                s.run_selectors(session)
 
-        session.expunge_all()
-        new_content = []
-        for s in self.sets:
-            new_content.extend(s.content)
-        new_content.extend(self.content)
-        if not self.allow_duplicates:
-            new_content = list(set(new_content))
-        self.content = new_content
+            new_content = []
+            for s in self.sets:
+                new_content.extend(s.content)
+            new_content.extend(self.content)
+            if not self.allow_duplicates:
+                new_content = list(set(new_content))
+            self.content = new_content
+        except Exception as e:
+            logger.error(f"Error running union on {len(self.sets)} sets.")
+            logger.exception(e)
+            raise e
 
 
 class NetworkSetIntersection(NetworkSet):
@@ -375,16 +388,20 @@ class NetworkSetIntersection(NetworkSet):
     sets: List[NetworkSet] = []
 
     def run_selectors(self, session=None):
-        logger.debug(f"Running intersection on {len(self.sets)} sets")
-        for s in self.sets:
-            s.run_selectors(session)
+        try:
+            logger.debug(f"Running intersection on {len(self.sets)} sets")
+            for s in self.sets:
+                s.run_selectors(session)
 
-        session.expunge_all()
-        new_content = self.sets[0].content
-        for s in self.sets[1:]:
-            new_content = list(set(new_content) & set(s.content))
-        new_content = list(set(new_content) & set(self.content))
-        self.content = new_content
+            new_content = self.sets[0].content
+            for s in self.sets[1:]:
+                new_content = list(set(new_content) & set(s.content))
+            new_content = list(set(new_content) & set(self.content))
+            self.content = new_content
+        except Exception as e:
+            logger.error(f"Error running intersection on {len(self.sets)} sets.")
+            logger.exception(e)
+            raise e
 
 
 class NetworkSetDifference(NetworkSet):
@@ -396,15 +413,21 @@ class NetworkSetDifference(NetworkSet):
     set2: NetworkSet
 
     def run_selectors(self, session=None):
-        logger.debug(
-            f"Running difference on {len(self.set1.content)} - {len(self.set2.content)} items"
-        )
-        self.set1.run_selectors(session)
-        self.set2.run_selectors(session)
+        try:
+            logger.debug(
+                f"Running difference on {len(self.set1.content)} - {len(self.set2.content)} items"
+            )
+            self.set1.run_selectors(session)
+            self.set2.run_selectors(session)
 
-        session.expunge_all()
-        new_content = list(set(self.set1.content) - set(self.set2.content))
-        self.content = new_content
+            new_content = list(set(self.set1.content) - set(self.set2.content))
+            self.content = new_content
+        except Exception as e:
+            logger.error(
+                f"Error running difference on {len(self.set1.content)} - {len(self.set2.content)}."
+            )
+            logger.exception(e)
+            raise e
 
 
 class NetworkFilter(NetworkSet):
@@ -413,13 +436,15 @@ class NetworkFilter(NetworkSet):
     source_set: NetworkSet
 
     def run_selectors(self, session=None):
-        logger.debug(f"Running filter on {len(self.source_set.content)} items")
-        self.source_set.run_selectors(session)
-
-        session.expunge_all()
-        self.content = [
-            net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
-        ]
+        try:
+            self.source_set.run_selectors(session)
+            self.content = [
+                net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
+            ]
+        except Exception as e:
+            logger.error(f"Error running filter on {len(self.source_set.content)} items.")
+            logger.exception(e)
+            raise e
 
     def should_keep(self, netdata: NetworkDataPair, session) -> bool:
         """
@@ -433,11 +458,11 @@ class CustomFilter(NetworkFilter):
     filter_func: Callable[[Network, DataFile], bool]
 
     def should_keep(self, netdata: NetworkDataPair, session) -> bool:
-        try:
-            return self.filter_func(netdata.network, netdata.datafile)
-        except Exception as e:
-            logger.error(f"Error checking custom filter for network {netdata}: {e}")
-            return False
+        if not netdata.network:
+            raise ValueError(f"Network data pair {netdata} has no network")
+        if not netdata.datafile:
+            raise ValueError(f"Network data pair {netdata} has no datafile")
+        return self.filter_func(netdata.network, netdata.datafile)
 
 
 class CleanupFilter(NetworkFilter):
@@ -533,11 +558,11 @@ class CleanupFilter(NetworkFilter):
         return invalid_parts
 
     def should_keep(self, netdata: NetworkDataPair, session) -> bool:
-        assert netdata.network
+        if not netdata.network:
+            raise ValueError(f"NetworkDataPair object '{netdata}' has no network")
         netname = netdata.network_name
         net_info = netdata.network.network_info
         lib = load_lib()
-        session.expunge_all()
 
         missing_parts = self._find_missing_complementary_parts(net_info, lib)
         if missing_parts:
@@ -569,30 +594,26 @@ class UorfFilter(NetworkFilter):
     uorf_values: List[Tuple[int, int]] = []
 
     def should_keep(self, netdata: NetworkDataPair, session) -> bool:
-        try:
-            assert netdata.network
+        if not netdata.network:
+            raise ValueError(f"Network data pair {netdata} has no network")
 
-            # get uORF values from network info
-            network_info = netdata.network.network_info
+        # get uORF values from network info
+        network_info = netdata.network.network_info
 
-            if not network_info or 'uorf_values' not in network_info:
-                return False
-
-            # network_info['uorf_values'] should be list[tuple[int, int]]
-            # we want single ERN networks
-            if len(network_info['uorf_values']) != 1:
-                logger.warning(
-                    f"Unexpected uORF values for {netdata.network}: {network_info['uorf_values']}. Is it a single ERN?"
-                )
-                return False
-
-            uorf_values = tuple(network_info['uorf_values'][0])
-
-            return uorf_values in self.uorf_values
-
-        except Exception as e:
-            logger.error(f"Error checking uORF values for network {netdata.network}: {e}")
+        if not network_info or 'uorf_values' not in network_info:
             return False
+
+        # network_info['uorf_values'] should be list[tuple[int, int]]
+        # we want single ERN networks
+        if len(network_info['uorf_values']) != 1:
+            logger.warning(
+                f"Unexpected uORF values for {netdata.network}: {network_info['uorf_values']}. Is it a single ERN?"
+            )
+            return False
+
+        uorf_values = tuple(network_info['uorf_values'][0])
+
+        return uorf_values in self.uorf_values
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -611,7 +632,6 @@ def build_data_manager(
     )
 
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
-    db_session.expunge_all()
     data = []
     actual_networks = []
 
