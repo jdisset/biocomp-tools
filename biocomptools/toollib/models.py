@@ -429,6 +429,17 @@ class NetworkDataPair(BiocompDB, table=True):
         },
     )
 
+    def __hash__(self):
+        return hash((self.network_name, self.datafile_path))
+
+    def __repr__(self):
+        return (
+            f"NetworkDataPair(network_name={self.network_name}, datafile_path={self.datafile_path})"
+        )
+
+    def __str__(self):
+        return self.__repr__()
+
 
 class TrainedModel(BiocompDB, table=True):
     name: str = Field(primary_key=True)
@@ -494,11 +505,12 @@ class Figure(BiocompDB, table=True):
 
 
 def get_biocompdb_sqlite_engine(db_path, echo=False):
-    logger.debug(f"Sqlite engine from {db_path}")
+    logger.debug(f"get_biocompdb_sqlite_engine({db_path}) was called")
     db_path = Path(db_path).expanduser().resolve()
     return create_engine(f"sqlite:///{db_path}", echo=echo)
 
 
 def create_biocompdb_sqlite(db_path, echo=False):
+    logger.debug(f"create_biocompdb_sqlite({db_path}) was called")
     engine = get_biocompdb_sqlite_engine(db_path, echo=echo)
     BiocompDB.metadata.create_all(engine)
