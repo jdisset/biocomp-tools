@@ -27,9 +27,8 @@ from dracon.commandline import make_program, Arg
 
 import sys
 import numpy as np
-from typing import TypeVar
 from pathlib import Path
-from typing import List, Optional, Annotated
+from typing import List, Optional, Annotated, TypeVar, Any
 from pydantic import Field, BaseModel, ConfigDict
 from sqlmodel import Session
 from datetime import datetime
@@ -121,6 +120,7 @@ class TrainingProgram(BaseModel):
     )
 
     experiment_name: Annotated[str, Arg(help='Name of the experiment')] = 'default_xp'
+    metadata: dict[str, Any] = {}
 
     # Private
     _lib: Optional[PartsLibrary] = None
@@ -153,6 +153,7 @@ class TrainingProgram(BaseModel):
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
+        logger.debug("Training program post init")
         self._lib = load_lib()
         self.base_dir = str(Path(self.base_dir).expanduser().resolve())
 
@@ -173,9 +174,9 @@ class TrainingProgram(BaseModel):
         self._yamldump = dr.dump(self)
         self._modeldump = self.model_dump()
 
-        for logger in self.loggers:
-            if isinstance(logger, DeferredNode):
-                logger = logger.construct(
+        for logg in self.loggers:
+            if isinstance(logg, DeferredNode):
+                logg = logg.construct(
                     context={
                         'save_dir': self._save_dir,
                         'compute_conf': self.compute_conf,
@@ -183,7 +184,7 @@ class TrainingProgram(BaseModel):
                         'training_set': self.training_set,
                     }
                 )
-            new_loggers.append(logger)
+            new_loggers.append(logg)
         self.loggers = new_loggers
 
     def gen_metadata(self):
@@ -206,6 +207,8 @@ class TrainingProgram(BaseModel):
             'dracon_hash': hashes.get('dracon', 'unknown'),
             'yaml_dump': self._yamldump,
         }
+
+        self._metadata.update(self.metadata)
 
     def _build_dman(self):
         self._training_dman = build_data_manager(
