@@ -11,7 +11,7 @@ from biocomptools.trainutils import (
     plot_loss,
     make_unique_dir,
     print_matadata,
-    get_best_smoothed_loss_id,
+    get_best_smoothed_loss_replicate_id,
     make_json_ready,
 )
 
@@ -122,6 +122,8 @@ class TrainingProgram(BaseModel):
     experiment_name: Annotated[str, Arg(help='Name of the experiment')] = 'default_xp'
     metadata: dict[str, Any] = {}
 
+    run_name_suffix: str = ''
+
     # Private
     _lib: Optional[PartsLibrary] = None
     _yamldump: str = ''
@@ -165,7 +167,9 @@ class TrainingProgram(BaseModel):
 
         self.gen_metadata()
 
-        self._save_dir = make_unique_dir(Path(self.base_dir) / self.experiment_name)
+        self._save_dir = make_unique_dir(
+            Path(self.base_dir) / self.experiment_name, suffix=self.run_name_suffix
+        )
 
         self._run_name = self._save_dir.name
 
@@ -252,7 +256,7 @@ class TrainingProgram(BaseModel):
             logger_callbacks.extend(callbacks)
 
         # Start training
-        params, loss_history, step_history = start(
+        all_params, all_losses, step_history = start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
@@ -260,7 +264,7 @@ class TrainingProgram(BaseModel):
         )
 
         self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.save_outputs(params, loss_history, self._training_dir)
+        self.save_outputs(all_params, all_losses, self._training_dir)
 
         for logger_obj in self.loggers:
             logger_obj.finalize()
@@ -281,7 +285,6 @@ class TrainingProgram(BaseModel):
         metadata['training_set'] = make_json_ready(self.training_set.content)
         metadata['validation_set'] = make_json_ready(self.validation_set.content)
         metadata['training_conf'] = make_json_ready(self.training_conf)
-
         dataman_info = {}
         dataman_info["network_names"] = [n.name for n in dman.get_networks()]
         dataman_info["input_dimensions"] = [x.shape[1] for x in dman.get_X()]
@@ -289,16 +292,18 @@ class TrainingProgram(BaseModel):
         dataman_info["data_config"] = (dman.data_cfg.model_dump(),)
         metadata['data_manager_info'] = make_json_ready(dataman_info)
 
+        self._metadata.update(metadata)
+
         metadata = make_json_ready(metadata)
 
-        def get_best_model(all_models, all_losses):
+        def get_best_model(all_params, all_losses):
             from biocomp.jaxutils import tree_get, tree_to_np
             import pickle
 
-            best_model_id, _, end_loss = get_best_smoothed_loss_id(all_losses)
+            best_model_id, smoothed_loss, end_loss = get_best_smoothed_loss_replicate_id(all_losses)
             logger.debug(f"Best model is replicate number {best_model_id}")
 
-            params = tree_get(all_models, best_model_id)
+            params = tree_get(all_params, best_model_id)
             if params is None:
                 return None
 
@@ -311,7 +316,6 @@ class TrainingProgram(BaseModel):
 
             local_metadata = metadata.copy()
             local_metadata['replicate_number'] = best_model_id
-            local_metadata['loss_history'] = all_losses[best_model_id]
             local_metadata['end_loss'] = end_loss
 
             model = BiocompModel(
@@ -325,26 +329,25 @@ class TrainingProgram(BaseModel):
 
         return get_best_model
 
-    def save_best(self, all_models, all_losses, save_dir, name='best_model'):
-        model = self.get_best_model_func()(all_models, all_losses)
+    def save_best(self, all_params, all_losses: list[np.ndarray], save_dir, name=None):
+        model = self.get_best_model_func()(all_params, all_losses)
         if model is None:
             logger.warning("!!!!!! No best model found !!!!!")
             return
+        if name is None:
+            name = f"{model.signature}.bestmodel"
         fname = save_dir / f'{name}.pickle'
         model.save(fname)
         logger.debug(f"Saved best model to {fname}")
 
-        # model2 = BiocompModel.load(fname)
-        # assert model.shared_params == model2.shared_params
-
-    def save_outputs(self, params, loss_history, save_dir: Path):
-        save(params, save_dir / 'final_all_models.pickle')
-        self.save_best(params, loss_history, save_dir)
+    def save_outputs(self, all_params, all_losses: list, save_dir: Path):
+        save(all_params, save_dir / 'final_all_models.pickle')
+        self.save_best(all_params, all_losses, save_dir)
 
         # Save loss history
-        np.save(save_dir / 'loss_history.npy', loss_history)
+        np.save(save_dir / 'loss_history.npy', all_losses)
 
-        fig, ax = plot_loss(loss_history)
+        fig, ax = plot_loss(all_losses)
         assert self._metadata, "Metadata not set"
         assert self._run_name, "Run name not set"
 

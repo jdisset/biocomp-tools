@@ -258,9 +258,18 @@ class NetworkSet(BaseModel):
     def db_session(self):
         return Session(self._engine)
 
+    @model_validator(mode='before')
+    def content_field_was_skipped(cls, values):
+        # accept shorthand notation without content=...
+        if isinstance(values, list):
+            return {'content': values}
+        return values
+
     @field_validator('content', mode='before')
     @classmethod
     def route_content(cls, v):
+        logger.debug(f"From class '{cls.__name__}' routing content: {v}")
+
         def route(obj):
             if not isinstance(obj, dict):
                 return obj  # already parsed
@@ -271,7 +280,9 @@ class NetworkSet(BaseModel):
             else:
                 return NetworkSelector(**obj)
 
-        return [route(item) for item in v]
+        res = [route(item) for item in v]
+        logger.debug(f"Routed to types {[type(r).__name__ for r in res]}")
+        return res
 
     def run_selectors(self, session=None):
         sess = session or self.db_session
@@ -360,6 +371,15 @@ class NetworkSetUnion(NetworkSet):
 
     allow_duplicates: bool = False
 
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_list_input_to_sets(cls, data: Any) -> Any:
+        logger.debug(f"NetworkSetUnion.normalize_list_input_to_sets received: {data}")
+        if isinstance(data, list):
+            # assume the list items are the sets
+            return {"sets": data}
+        return data
+
     def run_selectors(self, session=None):
         try:
             logger.debug(f"Running union on {len(self.sets)} sets")
@@ -386,6 +406,15 @@ class NetworkSetIntersection(NetworkSet):
     """
 
     sets: List[NetworkSet] = []
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_list_input_to_sets(cls, data: Any) -> Any:
+        logger.debug(f"NetworkSetIntersection.normalize_list_input_to_sets received: {data}")
+        if isinstance(data, list):
+            # assume the list items are the sets
+            return {"sets": data}
+        return data
 
     def run_selectors(self, session=None):
         try:
