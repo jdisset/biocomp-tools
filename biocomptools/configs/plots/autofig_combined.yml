@@ -2,9 +2,9 @@
 #
 # REQUIRED VARIABLES:
 # - model
-# - plot_data : the ground truth plot_data object
+# - plot_data : the predicted plot_data object
 
-!Figure
+!deferred:Figure
 !set_default output_dir: ./prediction_figures
 !set_default file_prefix: ""
 !define suffix: ${'_'.join(plot_data.metadata['network_info']['dependent_outputs'])}

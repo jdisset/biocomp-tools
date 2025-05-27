@@ -10,8 +10,7 @@ plot_config:
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
   <<{+<}:
     callstack_params:
-      knn_avg_params:
-        avg_method: mean
+      knn_stats_params:
         k: 1000
         min_points: 25
         radius: 0.12

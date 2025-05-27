@@ -15,7 +15,7 @@
     ground_truth: ${plot_data.y}
     network_model:
       model: ${model}
-      network: ${plot_data.metadata['network']}
+      network: ${plot_data.metadata['built_network']}]
 
 plot_config: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
 
@@ -38,8 +38,3 @@ plot_tasks:
   - !define D: ${construct(&pred).get_data_lazy()[0]}
     !define axnum: 1
     <<: !include pkg:biocomptools:configs/plots/tasks/auto
-
-    # <<{+<}:
-    #   plot_method:
-    #     kwargs:
-    #       title: "Predictions (mse: ${str(round(D.metadata['mse'], 4))})"

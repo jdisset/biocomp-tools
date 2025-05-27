@@ -36,8 +36,7 @@ callstack_params:
         pad: 3
         length: 4
 
-  knn_avg_params:
-    avg_method: mean
+  knn_stats_params:
     k: 1000
     min_points: 20
     radius: 0.1
