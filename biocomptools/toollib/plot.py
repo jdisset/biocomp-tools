@@ -41,7 +41,7 @@ class PlotConfig(BaseModel):
         self,
         callstack_conf: dict,
         plot_method: PartialFunction,
-        size_limit: int = 2000,
+        size_limit: int = 100000,
         *args,
         **kwargs,
     ):
@@ -52,8 +52,14 @@ class PlotConfig(BaseModel):
 
         def can_dump(obj):
             try:
-                return len(json.dumps(make_json_ready(obj))) < size_limit
+                dmp = json.dumps(make_json_ready(obj))
+                if len(dmp) > size_limit:
+                    logger.debug(f"Object too large to dump: {len(dmp)} > {size_limit}: {dmp}")
+                    return False
+                logger.debug(f"Object dumped: {len(dmp)} < {size_limit}: {dmp}")
+                return True
             except Exception as e:
+                logger.debug(f"Error dumping json object: {e}")
                 return False
 
         metadata = {}
@@ -102,7 +108,6 @@ class PlotConfig(BaseModel):
                 callstack_conf,
                 plot_method,
                 *args,
-                size_limit=2000,
                 **kwargs,
             )
             return res, metadata

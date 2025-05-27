@@ -79,6 +79,10 @@ class BiocompModel(ArbitraryModel):
     ] = Field(default_factory=empty_params)
     metadata: dict = {}
 
+    def model_post_init(self, *argc, **kwargs):
+        super().model_post_init(*argc, **kwargs)
+        logger.debug(f"Initialized model '{self.signature}'")
+
     def save(self, path):
         """save model to file"""
         with open(path, 'wb') as f:
@@ -96,9 +100,11 @@ class BiocompModel(ArbitraryModel):
     @classmethod
     def load(cls, path):
         """load model from file"""
+        logger.debug(f"loading model from {path}")
         with open(path, 'rb') as f:
             m = pickle.load(f)
             assert isinstance(m, cls)
+            logger.debug(f"loaded model with signature {m.signature}")
             return m
 
 
@@ -138,21 +144,16 @@ class NetworkModel(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: bc.Network | list[bc.Network]
 
-    max_points_per_batch: int = 150000
+    max_points_per_batch: int = 30000
 
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
     _batch_apply: Optional[Callable] = None
 
-    @model_validator(mode='before')
-    @classmethod
-    def prepare_network(cls, data):
-        """prepare network data before model initialization"""
-        return data
-
     def model_post_init(self, *args, **kwargs):
         """initialize model after validation"""
         super().model_post_init(*args, **kwargs)
+        logger.debug(f"Initialized network model '{self.signature}'")
 
         # ensure nework is a list
         if not isinstance(self.network, list):

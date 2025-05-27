@@ -182,7 +182,9 @@ class MLflowLogger(Logger):
                     "compute_config": make_json_ready(self._training_program.compute_conf),
                     "data_config": make_json_ready(self._training_program.data_conf),
                     "training_set": make_json_ready(self._training_program.training_set.content),
-                    "validation_set": make_json_ready(self._training_program.validation_set.content),
+                    "validation_set": make_json_ready(
+                        self._training_program.validation_set.content
+                    ),
                 }
             )
 

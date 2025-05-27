@@ -3,7 +3,7 @@ from biocomptools.modelmodel import BiocompModel, NetworkModel, NodeSpec, load_m
 from biocomptools.toollib.networkprediction import NetworkPrediction
 from biocomptools.logging_config import get_logger
 from biocomp.plotutils import FigureSpec, FigureLayout, FigAx
-from biocomp.plotting.plotting_core import knn_avg, DEFAULT_CMAP_NAME
+from biocomp.plotting.plotting_core import knn_stats, DEFAULT_CMAP_NAME, build_tree
 from biocomp.network import Network, CoTransfection, Unit
 
 from typing import Optional, List, Dict, Tuple, Union, Literal, TypeVar, TypeAlias, Annotated, Any
@@ -331,9 +331,9 @@ class InnerNodesFigure(Figure):
                     y = Y[0]
                     assert isinstance(y, np.ndarray)
                     assert y.shape[1] == 1, f'ERN output is not 1D: {y.shape}'
-                    assert (
-                        y.shape == x0.shape
-                    ), f'ERN output shape mismatch: {y.shape} != {x0.shape}'
+                    assert y.shape == x0.shape, (
+                        f'ERN output shape mismatch: {y.shape} != {x0.shape}'
+                    )
 
                     self.add_subplot_letter(ax, chr(65 + i))
 
@@ -428,9 +428,9 @@ class InnerNodesFigure(Figure):
                     if n_inputs == 1:  # single input, multiple outputs
                         allX = [full_x[0].flatten()[:, None]] * n_outputs
                     else:
-                        assert (
-                            n_inputs == n_outputs
-                        ), f"n_inputs: {n_inputs}, n_outputs: {n_outputs}"
+                        assert n_inputs == n_outputs, (
+                            f"n_inputs: {n_inputs}, n_outputs: {n_outputs}"
+                        )
                         # multiple inputs, multiple outputs, we treat them as separate pairs
                         allX = [x.flatten()[:, None] for x in full_x]
                     allY = [y.flatten()[:, None] for y in full_y]
@@ -462,13 +462,18 @@ class InnerNodesFigure(Figure):
                     )
 
                     # calculate trend line using KNN
-                    tree = KDTree(X)
                     xquery_min, xquery_max = X.min(), X.max()
                     res = 200
                     xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
 
-                    z, _ = knn_avg(
-                        xquery, Y, tree, avg_method="mean", min_points=500, k=1000, radius=0.1
+                    z, _ = knn_stats(
+                        xquery,
+                        Y,
+                        tree=build_tree(X),
+                        avg_method="mean",
+                        min_points=500,
+                        k=1000,
+                        radius=0.1,
                     )
 
                     ax.plot(
@@ -546,12 +551,11 @@ class InnerNodesFigure(Figure):
                 logger.debug(f'Plotting translation node {uorf_names[i]} with {X.shape[0]} points')
                 ax_trans.scatter(X, Y, s=1, alpha=0.05, linewidth=0, color=color)
 
-                tree = KDTree(X)
                 xquery_min, xquery_max = X.min(), X.max()
                 res = 200
                 xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
-                z, _ = knn_avg(
-                    xquery, Y, tree, avg_method="mean", min_points=500, k=5000, radius=0.05
+                z = knn_stats(
+                    xquery, Y, tree=build_tree(X), stats="mean", min_points=500, k=5000, radius=0.05
                 )
 
                 ax_trans.plot(xquery, z, linewidth=2, color=color, label=f"{uorf_names[i]}")

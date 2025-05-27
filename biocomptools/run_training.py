@@ -381,7 +381,6 @@ def main():
         capture_globals=False,
     )
     assert isinstance(trainprog, TrainingProgram), f"{trainprog=}"
-
     trainprog.run()
 
 

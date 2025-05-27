@@ -175,15 +175,20 @@ def print_matadata(fig, ax, metadata: dict, run_name: str):
 def make_json_ready(obj):
     """Roundtrip to json to iron out any weakref/unpickleable issues with DeferredNodes"""
     import json
+    from dracon.dracontainer import Mapping, Sequence
 
     def convert(o):
         if isinstance(o, DeferredNode):
             return {f'{o.value.tag}': 'deferred'}
         elif isinstance(o, BaseModel):
             return o.model_dump()
+        elif isinstance(o, Mapping):
+            return {k: v for k, v in o.items()}
+        elif isinstance(o, Sequence):
+            return [i for i in o]
         else:
-            logger.warning(f"Unhandled type during json serialization: {type(o)}")
-            return str(o)
+            logger.debug(f"Unhandled type during json serialization: {type(o)}")
+            return str(type(o))
 
     dmp = json.dumps(obj, default=convert)
 

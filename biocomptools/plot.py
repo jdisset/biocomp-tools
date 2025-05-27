@@ -187,7 +187,7 @@ def run_figure(f, **kw):
         plt.close('all')
         t1 = time.time()
         opath = f.figure_spec.output_path
-        # logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
+        logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
     except Exception as e:
         logger.error(f"Error running figure: {e}")
         logger.exception(e)

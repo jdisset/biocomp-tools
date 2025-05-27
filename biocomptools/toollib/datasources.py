@@ -1,6 +1,6 @@
 ## {{{                          --     imports     --
 from pydantic import model_validator
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Union
 from sqlalchemy.orm.session import make_transient
 import numpy as np
 from biocomp.utils import load_lib
@@ -87,15 +87,11 @@ config = cm.config
 
 
 class DBSource(DataSource, NetworkSet):
-    input_order: Optional[List[int]] = None
+    input_order: Optional[Union[List[int], str]] = None
 
     @model_validator(mode='before')
-    def validate_content(cls, values):
-        content = values.get('content')
-        if isinstance(content, (NetworkSelector, NetworkDataPair)):
-            values['content'] = [content]
-        elif isinstance(content, NetworkSet):
-            values['content'] = content.content
+    def show_data(cls, values):
+        logger.debug(f"DBSource being constructed with {values=}")
         return values
 
     def model_post_init(self, *args, **kwargs):
@@ -120,7 +116,7 @@ class DBSource(DataSource, NetworkSet):
 
         assert isinstance(actual_network, bc.network.Network)
 
-        datafile_path = Path(self.path_prefix / datafile.filename).expanduser().resolve()
+        datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
         metadata = self.metadata.copy()
 
         metadata['network'] = network.model_dump()
@@ -141,6 +137,7 @@ class DBSource(DataSource, NetworkSet):
                 X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
             except Exception as e:
                 logger.error(f"Error getting XY data for network {network.name}: {e}")
+                logger.exception(e)
                 return None, None
             assert isinstance(X, np.ndarray)
             assert isinstance(Y, np.ndarray)
@@ -155,12 +152,14 @@ class DBSource(DataSource, NetworkSet):
             )
         except Exception as e:
             logger.error(f"Error extracting data from network {network.name}: {e}")
+            logger.exception(e)
             return None
 
         pdata.metadata['pretty_inputs'] = make_pretty_input_names(
             metadata['network_info']['cotx'],
             pdata.input_names,
         )
+        pdata.metadata['ordered_input_names'] = '-'.join(pdata.input_names)
 
         return pdata
 

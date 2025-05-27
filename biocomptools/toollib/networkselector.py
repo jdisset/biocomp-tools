@@ -12,9 +12,10 @@ from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
 from biocomp.utils import load_lib
-from dracon.utils import ser_debug
+from dracon.utils import ser_debug, list_like, dict_like
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
+from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
@@ -207,7 +208,7 @@ class NetworkSelector(BaseModel):
                     for datafile in datafiles:
                         try:
                             ndp = NetworkDataPair(
-                                network_name=network.name, datafile_path=datafile.filename
+                                network_name=network.name, datafile_path=datafile.file
                             )
                             logger.debug(f"NetworkDataId created: {ndp}")
                             if ndp.network is None:
@@ -215,7 +216,7 @@ class NetworkSelector(BaseModel):
                             if ndp.datafile is None:
                                 ndp.datafile = datafile
                             network_and_data.append(ndp)
-                            logger.debug(f"Matching data: {datafile.filename}")
+                            logger.debug(f"Matching data: {datafile.file}")
                         except Exception as e:
                             logger.error(f"Error creating NetworkDataId for {network.name}")
                             logger.exception(e)
@@ -227,7 +228,7 @@ class NetworkSelector(BaseModel):
                     raise
 
             logger.debug(
-                f"Network data retrieval complete. Found {len(network_and_data)} network-data pairs"
+                f"Network data retrieval complete. Found {len(network_and_data)} network-data pairs for selector {self}."
             )
             return network_and_data
 
@@ -283,6 +284,45 @@ class NetworkSet(BaseModel):
         res = [route(item) for item in v]
         logger.debug(f"Routed to types {[type(r).__name__ for r in res]}")
         return res
+
+    @field_validator('content', mode='before')
+    @classmethod
+    def route_content(cls, v: Any, info):
+        logger.debug(
+            f"From class '{cls.__name__}' (field '{info.field_name}') routing content: {v}"
+        )
+
+        if isinstance(v, (NetworkDataPair, NetworkSelector, NetworkSet)):
+            v = [v]
+        elif not list_like(v):
+            raise TypeError(
+                f"Field '{info.field_name}' for {cls.__name__} must be a list or a single "
+                f"NetworkDataPair/NetworkSelector/NetworkSet instance. Got input of type: {type(v)}"
+            )
+
+        def route_item(obj_in_list: Any) -> Union[NetworkDataPair, NetworkSelector, "NetworkSet"]:
+            if isinstance(obj_in_list, (NetworkDataPair, NetworkSelector, NetworkSet)):
+                return obj_in_list
+
+            if isinstance(obj_in_list, Mapping):
+                dict_obj = dict(obj_in_list)
+                if 'datafile_path' in dict_obj:
+                    return NetworkDataPair(**dict_obj)
+                elif 'content' in dict_obj:  # NetworkSet-like structure
+                    return NetworkSet(**dict_obj)
+                else:
+                    return NetworkSelector(**dict_obj)
+            else:
+                raise TypeError(
+                    f"Invalid item in '{info.field_name}' list for {cls.__name__}. "
+                    f"Expected a dict/mapping or a pre-parsed model instance, got {type(obj_in_list)}"
+                )
+
+        processed_list = [route_item(item) for item in v]
+        logger.debug(
+            f"Routed '{info.field_name}' to types {[type(r).__name__ for r in processed_list]}"
+        )
+        return processed_list
 
     def run_selectors(self, session=None):
         sess = session or self.db_session
@@ -358,6 +398,12 @@ class NetworkSet(BaseModel):
 
     def __len__(self):
         return len(self.content)
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __str__(self):
+        return f"{self.__class__.__name__}[{len(self.content)} items]"
 
 
 class NetworkSetUnion(NetworkSet):
@@ -675,8 +721,8 @@ def build_data_manager(
             network = [network]
 
         for net in network:
-            data.append(get_network_XY(net, path_prefix / f.filename))
-            net.metadata['data_file'] = f.filename
+            data.append(get_network_XY(net, path_prefix / f.file))
+            net.metadata['data_file'] = f.file
             net.metadata['calibration_name'] = f.calibration.name
             net.metadata['recipe_name'] = f.recipe_name
             actual_networks.append(net)
