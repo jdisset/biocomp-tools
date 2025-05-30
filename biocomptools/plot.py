@@ -156,7 +156,7 @@ def debug_figures(figures):
 
 
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
-    if "pretty_inputs" in d.metadata:
+    if "pretty_inputs" in d.metadata and len(d.metadata["pretty_inputs"]) > i:
         return f'$\\mathbf{{X_{i + 1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
     return f'$\\mathbf{{X_{i + 1}}}$ ({d.input_names[i]})'
 

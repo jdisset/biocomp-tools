@@ -1,717 +1,950 @@
 import logging
-from pathlib import Path
-from datetime import datetime
-from rich.logging import RichHandler
-from sqlmodel import Session
-import time
-import pandas as pd
-from typing import Dict, Optional, Any, List, Tuple
 import shutil
 import sqlite3
 import xxhash
 import sys
 import traceback
 import json5
-from tqdm import tqdm
 import os
+import pickle
+import json
+import time
+from pathlib import Path
+from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import fnmatch
+from typing import Annotated, Any, Dict, List, Optional, Tuple, TypeAlias
+
+from rich.logging import RichHandler
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from sqlmodel import Session
+import pandas as pd
+from PIL import Image
+import pikepdf
+from pydantic import Field, BaseModel, PrivateAttr, model_validator
+
 import biocomp.utils as ut
 import biocomptools.toollib.models as md
 from biocomptools.toollib.common import config
 from dracon.commandline import make_program, Arg
-from pydantic import Field, BaseModel, PrivateAttr
-from typing import Annotated
-import pickle
-import json
-from PIL import Image
-import pikepdf
+
+ProcessDatafileResult: TypeAlias = Tuple[md.DataFile, str, Dict[str, Any]]
+FigureProcessorResult: TypeAlias = Tuple[
+    Optional[md.Figure], List[md.Plot], List[md.Prediction], List[Tuple[md.Plot, md.Prediction]]
+]
+ExperimentWorkerResult: TypeAlias = Tuple[
+    str, Optional[md.Experiment], List[Dict[str, Any]], List[Tuple[str, str]]
+]
+
+RICH_PROGRESS_COLUMNS = [
+    SpinnerColumn(style="progress.spinner"),
+    TextColumn("[progress.description]{task.description}"),
+    BarColumn(bar_width=None),
+    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+    TextColumn("({task.completed} of {task.total})"),
+    TimeElapsedColumn(),
+    TimeRemainingColumn(),
+]
 
 
-def setup_logging(log_file_path: Optional[str] = None) -> logging.Logger:
+class WorkerError(Exception):
+    def __init__(self, message: str, path_info: Optional[str | Path] = None):
+        super().__init__(f"{message}{f' (path: {path_info})' if path_info else ''}")
+        self.path_info = str(path_info) if path_info else None
+
+
+class ModelLoadError(WorkerError):
+    pass
+
+
+class DatafileProcessingError(WorkerError):
+    pass
+
+
+class FigureProcessingError(WorkerError):
+    pass
+
+
+class ExperimentWorkerArgs(BaseModel):
+    exp_model: md.Experiment
+    base_dir_s: str
+    recipe_rel_subpath_s: str
+    config_calib_paths: List[str]
+    metadata_exclusion_patterns: List[str]
+    n_inner_workers: int
+    verbose: bool
+    model_config = {'arbitrary_types_allowed': True}
+
+
+def _w_load_model(args: Tuple[str, str]) -> md.TrainedModel:
+    mpath_s, base_dir_s = args
+    mpath, base_dir = Path(mpath_s), Path(base_dir_s)
+    try:
+        with open(mpath, 'rb') as f:
+            biocomp_model = pickle.load(f)
+        metadata = getattr(biocomp_model, 'metadata', {})
+        training_set = [
+            md.NetworkDataPair(**e)
+            for e in metadata.get('training_set', [])
+            if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
+        ]
+        return md.TrainedModel(
+            name=getattr(biocomp_model, 'signature', mpath.stem),
+            path_to_model=mpath.relative_to(base_dir).as_posix(),
+            training_config=metadata,
+            training_set=training_set,
+        )
+    except Exception as e:
+        raise ModelLoadError(f"failed to load model: {e}", path_info=mpath) from e
+
+
+def _w_parse_xp_file(args: Tuple[str, str]) -> Tuple[str, Optional[md.Experiment]]:
+    xp_dir_s, base_dir_s = args
+    xp_dir, base_dir = Path(xp_dir_s), Path(base_dir_s)
+    xp_meta_file = xp_dir / 'experiment.json5'
+
+    get_rel_path = lambda p, base: (
+        p.relative_to(base).as_posix() if p.is_relative_to(base) else p.as_posix()
+    )
+
+    if not xp_meta_file.exists():
+        return xp_dir.name, None
+    try:
+        content = json5.loads(xp_meta_file.read_text())
+        return xp_dir.name, md.Experiment(
+            name=xp_dir.name, path=get_rel_path(xp_dir, base_dir), content=content, errors={}
+        )
+    except Exception as e:
+        return xp_dir.name, md.Experiment(
+            name=xp_dir.name,
+            path=get_rel_path(xp_dir, base_dir),
+            content={},
+            errors={
+                'parsing_json5': [
+                    f"File: {xp_meta_file.name}, Error: {e}",
+                    traceback.format_exc(limit=1),
+                ]
+            },
+        )
+
+
+def _validate_df_attrs(attrs: Any, dfile_name: str, xp_name_ctx: str) -> List[str]:
+    if not isinstance(attrs, dict):
+        return [f"datafile {dfile_name} attrs not dict (is {type(attrs)})"]
+    errs = []
+    spec = {'calibration': ('namehash', dict), 'sample': ('recipe', dict), 'xp': ('name', dict)}
+    for key, (subkey, val_type) in spec.items():
+        attr_val = attrs.get(key)
+        if not (isinstance(attr_val, val_type) and subkey in attr_val):
+            errs.append(
+                f"datafile {dfile_name} invalid/missing '{key}' (must be {val_type.__name__} with '{subkey}')"
+            )
+    if not errs and attrs.get('xp', {}).get('name') != xp_name_ctx:
+        errs.append(
+            f"exp name mismatch in {dfile_name}: file '{attrs.get('xp', {}).get('name')}', context '{xp_name_ctx}'"
+        )
+    return errs
+
+
+def _core_proc_df(df_path: Path, base_dir: Path, xp_name: str) -> ProcessDatafileResult:
+    try:
+        df_content = pd.read_parquet(df_path)
+        if err_msgs := _validate_df_attrs(df_content.attrs, df_path.name, xp_name):
+            raise DatafileProcessingError(
+                f"{df_path.name}: {'; '.join(err_msgs)}", path_info=df_path
+            )
+
+        cal_attrs = df_content.attrs['calibration']
+        namehash = cal_attrs['namehash']
+        cal_full_name = f"{xp_name}_{namehash}"
+        dfile_obj = md.DataFile(
+            file=df_path.relative_to(base_dir).as_posix(),
+            attrs=df_content.attrs,
+            calibration_name=cal_full_name,
+            priority=1000 if (df_path.parent / '.mark_favorite').exists() else 0,
+        )
+        return dfile_obj, cal_full_name, cal_attrs.get('pipeline', {})
+    except Exception as e:
+        if isinstance(e, DatafileProcessingError):
+            raise
+        raise DatafileProcessingError(f"processing error: {e}", path_info=df_path) from e
+
+
+def _extract_file_meta(file_path: Path) -> dict:
+    meta = {}
+    fmt = lambda v: (
+        [str(i) for i in v]
+        if isinstance(v, pikepdf.Array)
+        else str(v)
+        if isinstance(v, pikepdf.String)
+        else v
+    )
+    try:
+        if file_path.suffix.lower() == '.pdf':
+            with pikepdf.open(file_path) as pdf:
+                meta = {k[1:]: fmt(v) for k, v in pdf.docinfo.items()}
+        elif file_path.suffix.lower() == '.png':
+            with Image.open(file_path) as img:
+                if subj_src := getattr(img, 'text', {}):
+                    meta = {'Subject': subj_src.get('Subject', '{}')}
+        subject_str = meta.get('Subject', '{}')
+        return json.loads(subject_str) if subject_str and subject_str.strip() else {}
+    except Exception as e:
+        raise FigureProcessingError(f"metadata extraction failed: {e}", path_info=file_path) from e
+
+
+def _match_path_pat(pattern: str, path_s: str) -> bool:
+    p_transformed = (
+        pattern.replace('**', '<MULTI>')
+        .replace('*', '<SINGLE>')
+        .replace('<MULTI>', '*')
+        .replace('<SINGLE>', '[^/]*')
+    )
+    if fnmatch.fnmatch(path_s, p_transformed):
+        return True
+    if p_transformed.startswith('*/') and path_s == p_transformed[2:]:
+        return True
+    return bool(
+        pattern.startswith('**')
+        and p_transformed.startswith('*/')
+        and '/' not in path_s
+        and fnmatch.fnmatch(path_s, p_transformed[2:])
+    )
+
+
+def _should_exclude_path(path_s: str, patterns: List[str]) -> bool:
+    return any(_match_path_pat(p, path_s) for p in patterns)
+
+
+def clean_dict(data: Any, patterns: List[str], cur_path: str = '') -> Any:
+    if isinstance(data, dict):
+        cl_d = {
+            k: v_cl
+            for k, v in data.items()
+            if not _should_exclude_path(p := f"{cur_path}/{k}" if cur_path else k, patterns)
+            and (v_cl := clean_dict(v, patterns, p)) is not None
+        }
+        return cl_d or None
+    if isinstance(data, list):
+        cl_l = [
+            i_cl
+            for i, item in enumerate(data)
+            if not _should_exclude_path(p := f"{cur_path}/{i}", patterns)
+            and (i_cl := clean_dict(item, patterns, p)) is not None
+        ]
+        return cl_l or None
+    return data
+
+
+def _proc_plot_task(
+    task: dict, fig_file: str, task_idx: int, patterns: List[str]
+) -> Tuple[Optional[md.Plot], Optional[md.Prediction]]:
+    ds_type = task.get('datasource_type')
+    net_name = task.get('network_name') or task.get('network', {}).get('name')
+    plot_args = {
+        'in_figure': fig_file,
+        'at_location': {'row': 0, 'col': task_idx},
+        'network_name': net_name,
+        'plot_method': task.get('plot_method'),
+        'input_names': task.get('input_names', []),
+        'output_name': task.get('output_name'),
+        'datasource_type': ds_type,
+        'meta': clean_dict(dict(task), patterns),
+    }
+    if ds_type == 'database' and (df_path := task.get('datafile', {}).get('file')):
+        return md.Plot(from_datafile=df_path, **plot_args), None
+    if ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
+        pred_stats = task.get('prediction_stats', {})
+        pred = md.Prediction(
+            network_name=net_name,
+            datafile_path=task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+            trained_model_name=model_sig,
+            mse=pred_stats.get('mse'),
+            grid_mse=pred_stats.get('grid_mse'),
+            normalized_grid_mse=pred_stats.get('normalized_grid_mse', pred_stats.get('grid_mse')),
+            n_points=pred_stats.get('eval_npoints'),
+            extra_stats=pred_stats,
+        )
+        return md.Plot(from_prediction=None, **plot_args), pred
+    return None, None
+
+
+def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorResult:
+    fig_path_s, base_dir_s, meta_exclude_patterns = args_tuple
+    fig_path, base_dir = Path(fig_path_s), Path(base_dir_s)
+    try:
+        metadata = _extract_file_meta(fig_path)
+        if not metadata:
+            return None, [], [], []
+
+        rel_path = fig_path.relative_to(base_dir).as_posix()
+        fig_meta_content = metadata.get('FigureMetadata', {})
+        cleaned_fig_meta = {k: v for k, v in metadata.items() if k != 'FigureMetadata'}
+        if 'FigureMetadata' in metadata:
+            cleaned_fig_meta['FigureMetadata'] = {
+                k: v for k, v in fig_meta_content.items() if k != 'plot_tasks'
+            }
+
+        figure = md.Figure(file=rel_path, meta=cleaned_fig_meta)
+        l_plots, l_preds, l_plots_need_id = [], [], []
+        for i, task_data in enumerate(fig_meta_content.get('plot_tasks', [])):
+            plot, pred = _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns)
+            if plot:
+                (
+                    l_preds.append(pred),
+                    l_plots_need_id.append((plot, pred)),
+                ) if pred else l_plots.append(plot)
+        return figure, l_plots, l_preds, l_plots_need_id
+    except Exception as e:
+        if isinstance(e, FigureProcessingError):
+            raise
+        raise FigureProcessingError(f"generic error: {e}", path_info=fig_path) from e
+
+
+def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
+    xp, args = worker_args.exp_model, worker_args
+    base_dir, local_errors = Path(args.base_dir_s), []
     logger = logging.getLogger('biocomp_db')
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    try:
+        xp.recipes = xp.find_recipes(path_prefix=base_dir, recipe_subpath=args.recipe_rel_subpath_s)
+        logger.debug(f"Recipes found by find_recipes for {xp.name}: {len(xp.recipes)}")
+    except Exception as e:
+        logger.error("Error finding recipes for experiment {xp.name}")
+        logger.exception(e)
+        local_errors.append(('recipe_finding', f"Exp '{xp.name}': {e}"))
+        xp.recipes = []
 
-    console_handler = RichHandler(
-        rich_tracebacks=True, tracebacks_show_locals=False, show_time=True
+    xp_root_fs = base_dir / xp.path if not Path(xp.path).is_absolute() else Path(xp.path)
+    df_paths = sorted(
+        {
+            p
+            for pat in args.config_calib_paths
+            for p in (xp_root_fs / pat).rglob('*.parquet')
+            if (xp_root_fs / pat).is_dir()
+        }
     )
-    console_handler.setFormatter(logging.Formatter('%(message)s'))
-    logger.addHandler(console_handler)
 
-    log_file_name = f'biocomp_db_{datetime.now().strftime("%Y%m%d")}.log'
-    log_file = (
-        Path(log_file_path) if log_file_path else Path(config.paths.root) / 'logs' / log_file_name
-    )
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+    df_proc_results: List[ProcessDatafileResult] = []
+    if df_paths:
+        with ThreadPoolExecutor(
+            max_workers=args.n_inner_workers, thread_name_prefix=f"DF_{xp.name[:5]}"
+        ) as tpe:
+            futures = {
+                tpe.submit(_core_proc_df, df_p, base_dir, xp.name): df_p for df_p in df_paths
+            }
+            for fut in as_completed(futures):
+                try:
+                    df_proc_results.append(fut.result())
+                except Exception as e:
+                    local_errors.append(
+                        ('datafile_item_exception', f"Error processing {futures[fut]}: {e}")
+                    )
 
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(file_handler)
+    cal_map: Dict[str, md.Calibration] = {}
+    for dfile, cal_full_name, pipe_info in df_proc_results:
+        if cal_full_name not in cal_map:
+            cal_map[cal_full_name] = md.Calibration(
+                fullname=cal_full_name,
+                name=cal_full_name.replace(f"{xp.name}_", "", 1),
+                pipeline=pipe_info,
+                data_files=[],
+            )
+        cal_map[cal_full_name].data_files.append(dfile)
 
-    for name in ['biocomp', 'jax']:
-        lib_logger = logging.getLogger(name)
-        lib_logger.setLevel(logging.WARNING)
-        if not any(isinstance(h, logging.FileHandler) for h in lib_logger.handlers):
-            lib_logger.addHandler(file_handler)
-        if not any(isinstance(h, RichHandler) for h in lib_logger.handlers):
-            lib_logger.addHandler(console_handler)
-        lib_logger.propagate = False
-
-    return logger
-
-
-NAME = __name__
+    recipe_lookup = {
+        r.content['name']: r
+        for r in xp.recipes
+        if isinstance(r, md.Recipe) and r.content and 'name' in r.content
+    }
+    for cal in cal_map.values():
+        for dfile in cal.data_files:
+            if not isinstance(dfile.attrs, dict):
+                continue
+            try:
+                recipe_name = dfile.attrs.get('sample', {}).get('recipe')
+                if not recipe_name:
+                    local_errors.append(
+                        (
+                            'recipe_link_missing_in_dfile',
+                            f"Missing recipe in {dfile.file} (xp {xp.name})",
+                        )
+                    )
+                    continue
+                if not (target_recipe := recipe_lookup.get(recipe_name)):
+                    local_errors.append(
+                        (
+                            'recipe_link_target_not_found',
+                            f"Recipe '{recipe_name}' from {dfile.file} not found in {xp.name}.",
+                        )
+                    )
+                    continue
+                dfile.recipe_name = target_recipe.name
+                if dfile not in target_recipe.data_files:
+                    target_recipe.data_files.append(dfile)
+            except Exception as e:
+                local_errors.append(
+                    (
+                        'recipe_link_exception',
+                        f"Error linking recipe for {dfile.file} (xp {xp.name}): {e}",
+                    )
+                )
+    return xp.name, xp, [c.model_dump() for c in cal_map.values()], local_errors
 
 
 class BiocompDBUpdater(BaseModel):
-    base_dir: Annotated[Path | str, Arg(help="Path to the base directory.")] = config.paths.root
-    xp_dir_path: Annotated[Path | str, Arg(help="Path to the experiments directory.")] = (
-        'Experiments'
-    )
-    recipe_relative_subpath: Annotated[str, Arg(help="Relative path to the recipe directory.")] = (
+    base_dir: Annotated[Path | str, Arg(help="Path to base directory.")] = config.paths.root
+    xp_dir: Annotated[Path | str, Arg(help="Path to experiments directory.")] = 'Experiments'
+    recipe_relative_subpath: Annotated[str, Arg(help="Relative path to recipe directory.")] = (
         'recipes'
     )
-    verbose: Annotated[bool, Arg(short="v", help="Enable verbose logging.")] = Field(default=False)
+    models_dir: Annotated[str, Arg(help="Models directory name relative to base_dir.")] = "Models"
+    plots_dir: Annotated[str, Arg(help="Directory to scan for plots, relative to base_dir.")] = (
+        "Plots/Figures"
+    )
+    verbose: Annotated[bool, Arg(short="v", help="Enable verbose logging.")] = True
     process_experiments: Annotated[bool, Arg(help="Process experiments and recipes")] = True
     process_models: Annotated[bool, Arg(help="Process trained models")] = True
     process_figures: Annotated[bool, Arg(help="Process figures and plots")] = True
+    nworkers: Annotated[int, Arg(help="Number of parallel workers")] = 8
 
-    _logger: logging.Logger = PrivateAttr(default_factory=lambda: logging.getLogger(NAME))
+    _logger: logging.Logger = PrivateAttr()
+    _metadata_exclusion_patterns: List[str] = PrivateAttr(
+        default=[
+            '**/network',
+            '**/built_network',
+            '**/network_info',
+            '**/file_stem',
+            '**/datafile/attrs',
+            '**/calibration',
+        ]
+    )
+    _plots_needing_prediction_id: List[Tuple[md.Plot, md.Prediction]] = PrivateAttr(
+        default_factory=list
+    )
 
-    def model_post_init(self, *args, **kwargs):
-        super().model_post_init(*args, **kwargs)
+    @staticmethod
+    def _resolve_path(p: Path | str, base: Optional[Path] = None) -> Path:
+        path = Path(p)
+        return (base / path if base and not path.is_absolute() else path).expanduser().resolve()
 
-        logging.basicConfig(
-            level=logging.INFO if not self.verbose else logging.DEBUG,
-            format="%(message)s",
-            datefmt="[%X]",
-            handlers=[RichHandler(rich_tracebacks=True)],
-        )
+    def _configure_logger(self):
         self._logger = logging.getLogger('biocomp_db')
-        self.base_dir = Path(self.base_dir).expanduser().resolve()
-        self.xp_dir_path = Path(self.xp_dir_path)
-        if not self.xp_dir_path.is_absolute():
-            self.xp_dir_path = (self.base_dir / self.xp_dir_path).expanduser().resolve()
-
-    def _add_item_error(self, item: Any, key: str, detail: str):
-        if not hasattr(item, 'errors'):
+        if self._logger.handlers:
             return
-        if not isinstance(item.errors, dict):
-            item.errors = {}
-        item.errors.setdefault(key, []).append(detail)
-
-    def _create_experiment_with_error(
-        self, xp_cand_dir: Path, error_key: str, log_msg: str
-    ) -> md.Experiment:
-        self._logger.error(log_msg)
-        tb_info = traceback.format_exc()
-        try:
-            rel_path = xp_cand_dir.relative_to(self.base_dir).as_posix()
-        except ValueError:
-            self._logger.warning(
-                f"experiment dir {xp_cand_dir} not under base {self.base_dir}, using absolute."
-            )
-            rel_path = xp_cand_dir.as_posix()
-        return md.Experiment(
-            name=xp_cand_dir.name, path=rel_path, content={}, errors={error_key: [tb_info]}
+        self._logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+        fmt_str = (
+            '%(message)s'
+            if not self.verbose
+            else '%(asctime)s %(levelname)-8s %(name)s: %(message)s [%(threadName)s]'
         )
+        rh = RichHandler(
+            rich_tracebacks=True,
+            tracebacks_show_locals=self.verbose,
+            show_time=self.verbose,
+            show_path=self.verbose,
+            level=logging.DEBUG if self.verbose else logging.INFO,
+        )
+        rh.setFormatter(logging.Formatter(fmt_str))
+        self._logger.addHandler(rh)
+        self._logger.propagate = False
 
-    def _parse_experiment_file(self, xp_cand_dir: Path) -> Optional[md.Experiment]:
-        xp_name = xp_cand_dir.name
-        xp_meta_file = xp_cand_dir / 'experiment.json5'
-
-        if not xp_meta_file.exists():
-            self._logger.warning(f'no experiment.json5 in {xp_name}, skipping')
-            return None
-        try:
-            with open(xp_meta_file, 'r') as f:
-                content = json5.load(f)
-            rel_path = xp_cand_dir.relative_to(self.base_dir).as_posix()
-            return md.Experiment(name=xp_name, path=rel_path, content=content, errors={})
-        except json5.Json5DecodeError as e:
-            return self._create_experiment_with_error(
-                xp_cand_dir, 'parsing_json5', f"invalid json5 in {xp_meta_file}: {e}"
+        log_dir = self._resolve_path(
+            getattr(config.paths, "logs", self.base_dir / 'logs'), self.base_dir
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_dir / f'biocomp_db_{datetime.now():%Y%m%d}.log')
+        fh.setFormatter(
+            logging.Formatter(
+                '%(asctime)s-%(name)s-%(levelname)s-%(message)s [%(processName)s-%(threadName)s]'
             )
-        except Exception:  # catch all for safety during parsing/init
-            return self._create_experiment_with_error(
-                xp_cand_dir,
-                'parsing_general',
-                f"error parsing/creating experiment {xp_name} from {xp_meta_file}",
+        )
+        fh.setLevel(logging.DEBUG)
+        self._logger.addHandler(fh)
+
+    @model_validator(mode='after')
+    def _setup(self) -> 'BiocompDBUpdater':
+        self.base_dir = self._resolve_path(self.base_dir)
+        for fld in ['xp_dir', 'models_dir', 'plots_dir']:
+            setattr(self, fld, self._resolve_path(getattr(self, fld), self.base_dir))
+        self._configure_logger()
+        for lib_name in ['biocomp', 'jax', 'httpx', 'numba', 'PIL.PngImagePlugin']:
+            logging.getLogger(lib_name).setLevel(logging.WARNING)
+        if self.nworkers <= 0:
+            cpus = os.cpu_count() or 1
+            self.nworkers = max(
+                1, min((cpus - 1) if cpus > 1 else 1, getattr(config.system, "max_workers_cap", 8))
             )
+        return self
 
-    def _load_experiments_from_disk(self) -> Dict[str, md.Experiment]:
-        experiments: Dict[str, md.Experiment] = {}
-        self._logger.info("loading experiments")
-        if not self.xp_dir_path.is_dir():
-            self._logger.error(f"experiments root {self.xp_dir_path} not found. stopping.")
-            return experiments
+    def _add_error_to_item(self, item: Any, key: str, detail: str):
+        if hasattr(item, 'errors') and isinstance(item.errors, dict):
+            item.errors.setdefault(key, []).append(detail)
 
-        exp_cand_dirs = sorted([d for d in self.xp_dir_path.iterdir() if d.is_dir()])
+    def _load_xps(self, progress: Progress) -> Dict[str, md.Experiment]:
+        self._logger.info("loading experiments...")
+        if not self.xp_dir.is_dir():
+            self._logger.error(f"experiments root {self.xp_dir} not found.")
+            return {}
 
-        for xp_cand_dir in tqdm(exp_cand_dirs, desc="loading experiments", unit="dir"):
-            xp_name = xp_cand_dir.name
-            try:
-                xp = self._parse_experiment_file(xp_cand_dir)
-                if xp:
-                    if xp.name in experiments:
-                        self._logger.warning(f"duplicate experiment name {xp.name}, overwriting.")
-                    experiments[xp.name] = xp
-            except Exception:  # broad catch for safety in loop
-                self._logger.error(f"critical unhandled error processing dir {xp_cand_dir}")
-                experiments[xp_name] = self._create_experiment_with_error(
-                    xp_cand_dir, 'loading_critical', f"critical failure for {xp_name}"
-                )
-
-        self._logger.info(f"loaded/processed {len(experiments)} experiments")
-        return experiments
-
-    def _validate_datafile_attrs(
-        self, attrs: Any, datafile_name: str, xp_name_ctx: str
-    ) -> List[str]:
-        validation_errors = []
-        if not isinstance(attrs, dict):
-            validation_errors.append(
-                f"datafile {datafile_name} attrs not a dict (type: {type(attrs)})."
-            )
-            return validation_errors
-
-        spec = {'calibration': ('namehash', dict), 'sample': ('recipe', dict), 'xp': ('name', dict)}
-        for key, (subkey, val_type) in spec.items():
-            attr_val = attrs.get(key)
-            if not isinstance(attr_val, val_type) or subkey not in attr_val:
-                validation_errors.append(
-                    f"datafile {datafile_name} invalid/missing '{key}' (must be {val_type.__name__} with '{subkey}')."
-                )
-
-        if not validation_errors and attrs['xp']['name'] != xp_name_ctx:
-            validation_errors.append(
-                f"exp name mismatch in {datafile_name}: file has '{attrs['xp']['name']}', context '{xp_name_ctx}'."
-            )
-
-        for err in validation_errors:
-            self._logger.warning(err)
-        return validation_errors
-
-    def _process_single_datafile(
-        self, datafile_path: Path, xp: md.Experiment, calibration_map: Dict[str, md.Calibration]
-    ):
-        try:
-            df_content = pd.read_parquet(datafile_path)  # raises if file is not valid parquet
-            attr_errors = self._validate_datafile_attrs(
-                df_content.attrs, datafile_path.name, xp.name
-            )
-            if attr_errors:
-                self._add_item_error(
-                    xp, 'invalid_datafile_attrs', f"{datafile_path.name}: {'; '.join(attr_errors)}"
-                )
-                return
-
-            cal_attrs = df_content.attrs['calibration']
-            namehash = cal_attrs['namehash']
-            calib_fullname = f"{xp.name}_{namehash}"
-            priority = 1000 if (datafile_path.parent / '.mark_favorite').exists() else 0
-
-            if calib_fullname not in calibration_map:
-                calibration_map[calib_fullname] = md.Calibration(
-                    fullname=calib_fullname,
-                    name=namehash,
-                    pipeline=cal_attrs.get('pipeline', {}),
-                    data_files=[],
-                )
-
-            dfile_rel_path = datafile_path.relative_to(self.base_dir).as_posix()
-            dfile_obj = md.DataFile(
-                file=dfile_rel_path,
-                attrs=df_content.attrs,
-                calibration_name=calib_fullname,
-                priority=priority,
-            )
-            calibration_map[calib_fullname].data_files.append(dfile_obj)
-
-        except Exception:
-            self._logger.error(f"error processing datafile {datafile_path.name} for xp {xp.name}")
-            self._add_item_error(
-                xp, 'datafile_processing_error', f"{datafile_path.name}: {traceback.format_exc()}"
-            )
-
-    def _link_datafiles_to_recipes(
-        self,
-        calibration_map: Dict[str, md.Calibration],
-        recipe_lookup: Dict[str, md.Recipe],
-        xp: md.Experiment,
-    ):
-        for calib_obj in calibration_map.values():
-            if not calib_obj.fullname.startswith(f"{xp.name}_"):
-                continue
-
-            for dfile in calib_obj.data_files:
-                if not (
-                    isinstance(dfile, md.DataFile)
-                    and isinstance(getattr(dfile, 'attrs', None), dict)
-                ):
-                    continue
+        xp_cand_dirs = sorted([d for d in self.xp_dir.iterdir() if d.is_dir()])
+        xps: Dict[str, md.Experiment] = {}
+        tid = progress.add_task("[cyan]Parsing experiment files...", total=len(xp_cand_dirs))
+        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+            futures = {
+                exe.submit(_w_parse_xp_file, (str(d), str(self.base_dir))): d for d in xp_cand_dirs
+            }
+            for fut in as_completed(futures):
+                xp_dir_p = futures[fut]
                 try:
-                    recipe_name = dfile.attrs.get('sample', {}).get('recipe')
-                    if not recipe_name:
-                        self._logger.warning(
-                            f"missing recipe name in datafile {dfile.file} (xp {xp.name})"
-                        )
-                        continue
-
-                    target_recipe = recipe_lookup.get(recipe_name)
-                    if not target_recipe:
-                        self._logger.warning(
-                            f"recipe '{recipe_name}' from {dfile.file} not found in {xp.name} recipes."
-                        )
-                        self._add_item_error(
-                            xp, 'recipe_linking_missing', f"recipe '{recipe_name}' for {dfile.file}"
-                        )
-                        continue
-
-                    dfile.recipe = target_recipe
-                    dfile.recipe_name = target_recipe.name
-                    if dfile not in target_recipe.data_files:
-                        target_recipe.data_files.append(dfile)
-                except Exception:
+                    xp_name, xp_obj = fut.result()
+                    if xp_obj is None:
+                        self._logger.warning(f'no experiment.json5 in {xp_dir_p.name}, skipping')
+                    elif xp_obj:
+                        if xp_obj.errors:
+                            [
+                                self._logger.error(f"Error parsing {xp_name} ({et}): {d}")
+                                for et, eds in xp_obj.errors.items()
+                                for d in eds
+                            ]
+                        if xp_name in xps:
+                            self._logger.warning(
+                                f"Duplicate experiment name {xp_name} from {xp_dir_p}, overwriting."
+                            )
+                        xps[xp_name] = xp_obj
+                except Exception as e:
                     self._logger.error(
-                        f"error linking recipe for datafile {dfile.file} (xp {xp.name})"
+                        f"Critical error loading experiment from dir {xp_dir_p}", exc_info=e
                     )
-                    self._add_item_error(
-                        xp, 'recipe_linking_error', f"{dfile.file}: {traceback.format_exc()}"
-                    )
+                progress.update(tid, advance=1)
+        progress.update(
+            tid, description="[cyan]Experiment files parsed.", completed=len(xp_cand_dirs)
+        )
+        self._logger.info(f"loaded initial data for {len(xps)} experiments")
+        return xps
 
-    def _process_calibrated_data_for_experiment(
-        self, xp: md.Experiment, global_calibrations: Dict[str, md.Calibration]
-    ):
-        recipe_lookup: Dict[str, md.Recipe] = {
-            r.content['name']: r
-            for r in xp.recipes
-            if isinstance(r, md.Recipe) and isinstance(r.content, dict) and 'name' in r.content
-        }
+    def _get_db_hash(self, db_fpath: Path) -> str:
+        with sqlite3.connect(f"file:{db_fpath}?mode=ro", uri=True) as conn:
+            return xxhash.xxh128('\n'.join(conn.iterdump()).encode()).hexdigest()
 
-        xp_on_disk_path = self.base_dir / xp.path
-        for calib_subpath_str in config.calib.paths:
-            scan_root_path = xp_on_disk_path / calib_subpath_str
-            if not scan_root_path.is_dir():
-                continue
-
-            try:
-                for datafile_abs_path in scan_root_path.glob('**/*.parquet'):
-                    self._process_single_datafile(datafile_abs_path, xp, global_calibrations)
-            except Exception:  # broad catch for directory scan issues
-                self._logger.error(f"error scanning dir {scan_root_path} for parquet")
-                self._add_item_error(
-                    xp, 'calibration_scan_error', f"{scan_root_path}: {traceback.format_exc()}"
-                )
-
-        self._link_datafiles_to_recipes(global_calibrations, recipe_lookup, xp)
-
-    def _get_db_hash(self, db_file_path: Path) -> str:
-        # raises FileNotFoundError if not db_file_path.exists()
-        # raises other exceptions on sqlite or xxhash errors
-        with sqlite3.connect(f"file:{db_file_path}?mode=ro", uri=True) as conn:
-            db_dump = '\n'.join(conn.iterdump())
-        return xxhash.xxh128(db_dump.encode('utf-8')).hexdigest()
-
-    def _backup_db_if_changed(self) -> bool:
+    def _backup_db(self) -> bool:
         self._logger.info("checking database for backup")
-        db_file = Path(config.db.sqlite.path).expanduser().resolve()
-        backup_dir = Path(config.db.sqlite.backup.dir).expanduser().resolve()
-
-        if not db_file.exists():
-            self._logger.error(f"db file {db_file} not found. cannot backup.")
+        db_f = self._resolve_path(config.db.sqlite.path, self.base_dir)
+        bak_dir = self._resolve_path(config.db.sqlite.backup.dir, self.base_dir)
+        if not db_f.exists():
+            self._logger.error(f"db file {db_f} not found.")
+            return False
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        if (limit := config.db.sqlite.backup.keep_n) > 0:
+            cur_baks = sorted(bak_dir.glob(f'{db_f.stem}_*.sqlite'), key=os.path.getmtime)
+            if (num_del := len(cur_baks) - limit + 1) > 0:
+                for old in cur_baks[:num_del]:
+                    old.unlink(missing_ok=True)
+                    self._logger.info(f"rm old backup: {old.name}")
+            if cur_baks and cur_baks[-1].exists():  # ensure last backup file exists before hashing
+                try:
+                    if self._get_db_hash(cur_baks[-1]) == self._get_db_hash(db_f):
+                        self._logger.info('no db changes, skipping backup.')
+                        return True
+                except Exception as e:
+                    self._logger.warning(
+                        f"could not compare db hashes ({e}), proceeding with backup."
+                    )
+        new_bkp_f = bak_dir / f'{db_f.stem}_{datetime.now():%Y-%m-%d_%H%M%S}.sqlite'
+        try:
+            shutil.copy2(db_f, new_bkp_f)
+            self._logger.info(f'db backed up to {new_bkp_f}')
+            return True
+        except Exception as e:
+            self._logger.error(f"error copying db for backup: {e}")
+            new_bkp_f.unlink(missing_ok=True)
             return False
 
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        backups = sorted(backup_dir.glob(f'{db_file.stem}_*.sqlite'), key=os.path.getmtime)
-        limit = config.db.sqlite.backup.keep_n
-
-        if limit > 0:
-            num_to_delete = len(backups) - (limit - 1)
-            if num_to_delete > 0:
-                for old_bkp in backups[:num_to_delete]:
-                    old_bkp.unlink(missing_ok=True)
-                    self._logger.info(f"removed old backup: {old_bkp.name}")
-                backups = backups[num_to_delete:]
-
-        latest_backup = backups[-1] if backups and limit > 0 else None
-        needs_backup = True
-        if latest_backup:
-            try:
-                if self._get_db_hash(latest_backup) == self._get_db_hash(db_file):
-                    self._logger.info('no db changes detected since last backup, skipping.')
-                    needs_backup = False
-            except Exception as e:  # covers FileNotFoundError for hashes too
-                self._logger.warning(f"could not compare db hashes ({e}), proceeding with backup.")
-
-        if needs_backup:
-            ts = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-            new_backup_file = backup_dir / f'{db_file.stem}_{ts}.sqlite'
-            try:
-                shutil.copy2(db_file, new_backup_file)
-                self._logger.info(f'db backed up to {new_backup_file}')
-            except Exception as e:
-                self._logger.error(f"error copying db for backup: {e}")
-                new_backup_file.unlink(missing_ok=True)  # attempt to clean up partial backup
-                return False
-        return True
-
-    def _extract_pdf_metadata(self, pdf_path: Path) -> dict:
-        metadata = {}
-
-        def f(v):
-            if isinstance(v, pikepdf.Array):
-                return [str(i) for i in v]
-            elif isinstance(v, pikepdf.String):
-                return str(v)
-            return v
-
-        with pikepdf.open(pdf_path) as pdf:
-            docinfo = pdf.docinfo
-            metadata.update({k[1:]: f(v) for k, v in docinfo.items()})
-
-        subject = metadata.get('Subject', '{}')
-        return json.loads(subject) if subject else {}
-
-    def _extract_png_metadata(self, png_path: Path) -> dict:
-        with Image.open(png_path) as img:
-            if img.format == 'PNG':
-                if hasattr(img, 'text'):
-                    subject = img.text.get('Subject', '{}')
-                else:
-                    subject = img.info.get('Subject', '{}')
-                return json.loads(subject) if subject else {}
-        return {}
-
-    def _extract_figure_metadata(self, file_path: Path) -> dict:
-        if file_path.suffix.lower() == '.pdf':
-            return self._extract_pdf_metadata(file_path)
-        elif file_path.suffix.lower() == '.png':
-            return self._extract_png_metadata(file_path)
-        return {}
-
-    def _load_models_from_disk(self) -> List[md.TrainedModel]:
-        models_dir = self.base_dir / 'Models'
-        trained_models = []
-
-        if not models_dir.exists():
-            self._logger.info("no Models directory found")
-            return trained_models
-
-        model_paths = list(models_dir.glob('**/*model.p*kl*'))
-        model_paths = [p for p in model_paths if '__archive' not in str(p)]
-
-        self._logger.info(f"found {len(model_paths)} model files")
-
-        for model_path in tqdm(model_paths, desc="loading models", unit="model"):
-            try:
-                with open(model_path, 'rb') as f:
-                    biocomp_model = pickle.load(f)
-
-                metadata = biocomp_model.metadata
-                signature = biocomp_model.signature
-
-                rel_path = model_path.relative_to(self.base_dir).as_posix()
-
-                trained_model = md.TrainedModel(
-                    name=signature, path_to_model=rel_path, training_config=metadata
-                )
-
-                training_set_entries = metadata.get('training_set', [])
-                for entry in training_set_entries:
-                    network_name = entry.get('network_name')
-                    datafile_path = entry.get('datafile_path')
-
-                    if network_name and datafile_path:
-                        pair = md.NetworkDataPair(
-                            network_name=network_name, datafile_path=datafile_path
-                        )
-                        trained_model.training_set.append(pair)
-
-                trained_models.append(trained_model)
-
-            except Exception:
-                self._logger.error(f"error loading model from {model_path}")
-                self._logger.debug(traceback.format_exc())
-
-        return trained_models
-
-    def _process_plot_task(
-        self, task: dict, figure_file: str, task_idx: int
-    ) -> Tuple[Optional[md.Plot], Optional[md.Prediction]]:
-        datasource_type = task.get('datasource_type')
-
-        if datasource_type == 'database':
-            datafile_info = task.get('datafile', {})
-            datafile_path = datafile_info.get('file')
-            if datafile_path:
-                plot = md.Plot(
-                    from_datafile=datafile_path,
-                    in_figure=figure_file,
-                    at_location={'row': 0, 'col': task_idx},
-                    meta=task,
-                )
-                return plot, None
-
-        elif datasource_type == 'prediction':
-            network_name = task.get('network_name')
-            model_signature = task.get('model_signature')
-            pred_stats = task.get('prediction_stats', {})
-
-            if network_name and model_signature:
-                extra_info = task.get('extra_prediction_info', {})
-                datafile_path = extra_info.get('datafile', {}).get('file')
-
-                prediction = md.Prediction(
-                    network_name=network_name,
-                    datafile_path=datafile_path,
-                    trained_model_name=model_signature,
-                    mse=pred_stats.get('mse'),
-                    grid_mse=pred_stats.get('grid_mse'),
-                    normalized_grid_mse=pred_stats.get('grid_mse'),
-                    n_points=pred_stats.get('eval_npoints'),
-                    extra_stats=pred_stats,
-                )
-
-                plot = md.Plot(
-                    from_prediction=None,  # will be set after prediction gets an ID
-                    in_figure=figure_file,
-                    at_location={'row': 0, 'col': task_idx},
-                    meta=task,
-                )
-
-                return plot, prediction
-
-        return None, None
-
-    def _load_figures_from_disk(self) -> Tuple[List[md.Figure], List[md.Plot], List[md.Prediction]]:
-        figures = []
-        plots = []
-        predictions = []
-
-        figure_patterns = ['**/*.pdf', '**/*.png']
-        figure_paths = []
-
-        for pattern in figure_patterns:
-            figure_paths.extend(self.base_dir.glob(pattern))
-
-        figure_paths = [p for p in figure_paths if '__archive' not in str(p)]
-
-        self._logger.info(f"found {len(figure_paths)} figure files")
-
-        plots_needing_prediction_id = []
-
-        for fig_path in tqdm(figure_paths, desc="loading figures", unit="figure"):
-            try:
-                metadata = self._extract_figure_metadata(fig_path)
-                if not metadata:
-                    continue
-
-                rel_path = fig_path.relative_to(self.base_dir).as_posix()
-
-                figure = md.Figure(file=rel_path, meta=metadata)
-                figures.append(figure)
-
-                fig_metadata = metadata.get('FigureMetadata', {})
-                plot_tasks = fig_metadata.get('plot_tasks', [])
-
-                for idx, task in enumerate(plot_tasks):
-                    plot, prediction = self._process_plot_task(task, rel_path, idx)
-                    if plot:
-                        if prediction:
-                            predictions.append(prediction)
-                            plots_needing_prediction_id.append((plot, prediction))
-                        else:
-                            plots.append(plot)
-
-            except Exception:
-                self._logger.error(f"error processing figure {fig_path}")
-                self._logger.debug(traceback.format_exc())
-
-        # store plots that need prediction IDs for later processing
-        self._plots_needing_prediction_id = plots_needing_prediction_id
-
-        return figures, plots, predictions
-
-    def _core_processing_loop(
-        self,
-        experiments: Dict[str, md.Experiment],
-        all_calibrations_map: Dict[str, md.Calibration],
-        lib: Any,
-    ):
-        for xp_name, xp_obj in tqdm(
-            list(experiments.items()), desc="processing experiments", unit="exp"
-        ):
-            self._logger.info(f"--- processing experiment: {xp_name} ---")
-
-            try:
-                xp_obj.recipes = xp_obj.find_recipes(
-                    path_prefix=self.base_dir, recipe_subpath=self.recipe_relative_subpath
-                )
-            except Exception:
-                self._logger.error(f"error finding recipes for {xp_name}")
-                self._add_item_error(xp_obj, 'recipe_finding', traceback.format_exc())
-                xp_obj.recipes = []
-
-            try:
-                self._process_calibrated_data_for_experiment(xp_obj, all_calibrations_map)
-            except Exception:
-                self._logger.error(f"error processing calibrated data for {xp_name}")
-                self._add_item_error(xp_obj, 'calibration_processing', traceback.format_exc())
-
-        all_recipes = [
-            r
-            for xp in experiments.values()
-            for r in getattr(xp, 'recipes', [])
-            if isinstance(r, md.Recipe)
+    def _load_models(self, progress: Progress) -> List[md.TrainedModel]:
+        self._logger.info("loading models...")
+        if not self.models_dir.is_dir():
+            self._logger.info(f"Models dir {self.models_dir} not found")
+            return []
+        mpaths = [
+            p for p in self.models_dir.rglob('*model.p*kl*') if '__archive' not in p.as_posix()
         ]
-        self._logger.info(f"attempting to build networks for {len(all_recipes)} recipes")
-        for recipe in tqdm(all_recipes, desc="building networks", unit="recipe"):
-            try:
-                recipe.build_networks(
-                    lib, inverse='all', use_cache=config.paths.cache.networks, add_to_self=True
-                )
-                if getattr(recipe, 'errors', {}).get('network_building'):
-                    self._logger.warning(f"network building for {recipe.name} had internal errors.")
-            except Exception:
-                self._logger.error(f"unhandled error building networks for {recipe.name}")
-                self._add_item_error(recipe, 'network_building_unhandled', traceback.format_exc())
+        self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
+        if not mpaths:
+            return []
 
-    def _commit_to_database(self, items_to_merge: List[Any]):
-        db_file = Path(config.db.sqlite.path).expanduser().resolve()
-        if not db_file.exists():
-            self._logger.warning(f"db file {db_file} not found. creating new.")
-            md.create_biocompdb_sqlite(db_file, echo=False)
+        models: List[md.TrainedModel] = []
+        tid = progress.add_task("[magenta]Loading models...", total=len(mpaths))
+        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+            futures = {exe.submit(_w_load_model, (str(p), str(self.base_dir))): p for p in mpaths}
+            for fut in as_completed(futures):
+                try:
+                    models.append(fut.result())
+                except ModelLoadError as e:
+                    self._logger.error(f"Error loading model: {e}")  # e already has path
+                except Exception as e:
+                    self._logger.error(
+                        f"Critical error getting result for model {futures[fut]}", exc_info=e
+                    )
+                progress.update(tid, advance=1)
+        progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
+        return models
 
-        if not self._backup_db_if_changed():
+    def _load_figs(
+        self, progress: Progress
+    ) -> Tuple[List[md.Figure], List[md.Plot], List[md.Prediction]]:
+        self._logger.info("loading figures...")
+        figs, plots, preds = [], [], []
+        if not self.plots_dir.is_dir():
+            self._logger.warning(f"Plots dir {self.plots_dir} not found")
+            return figs, plots, preds
+
+        fig_paths = [
+            p
+            for pat in ['**/*.pdf', '**/*.png']
+            for p in self.plots_dir.rglob(pat)
+            if '__archive' not in p.as_posix()
+        ]
+        self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
+        self._plots_needing_prediction_id.clear()
+        if not fig_paths:
+            return figs, plots, preds
+
+        tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
+        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+            args_list = [
+                (str(fp), str(self.base_dir), self._metadata_exclusion_patterns) for fp in fig_paths
+            ]
+            futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
+            for fut in as_completed(futures):
+                try:
+                    fig_o, loc_ps, loc_preds, loc_ps_pred_id = fut.result()
+                    if fig_o:
+                        figs.append(fig_o)
+                        plots.extend(loc_ps)
+                        preds.extend(loc_preds)
+                        self._plots_needing_prediction_id.extend(loc_ps_pred_id)
+                except FigureProcessingError as e:
+                    self._logger.warning(f"Error processing figure: {e}")
+                    self._logger.exception(e)
+                except Exception as e:
+                    self._logger.error("Critical error processing figure future for {futures[fut]}")
+                    self._logger.exception(e)
+                progress.update(tid, advance=1)
+        progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
+        return figs, plots, preds
+
+    def _build_nets_task_tpe(
+        self, recipe: md.Recipe, lib: Any, cache_path: Path
+    ) -> Tuple[md.Recipe, Any]:
+        try:
+            return recipe, recipe.build_networks(
+                lib, inverse='all', use_cache=cache_path, add_to_self=False
+            )
+        except Exception as e:
+            self._logger.error(f"Exception in build_networks for {recipe.name}: {e}")
+            return recipe, traceback.format_exc(limit=1)
+
+    def _commit_db(self, items: List[Any], progress: Progress) -> None:
+        db_p = self._resolve_path(config.db.sqlite.path, self.base_dir)
+        if not db_p.exists():
+            self._logger.warning(f"db file {db_p} not found. creating new.")
+            md.create_biocompdb_sqlite(db_p, echo=False)
+        if not self._backup_db():
             self._logger.warning("db backup failed/skipped. proceeding cautiously.")
 
-        engine = md.get_biocompdb_sqlite_engine(db_file, echo=False)
-        self._logger.info("--- starting database commit phase ---")
-
-        with Session(engine) as session:
+        engine = md.get_biocompdb_sqlite_engine(db_p, echo=False)
+        self._logger.info("--- starting database commit ---")
+        with Session(engine) as sess:
             try:
-                # separate predictions from other items
-                predictions = [item for item in items_to_merge if isinstance(item, md.Prediction)]
-                other_items = [
-                    item for item in items_to_merge if not isinstance(item, md.Prediction)
-                ]
+                preds_commit = [i for i in items if isinstance(i, md.Prediction)]
+                others = [i for i in items if not isinstance(i, md.Prediction)]
 
-                # first commit all non-prediction items
-                for item in tqdm(other_items, desc="merging items to session", unit="item"):
+                tid_other = progress.add_task(
+                    "[db]Merging items (pre-pred)...", total=len(others), visible=self.verbose
+                )
+                for item in others:
                     try:
-                        session.merge(item)
-                    except Exception:
-                        item_id = getattr(item, 'name', getattr(item, 'fullname', str(item)))
-                        self._logger.error(
-                            f"error merging {type(item).__name__} '{item_id}'", exc_info=True
-                        )
-
-                # commit to get IDs for predictions
-                session.commit()
-
-                # now add predictions and get their IDs
-                prediction_id_map = {}
-                for pred in tqdm(predictions, desc="adding predictions", unit="prediction"):
-                    try:
-                        session.add(pred)
-                        session.flush()  # flush to get the ID
-                        key = (pred.network_name, pred.datafile_path, pred.trained_model_name)
-                        prediction_id_map[key] = pred.id
+                        sess.merge(item)
                     except Exception:
                         self._logger.error(
-                            f"error adding prediction for {pred.network_name}", exc_info=True
+                            f"Error merging {type(item).__name__} '{getattr(item, 'name', getattr(item, 'fullname', str(item)))}'",
+                            exc_info=True,
                         )
+                    if self.verbose:
+                        progress.advance(tid_other)
+                progress.update(
+                    tid_other,
+                    description="[db]Items merged (pre-pred).",
+                    completed=len(others),
+                    visible=False,
+                )
+                sess.commit()
 
-                # now add plots that reference predictions
-                if hasattr(self, '_plots_needing_prediction_id'):
-                    for plot, prediction in tqdm(
-                        self._plots_needing_prediction_id, desc="adding plots with predictions"
-                    ):
-                        key = (
-                            prediction.network_name,
-                            prediction.datafile_path,
-                            prediction.trained_model_name,
-                        )
-                        pred_id = prediction_id_map.get(key)
-                        if pred_id:
-                            plot.from_prediction = pred_id
-                            session.add(plot)
+                pred_id_map: Dict[Tuple[str, Optional[str], str], int] = {}
+                tid_preds = progress.add_task(
+                    "[db]Adding predictions...", total=len(preds_commit), visible=self.verbose
+                )
+                for pred in preds_commit:
+                    try:
+                        merged_pred = sess.merge(pred)
+                        sess.flush()  # flush to get id
+                        if merged_pred.id is not None:
+                            pred_id_map[
+                                (
+                                    merged_pred.network_name,
+                                    merged_pred.datafile_path,
+                                    merged_pred.trained_model_name,
+                                )
+                            ] = merged_pred.id
                         else:
-                            self._logger.warning(f"could not find prediction ID for plot")
+                            self._logger.error(
+                                f"Prediction id not populated for {merged_pred.network_name}"
+                            )
+                    except Exception:
+                        self._logger.error(
+                            f"Error merging prediction for {pred.network_name}", exc_info=True
+                        )
+                    if self.verbose:
+                        progress.advance(tid_preds)
+                progress.update(
+                    tid_preds,
+                    description="[db]Predictions added.",
+                    completed=len(preds_commit),
+                    visible=False,
+                )
 
-                session.commit()
+                tid_plots_links = progress.add_task(
+                    "[db]Linking/merging plots...",
+                    total=len(self._plots_needing_prediction_id),
+                    visible=self.verbose,
+                )
+                for plot, pred_ref in self._plots_needing_prediction_id:
+                    key = (
+                        pred_ref.network_name,
+                        pred_ref.datafile_path,
+                        pred_ref.trained_model_name,
+                    )
+                    if pred_id := pred_id_map.get(key):
+                        plot.from_prediction = pred_id  # type: ignore[assignment] # from_prediction is int|None
+                    else:
+                        self._logger.warning(
+                            f"Could not find committed prediction ID for plot of {pred_ref.network_name} (fig: {plot.in_figure})"
+                        )
+                    sess.merge(plot)
+                    if self.verbose:
+                        progress.advance(tid_plots_links)
+                progress.update(
+                    tid_plots_links,
+                    description="[db]Plots linked/merged.",
+                    completed=len(self._plots_needing_prediction_id),
+                    visible=False,
+                )
+
+                sess.commit()
                 self._logger.info("database transaction committed.")
-            except Exception as e:
-                self._logger.critical(f"critical error during final db commit: {e}", exc_info=True)
-                session.rollback()
-                self._logger.info("transaction rolled back.")
+            except Exception:
+                self._logger.critical(
+                    "critical error during final db commit. rolled back.", exc_info=True
+                )
+                sess.rollback()
                 raise
 
-    def run(self):
-        run_start_time = time.time()
+    def run(self) -> None:
+        start_t = time.time()
         self._logger.info(f"--- starting db update run: {datetime.now():%Y-%m-%d %H:%M:%S} ---")
+        self._logger.info(f"using {self.nworkers} parallel workers. base: {self.base_dir}")
+        proc_cats = [
+            c
+            for c, f in [
+                ("experiments", self.process_experiments),
+                ("models", self.process_models),
+                ("figures", self.process_figures),
+            ]
+            if f
+        ]
+        self._logger.info(
+            f"processing: {', '.join(proc_cats) if proc_cats else 'nothing specified'}"
+        )
+        if not proc_cats:
+            self._logger.warning("nothing to process.")
+            return
 
-        # log what will be processed
-        components = []
-        if self.process_experiments:
-            components.append("experiments")
-        if self.process_models:
-            components.append("models")
-        if self.process_figures:
-            components.append("figures")
-
-        self._logger.info(f"processing: {', '.join(components) if components else 'nothing'}")
-
-        lib = ut.load_lib()
-
-        experiments = {}
-        all_calibrations_map: Dict[str, md.Calibration] = {}
-        trained_models = []
-        figures = []
-        plots = []
-        predictions = []
-
-        if self.process_experiments:
-            experiments = self._load_experiments_from_disk()
-            if experiments:
-                self._core_processing_loop(experiments, all_calibrations_map, lib)
-            else:
-                self._logger.warning("no experiments loaded.")
-
-        if self.process_models:
-            trained_models = self._load_models_from_disk()
-
-        if self.process_figures:
-            figures, plots, predictions = self._load_figures_from_disk()
-
-        items_to_commit = (
-            list(experiments.values())
-            + list(all_calibrations_map.values())
-            + trained_models
-            + figures
-            + predictions
-            + plots
+        lib, xps_map, cals_map, models_list, figs_list, plots_f_figs, preds_f_figs = (
+            ut.load_lib(),
+            {},
+            {},
+            [],
+            [],
+            [],
+            [],
         )
 
-        if items_to_commit:
-            self._commit_to_database(items_to_commit)
-        else:
-            self._logger.info("no items to commit to database")
+        with Progress(*RICH_PROGRESS_COLUMNS, refresh_per_second=4, transient=False) as progress:
+            if self.process_experiments:
+                xps_map = self._load_xps(progress)
+                if xps_map:
+                    self._logger.info(
+                        f"Processing recipes/datafiles for {len(xps_map)} experiments..."
+                    )
+                    tid_xp_proc = progress.add_task(
+                        "[blue]Processing experiments (recipes/data)...", total=len(xps_map)
+                    )
 
-        self._logger.info(f"--- db update run finished in {time.time() - run_start_time:.2f}s ---")
+                    xp_w_args = [
+                        ExperimentWorkerArgs(
+                            exp_model=xp_obj,
+                            base_dir_s=str(self.base_dir),
+                            recipe_rel_subpath_s=self.recipe_relative_subpath,
+                            config_calib_paths=list(config.calib.paths),
+                            metadata_exclusion_patterns=self._metadata_exclusion_patterns,
+                            n_inner_workers=max(1, self.nworkers // 2 if self.nworkers > 1 else 1),
+                            verbose=self.verbose,
+                        )
+                        for xp_obj in xps_map.values()
+                    ]
+
+                    with ProcessPoolExecutor(max_workers=self.nworkers) as ppe:
+                        futures = {
+                            ppe.submit(_w_proc_xp, args): args.exp_model.name for args in xp_w_args
+                        }
+                        for fut in as_completed(futures):
+                            xp_name_ctx = futures[fut]
+                            try:
+                                _, processed_xp_obj, new_cal_ds, w_errs = fut.result()
+                                if processed_xp_obj:
+                                    xps_map[xp_name_ctx] = processed_xp_obj
+                                else:
+                                    self._logger.error(
+                                        f"Experiment worker for {xp_name_ctx} returned no experiment object."
+                                    )
+                                    continue  # should not happen
+
+                                for err_k, err_m in w_errs:
+                                    self._add_error_to_item(xps_map[xp_name_ctx], err_k, err_m)
+                                    self._logger.error(
+                                        f"Err in xp worker {xp_name_ctx} [{err_k}]: {err_m}"
+                                    )
+                                for cal_d in new_cal_ds:
+                                    cal_o = md.Calibration.model_validate(cal_d)
+                                    if cal_o.fullname in cals_map:
+                                        cals_map[cal_o.fullname].data_files.extend(
+                                            f
+                                            for f in cal_o.data_files
+                                            if f not in cals_map[cal_o.fullname].data_files
+                                        )
+                                    else:
+                                        cals_map[cal_o.fullname] = cal_o
+                            except Exception as e:
+                                self._logger.error(
+                                    f"Critical err processing result for xp {xp_name_ctx}",
+                                    exc_info=e,
+                                )
+                                if xp_name_ctx in xps_map:
+                                    self._add_error_to_item(
+                                        xps_map[xp_name_ctx],
+                                        "critical_xp_processing",
+                                        traceback.format_exc(),
+                                    )
+                            progress.update(tid_xp_proc, advance=1)
+                    progress.update(
+                        tid_xp_proc,
+                        description="[blue]Experiments (recipes/data) processed.",
+                        completed=len(xps_map),
+                    )
+
+                    all_recipes = [r for xp_val in xps_map.values() for r in xp_val.recipes]
+                    if not all_recipes:
+                        self._logger.warning(
+                            "no recipes found in any experiments. stopping experiment processing."
+                        )
+                        return
+
+                    self._logger.info(f"Building networks for {len(all_recipes)} recipes...")
+                    tid_net_bld = progress.add_task(
+                        "[green]Building networks...", total=len(all_recipes)
+                    )
+                    cache_p_nets = Path(config.paths.cache.networks)
+                    with ThreadPoolExecutor(
+                        max_workers=self.nworkers, thread_name_prefix="NetBuild"
+                    ) as tpe:
+                        futures = {
+                            tpe.submit(self._build_nets_task_tpe, r, lib, cache_p_nets): r
+                            for r in all_recipes
+                        }
+                        for fut in as_completed(futures):
+                            recipe_ctx = futures[fut]
+                            try:
+                                _, nets_or_err = fut.result()
+                                if isinstance(nets_or_err, str):
+                                    self._add_error_to_item(
+                                        recipe_ctx, 'net_build_error_str', nets_or_err
+                                    )
+                                    self._logger.warning(
+                                        f"Failed to build network for {recipe_ctx.name}: {nets_or_err[:200]}"
+                                    )
+                                elif isinstance(nets_or_err, list):
+                                    recipe_ctx.networks.extend(nets_or_err)
+                                else:
+                                    self._add_error_to_item(
+                                        recipe_ctx,
+                                        'net_build_payload_unexpected',
+                                        f"Type: {type(nets_or_err)}",
+                                    )
+                            except Exception as e:
+                                self._logger.error(
+                                    f"Critical err TPE future for {recipe_ctx.name}", exc_info=e
+                                )
+                                self._add_error_to_item(
+                                    recipe_ctx, 'net_build_critical_future', traceback.format_exc()
+                                )
+                            progress.update(tid_net_bld, advance=1)
+                    progress.update(
+                        tid_net_bld,
+                        description="[green]Networks built.",
+                        completed=len(all_recipes),
+                    )
+                else:
+                    self._logger.warning("no experiments loaded to process.")
+
+            if self.process_models:
+                models_list = self._load_models(progress)
+            if self.process_figures:
+                figs_list, plots_f_figs, preds_f_figs = self._load_figs(progress)
+
+            items_commit = [
+                i
+                for grp in [
+                    list(xps_map.values()),
+                    list(cals_map.values()),
+                    models_list,
+                    figs_list,
+                    plots_f_figs,
+                    preds_f_figs,
+                ]
+                for i in grp
+                if i
+            ]
+            if items_commit or self._plots_needing_prediction_id:
+                self._commit_db(items_commit, progress)
+            else:
+                self._logger.info("no items to commit to database.")
+
+        self._logger.info(f"--- db update run finished in {time.time() - start_t:.2f}s ---")
 
 
-def main():
-    cliprog = make_program(
+def main() -> None:
+    cli_prog = make_program(
         BiocompDBUpdater,
         name='biocomp-dbupdate',
-        description='Update the Biocomp database with the contents of the biocomp data folder.',
+        description='Update Biocomp database from biocomp data folder.',
     )
-    updater, _ = cliprog.parse_args(
-        sys.argv[1:],
-        capture_globals=False,
-    )
+    updater, _ = cli_prog.parse_args(sys.argv[1:], capture_globals=False)  # type: ignore[misc]
     updater.run()
 
 

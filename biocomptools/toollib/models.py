@@ -111,6 +111,7 @@ class DataFile(BiocompDB, table=True):
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
 
     plotted_in: List["Plot"] = Relationship(back_populates="datafile")
+    predictions: List["Prediction"] = Relationship(back_populates="datafile")
 
     @property
     def url_encoded_filepath(self):
@@ -193,6 +194,7 @@ class Network(BiocompDB, table=True):
     @classmethod
     def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
         network_info = bc.network.generate_network_info(network)
+        print(f"Network markers: {network_info['markers']}")
         if recipe_name is None:
             recipe_name = 'unknown'
         obj = cls(
@@ -244,7 +246,7 @@ class Network(BiocompDB, table=True):
                 return self._network
 
         all_net_names = '\n   - '.join([net.name for net in recipe_networks])
-        msg = f"""Network "{self.name}" not found after building recipe "{self.recipe.name}". 
+        msg = f"""Network "{self.name}" not found after building recipe "{self.recipe.name}".
             Recipe yielded the following networks: {all_net_names}"""
         logger.error(msg)
         raise ValueError(msg)
@@ -366,7 +368,7 @@ class Recipe(BiocompDB, table=True):
             msg = f"{msg}\n{traceback.format_exc()}"
             errors.append(msg)
 
-        networks: ListOr[bc.network.Network] = bc.recipe.network_from_recipe(
+        networks: Optional[ListOr[bc.network.Network]] = bc.recipe.network_from_recipe(
             None,
             lib,
             inverse=inverse,
@@ -374,6 +376,11 @@ class Recipe(BiocompDB, table=True):
             recipe_object=self.content,
             error_handler=error_handler,
         )
+
+        if networks is None:
+            logger.error(f"Recipe {self.name} did not yield any networks.")
+            return []
+
         networks = networks if isinstance(networks, list) else [networks]
         for net in networks:
             net.metadata['recipe_name'] = self.name
@@ -452,6 +459,8 @@ class TrainedModel(BiocompDB, table=True):
         },
     )
 
+    predictions_made: List["Prediction"] = Relationship(back_populates="trained_model")
+
 
 class Prediction(BiocompDB, table=True):
     id: int = Field(default=None, primary_key=True)
@@ -468,8 +477,8 @@ class Prediction(BiocompDB, table=True):
     extra_stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     network: Optional["Network"] = Relationship()
-    datafile: Optional["DataFile"] = Relationship()
-    trained_model: Optional["TrainedModel"] = Relationship()
+    datafile: Optional["DataFile"] = Relationship(back_populates="predictions")
+    trained_model: Optional["TrainedModel"] = Relationship(back_populates="predictions_made")
 
     plotted_in: List["Plot"] = Relationship(back_populates="prediction")
 
@@ -489,6 +498,11 @@ class Plot(BiocompDB, table=True):
     in_figure: Optional[str] = Field(foreign_key="figure.file", default=None)
     at_location: Optional[AxPosition] = Field(sa_column=Column(JSON))
 
+    network_name: Optional[str] = None
+    plot_method: Optional[str] = None
+    input_names: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    output_name: Optional[str] = None
+    datasource_type: Optional[str] = None
     meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     prediction: Optional[Prediction] = Relationship(back_populates="plotted_in")
@@ -497,7 +511,6 @@ class Plot(BiocompDB, table=True):
 
 class Figure(BiocompDB, table=True):
     file: str = Field(primary_key=True)
-
     meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 

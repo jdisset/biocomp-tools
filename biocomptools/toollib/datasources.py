@@ -135,12 +135,18 @@ class DBSource(DataSource, NetworkSet):
             logger.debug(f"DBSource: getting XY data for network {network.name}")
             try:
                 X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
+                print(
+                    f"DBSource: got XY data for network {network.name} with shapes {X.shape}, {Y.shape}"
+                )
             except Exception as e:
                 logger.error(f"Error getting XY data for network {network.name}: {e}")
                 logger.exception(e)
                 return None, None
             assert isinstance(X, np.ndarray)
             assert isinstance(Y, np.ndarray)
+            print(
+                f"DBSource: got XY data for network {network.name} with shapes {X.shape}, {Y.shape}"
+            )
             return X, Y
 
         try:
