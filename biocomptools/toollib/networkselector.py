@@ -268,25 +268,6 @@ class NetworkSet(BaseModel):
 
     @field_validator('content', mode='before')
     @classmethod
-    def route_content(cls, v):
-        logger.debug(f"From class '{cls.__name__}' routing content: {v}")
-
-        def route(obj):
-            if not isinstance(obj, dict):
-                return obj  # already parsed
-            if 'datafile_path' in obj:
-                return NetworkDataPair(**obj)
-            elif 'content' in obj:
-                return NetworkSet(**obj)
-            else:
-                return NetworkSelector(**obj)
-
-        res = [route(item) for item in v]
-        logger.debug(f"Routed to types {[type(r).__name__ for r in res]}")
-        return res
-
-    @field_validator('content', mode='before')
-    @classmethod
     def route_content(cls, v: Any, info):
         logger.debug(
             f"From class '{cls.__name__}' (field '{info.field_name}') routing content: {v}"
