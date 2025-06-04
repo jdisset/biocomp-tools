@@ -1,7 +1,8 @@
 import mlflow
 import re
 import fnmatch
-from pathlib import Path
+import os
+
 import sys
 from typing import Annotated, List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,6 +11,7 @@ from dracon import Arg, make_program
 from mlflow.entities import FileInfo
 from mlflow.tracking import MlflowClient
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 _is_main_script = False
@@ -59,7 +61,7 @@ class ArtifactDownloaderConfig(BaseModel):
     @field_validator('output_dir', mode='before')
     @classmethod
     def _resolve_output_dir(cls, v: Any) -> Path:
-        return Path(v).resolve()
+        return Path(v).expanduser().resolve()
 
     def _list_all_artifacts_recursive(
         self, client: MlflowClient, run_id: str, current_relative_path: Optional[str] = None

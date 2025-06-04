@@ -25,7 +25,7 @@ plot_config:
         cube_edge_props:
           bottom_right:
             zaxis_title:
-              offset: [55, 0]
+              offset: [50, 0]
 
         smooth_2d_params:
           knn_grid_params:

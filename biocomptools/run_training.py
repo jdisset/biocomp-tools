@@ -209,7 +209,7 @@ class TrainingProgram(BaseModel):
             'biocomp_hash': hashes.get('biocomp', 'unknown'),
             'biocomptools_hash': hashes.get('biocomptools', 'unknown'),
             'dracon_hash': hashes.get('dracon', 'unknown'),
-            'yaml_dump': self._yamldump,
+            'model_dump': self._modeldump,
         }
 
         self._metadata.update(self.metadata)
@@ -316,7 +316,7 @@ class TrainingProgram(BaseModel):
 
             local_metadata = metadata.copy()
             local_metadata['replicate_number'] = best_model_id
-            local_metadata['end_loss'] = end_loss
+            local_metadata['end_loss'] = float(end_loss)
 
             model = BiocompModel(
                 compute_config=compute_conf,

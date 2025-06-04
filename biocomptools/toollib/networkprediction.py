@@ -857,10 +857,17 @@ class NetworkPrediction(DataSource):
         if isinstance(self.input_order, list):
             # single input order for all networks
             if all(isinstance(x, int) for x in self.input_order):
+                print(f"input_order is a list of integers: {self.input_order}")
                 logger.debug(f"using same input_order {self.input_order} for all networks")
                 return [self.input_order] * len(self.network_model.network)
 
             if len(self.input_order) != len(self.network_model.network):
+                # if it's a list of a single element, use it for all networks
+                if len(self.input_order) == 1 and isinstance(self.input_order[0], list):
+                    logger.debug(
+                        f"input_order is a single list, using it for all {len(self.network_model.network)} networks"
+                    )
+                    return [self.input_order[0]] * len(self.network_model.network)
                 raise ValueError(
                     f"input order list has {len(self.input_order)} items but there are "
                     f"{len(self.network_model.network)} networks"

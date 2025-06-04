@@ -448,6 +448,10 @@ class NetworkDataPair(BiocompDB, table=True):
 class TrainedModel(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     path_to_model: ForcedStr
+    run_name: Optional[str] = Field(default=None)
+    experiment_name: Optional[str] = Field(default=None)
+    end_loss: Optional[float] = Field(default=None)
+
     training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     training_set: List["NetworkDataPair"] = Relationship(
@@ -486,16 +490,14 @@ class Prediction(BiocompDB, table=True):
 class AxPosition(BaseModel):
     row: int
     col: int
-    flat_index: Optional[int] = None
 
 
 class Plot(BiocompDB, table=True):
-    id: int = Field(default=None, primary_key=True)
+    in_figure: str = Field(foreign_key="figure.file", primary_key=True)
+    position: int = Field(default=0, primary_key=True)
 
     from_prediction: Optional[int] = Field(foreign_key="prediction.id", default=None)
     from_datafile: Optional[str] = Field(foreign_key="datafile.file", default=None)
-
-    in_figure: Optional[str] = Field(foreign_key="figure.file", default=None)
     at_location: Optional[AxPosition] = Field(sa_column=Column(JSON))
 
     network_name: Optional[str] = None

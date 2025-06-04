@@ -176,6 +176,7 @@ def make_json_ready(obj):
     """Roundtrip to json to iron out any weakref/unpickleable issues with DeferredNodes"""
     import json
     from dracon.dracontainer import Mapping, Sequence
+    import numpy as np
 
     def convert(o):
         if isinstance(o, DeferredNode):
@@ -186,6 +187,10 @@ def make_json_ready(obj):
             return {k: v for k, v in o.items()}
         elif isinstance(o, Sequence):
             return [i for i in o]
+        elif isinstance(o, np.ndarray):
+            return o.tolist()
+        elif isinstance(o, (np.integer, np.floating)):
+            return o.item()
         else:
             logger.debug(f"Unhandled type during json serialization: {type(o)}")
             return str(type(o))

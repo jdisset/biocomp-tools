@@ -46,8 +46,31 @@ class Regex(str):
         return super().__new__(cls, string)
 
 
+class iRegex(str):
+    """A string that should be treated as a case-insensitive regex pattern."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(cls),
+                core_schema.chain_schema(
+                    [
+                        core_schema.str_schema(),
+                        core_schema.no_info_plain_validator_function(cls),
+                    ]
+                ),
+            ]
+        )
+
+    def __new__(cls, string):
+        return super().__new__(cls, string)
+
+
 def maybe_regex(s: str) -> str:
-    if isinstance(s, Regex):
+    if isinstance(s, (Regex, iRegex)):
         return s
     else:
         import re
@@ -61,9 +84,9 @@ class NetworkSelector(BaseModel):
     This class allows to batch select networks based on their names, recipes, experiments, etc.
     """
 
-    experiment_name: Optional[str | Regex] = None
-    recipe_name: Optional[str | Regex] = None
-    calibration_name: Optional[str | Regex] = None
+    experiment_name: Optional[str | Regex | iRegex] = None
+    recipe_name: Optional[str | Regex | iRegex] = None
+    calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
 
     def get_networkdata_ids(self, session) -> List[NetworkDataPair]:
@@ -74,7 +97,7 @@ class NetworkSelector(BaseModel):
             session: The database session
 
         Returns:
-            List[NetworkDataId]: List of network data identifiers
+            List[NetworkDataPair]: List of network data pairs matching the filters.
 
         Raises:
             ValueError: If no networks are found or if query execution fails
@@ -96,19 +119,24 @@ class NetworkSelector(BaseModel):
 
             if self.experiment_name:
                 logger.debug(f"Applying experiment filter: {self.experiment_name}")
-                if isinstance(self.experiment_name, Regex):
+                if isinstance(self.experiment_name, iRegex):
+                    pattern = f"(?i){self.experiment_name}"
+                    query = query.where(col(Experiment.name).regexp_match(pattern))
+                elif isinstance(self.experiment_name, Regex):
                     query = query.where(col(Experiment.name).regexp_match(self.experiment_name))
                 else:
                     query = query.where(Experiment.name == self.experiment_name)
 
             if self.recipe_name:
-                if isinstance(self.recipe_name, Regex):
-                    # for regex, we'll just use the pattern directly since it might include custom matching
+                if isinstance(self.recipe_name, iRegex):
+                    # add case-insensitive flag to pattern
+                    pattern = f"(?i){self.recipe_name}"
+                    query = query.where(col(Recipe.name).regexp_match(pattern))
+                elif isinstance(self.recipe_name, Regex):
                     query = query.where(col(Recipe.name).regexp_match(self.recipe_name))
                 else:
-                    # for exact string match, we need to find the recipe with format "{exp_name}_{recipe_name}"
                     if self.experiment_name:
-                        if isinstance(self.experiment_name, Regex):
+                        if isinstance(self.experiment_name, (Regex, iRegex)):
                             # if experiment_name is a regex, we can't construct the exact recipe name
                             # so we'll need to use a regex that matches the end of the string
                             query = query.where(
@@ -163,11 +191,16 @@ class NetworkSelector(BaseModel):
                         )
 
                         # add calibration name filter based on type
-                        if isinstance(self.calibration_name, Regex):
+                        if isinstance(self.calibration_name, iRegex):
+                            # add case-insensitive flag to pattern
+                            pattern = f"(?i){self.calibration_name}"
+                            datafile_query = datafile_query.where(
+                                col(DataFile.calibration_name).regexp_match(pattern)
+                            )
+                        elif isinstance(self.calibration_name, Regex):
                             datafile_query = datafile_query.where(
                                 col(DataFile.calibration_name).regexp_match(self.calibration_name)
                             )
-
                         else:
                             datafile_query = datafile_query.where(
                                 DataFile.calibration_name == self.calibration_name
@@ -285,6 +318,9 @@ class NetworkSet(BaseModel):
             if isinstance(obj_in_list, (NetworkDataPair, NetworkSelector, NetworkSet)):
                 return obj_in_list
 
+            if hasattr(obj_in_list, 'network_name') and hasattr(obj_in_list, 'datafile_path'):
+                return obj_in_list
+
             if isinstance(obj_in_list, Mapping):
                 dict_obj = dict(obj_in_list)
                 if 'datafile_path' in dict_obj:
@@ -322,7 +358,7 @@ class NetworkSet(BaseModel):
                 n.run_selectors(sess)
                 new_content.extend(n.content)
             else:
-                assert isinstance(n, NetworkDataPair), f"Expected NetworkDataId but got {type(n)}"
+                assert isinstance(n, NetworkDataPair), f"Expected NetworkDataPair but got {type(n)}"
                 new_content.append(n)
         self.content = new_content
         logger.debug(f"Finished running selectors. Found {len(self.content)} items")
@@ -684,7 +720,7 @@ def build_data_manager(
     data_cache=config.paths.cache.data,
 ) -> DataManager:
     assert all([isinstance(n, NetworkDataPair) for n in dataset.content]), (
-        "By now, dataset should only contain NetworkDataId objects"
+        "By now, dataset should only contain NetworkDataPair objects"
     )
 
     networks, datafiles = zip(*dataset.get_networks_and_data(db_session))

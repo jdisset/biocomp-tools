@@ -31,7 +31,7 @@ class GridPlotConfig(BaseModel):
     row: Optional[int] = None  # None means all rows
     col: Optional[int] = None  # None means all columns
     plot_config: Optional[PlotConfig] = None
-    post_plot_callbacks: List[PartialFunction] = []
+    # post_plot_callbacks: List[PartialFunction] = []
 
     def matches(self, r: int, c: int, grid_size: tuple[int, int]) -> bool:
         """Check if this config applies to the given grid position"""
@@ -179,7 +179,7 @@ ANNOTATION_STYLE = {
 }
 
 
-class uORFMatrixFigure(Figure):
+class UORFMatrixFigure(Figure):
     """A figure that automatically distributes data across a matrix based on uORF values"""
 
     # Input data as list of PlotData objects
@@ -249,13 +249,9 @@ class uORFMatrixFigure(Figure):
 
         return config
 
-    def get_uorf_values(self, data: PlotData) -> Tuple[float, float]:
-        # (ERN, target)
-        return tuple(data.metadata['network_info']['uorf_values'][0])
-
     def create_grid_cells(self) -> List[UORFCell]:
         """Create matrix cells with their corresponding data"""
-        all_pairs = {self.get_uorf_values(data) for data in self.plot_data}
+        all_pairs = {get_uorf_values(data) for data in self.plot_data}
 
         ax0 = self.uorf_axis_order[0]
         ax1 = self.uorf_axis_order[1]
@@ -265,7 +261,7 @@ class uORFMatrixFigure(Figure):
 
         cells = []
         for data in self.plot_data:
-            pair = self.get_uorf_values(data)
+            pair = get_uorf_values(data)
             row = unique_vals_0.index(pair[ax0])
             col = unique_vals_1.index(pair[ax1])
             cells.append(UORFCell(row, col, pair, data))
@@ -279,12 +275,12 @@ class uORFMatrixFigure(Figure):
             plot_method=PartialFunction(func='biocomp.plotutils.smooth', kwargs={'force_dim': 2}),
         )
 
-        task.ax = ax
+        task._ax = ax
         task.plot_method.kwargs['plot_data'] = cell.data
 
-        for config in DEFAULT_GRID_PLOTCONFIGS + self.grid_plotconfigs:
-            if config.matches(cell.row, cell.col, grid_size):
-                task.post_plot_callbacks += config.post_plot_callbacks
+        # for config in DEFAULT_GRID_PLOTCONFIGS + self.grid_plotconfigs:
+        #     if config.matches(cell.row, cell.col, grid_size):
+        #         task.post_plot_callbacks += config.post_plot_callbacks
 
         return task
 
@@ -409,7 +405,7 @@ class uORFMatrixFigure(Figure):
                 'prediction_stats' in cell.data.metadata
                 and 'rmse' in cell.data.metadata['prediction_stats']
             ):
-                rmse = cell.data.metadata['prediction_stats']['rmse']
+                rmse = cell.data.metadata['prediction_stats']['grid_rmse']
                 rmses.append(rmse)
                 ax = figax.ax[cell.row][cell.col]
                 ax.text(
@@ -428,7 +424,7 @@ class uORFMatrixFigure(Figure):
             fig = figax.figure
             fig.text(
                 0.5,
-                0.95,
+                0.97,
                 f"Overall RMSE: {overall_rmse:.3f}",
                 fontsize=self.rmse_fontsize,
                 ha='center',
@@ -545,6 +541,8 @@ class uORFMatrixFigure(Figure):
 
             figax = self.figure_spec.make_figure()
 
+            metadata = {}
+            metadata['plot_tasks'] = []
             for i, cell in enumerate(cells):
                 ax = figax.ax[cell.row][cell.col]
                 task = self.create_plot_task_for_cell(cell, ax, grid_size)
@@ -553,7 +551,8 @@ class uORFMatrixFigure(Figure):
                     task.plot_method = dummy_partial_func
 
                 try:
-                    task.run()
+                    pt_metadata = task.run()
+                    metadata['plot_tasks'].append(pt_metadata)
                     logger.info(f"Executed plot task for cell {cell} ({i + 1}/{len(cells)})")
                 except Exception as e:
                     logger.error(f"Error executing plot task {task} for cell {cell}: {e}")
@@ -562,8 +561,8 @@ class uORFMatrixFigure(Figure):
 
             self.add_grid_lines(figax, grid_size)
             self.final_touches(figax, grid_size, cells)
-
-        self.figure_spec.finalize(figax)
+            self.figure_spec.metadata = metadata
+            self.figure_spec.finalize(figax)
 
 
 ## {{{                    --     uorf bundle helper     --
@@ -572,7 +571,7 @@ class uORFMatrixFigure(Figure):
 def bundle_uorf_data(
     plot_data: List[PlotData],
     uorf_values: List[float] = [0, 5, 10, 20, 30, 40, 50, 60, 80],
-    same_xp: bool = True,
+    same_xp: bool = False,
 ) -> List[List[PlotData]]:
     """
     Analyze a list of PlotData and create bundles for uORF matrix figures.
@@ -664,6 +663,21 @@ def get_ern_info(bundle: List[PlotData]) -> Dict[str, str]:
     return {
         'ern_name': ern_names[0],
         'experiment': bundle[0].metadata.get('experiment', {}).get('name', 'unknown'),
+    }
+
+
+def get_uorf_values(data: PlotData) -> Tuple[float, float]:
+    # (ERN, target)
+    return tuple(data.metadata['network_info']['uorf_values'][0])
+
+
+def extract_uorf_info(network):
+    uvals = network.network_info.get('uorf_values', None)
+    if not uvals:
+        return None
+    return {
+        'uorf_values': uvals[0],
+        'ern_name': network.network_info.get('ern_names', None)[0],
     }
 
 

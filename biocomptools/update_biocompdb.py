@@ -98,6 +98,9 @@ def _w_load_model(args: Tuple[str, str]) -> md.TrainedModel:
         return md.TrainedModel(
             name=getattr(biocomp_model, 'signature', mpath.stem),
             path_to_model=mpath.relative_to(base_dir).as_posix(),
+            run_name=metadata.get('run_name', None),
+            experiment_name=metadata.get('experiment_name', None),
+            end_loss=metadata.get('end_loss', None),
             training_config=metadata,
             training_set=training_set,
         )
@@ -250,7 +253,7 @@ def _proc_plot_task(
     net_name = task.get('network_name') or task.get('network', {}).get('name')
     plot_args = {
         'in_figure': fig_file,
-        'at_location': {'row': 0, 'col': task_idx},
+        'position': task_idx,
         'network_name': net_name,
         'plot_method': task.get('plot_method'),
         'input_names': task.get('input_names', []),
@@ -283,7 +286,6 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
         metadata = _extract_file_meta(fig_path)
         if not metadata:
             return None, [], [], []
-
         rel_path = fig_path.relative_to(base_dir).as_posix()
         fig_meta_content = metadata.get('FigureMetadata', {})
         cleaned_fig_meta = {k: v for k, v in metadata.items() if k != 'FigureMetadata'}
@@ -291,16 +293,38 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
             cleaned_fig_meta['FigureMetadata'] = {
                 k: v for k, v in fig_meta_content.items() if k != 'plot_tasks'
             }
-
         figure = md.Figure(file=rel_path, meta=cleaned_fig_meta)
         l_plots, l_preds, l_plots_need_id = [], [], []
-        for i, task_data in enumerate(fig_meta_content.get('plot_tasks', [])):
+        ptasks = fig_meta_content.get('plot_tasks', [])
+        should_debug = False
+        if len(ptasks) == 0:
+            logging.getLogger('biocomp_db').warning(
+                f"No plot tasks found in figure {fig_path.name}. "
+                "This may indicate an incomplete or improperly formatted figure."
+            )
+
+        elif len(ptasks) > 10:
+            logging.getLogger('biocomp_db').warning(
+                f"Figure {fig_path.name} has {len(ptasks)} plot tasks. "
+            )
+            should_debug = True
+        for i, task_data in enumerate(ptasks):
             plot, pred = _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns)
             if plot:
                 (
                     l_preds.append(pred),
                     l_plots_need_id.append((plot, pred)),
                 ) if pred else l_plots.append(plot)
+            if should_debug:
+                print(f"Processed plot {i + 1}/{len(ptasks)}: {plot} with prediction: {pred}")
+                print(f"Plot metadata: {plot.meta if plot else 'None'}, ")
+
+        if should_debug:
+            print(
+                f"Processed {len(l_plots)} plots and {len(l_preds)} predictions from {fig_path.name}."
+            )
+            print(f"Plots needing prediction ID: {len(l_plots_need_id)}")
+
         return figure, l_plots, l_preds, l_plots_need_id
     except Exception as e:
         if isinstance(e, FigureProcessingError):

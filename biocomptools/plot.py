@@ -29,7 +29,7 @@ from biocomptools.toollib.networkprediction import NetworkPrediction
 
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
-from biocomptools.toollib.figuremakers.uorfmatrixfigure import uORFMatrixFigure, bundle_uorf_data
+from biocomptools.toollib.figuremakers.uorfmatrixfigure import UORFMatrixFigure, bundle_uorf_data, get_uorf_values, extract_uorf_info,
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 
 from biocomptools.toollib.networkselector import (
@@ -102,10 +102,12 @@ DEFAULT_TYPES = [
     NetworkSetDifference,
     PartialFunction,
     DataRescaler,
-    uORFMatrixFigure,
+    UORFMatrixFigure,
     InnerNodesFigure,
     InnerNodesFigureSpec,
     bundle_uorf_data,
+    get_uorf_values,
+    extract_uorf_info,
     NetworkFilter,
     CleanupFilter,
     CustomFilter,
