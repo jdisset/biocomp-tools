@@ -111,7 +111,6 @@ class DataFile(BiocompDB, table=True):
     recipe: Optional["Recipe"] = Relationship(back_populates="data_files")
 
     plotted_in: List["Plot"] = Relationship(back_populates="datafile")
-    predictions: List["Prediction"] = Relationship(back_populates="datafile")
 
     @property
     def url_encoded_filepath(self):
@@ -463,28 +462,10 @@ class TrainedModel(BiocompDB, table=True):
         },
     )
 
-    predictions_made: List["Prediction"] = Relationship(back_populates="trained_model")
-
-
-class Prediction(BiocompDB, table=True):
-    id: int = Field(default=None, primary_key=True)
-    network_name: str = Field(foreign_key="network.name")
-    datafile_path: Optional[str] = Field(foreign_key="datafile.file", default=None)
-
-    trained_model_name: str = Field(foreign_key="trainedmodel.name")
-
-    mse: Optional[float] = None
-    grid_mse: Optional[float] = None
-    normalized_grid_mse: Optional[float] = None
-    n_points: Optional[int] = None
-
-    extra_stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
-
-    network: Optional["Network"] = Relationship()
-    datafile: Optional["DataFile"] = Relationship(back_populates="predictions")
-    trained_model: Optional["TrainedModel"] = Relationship(back_populates="predictions_made")
-
-    plotted_in: List["Plot"] = Relationship(back_populates="prediction")
+    prediction_plots: List["Plot"] = Relationship(
+        back_populates="trained_model",
+        sa_relationship_kwargs={"foreign_keys": "[Plot.prediction_trained_model_name]"},
+    )
 
 
 class AxPosition(BaseModel):
@@ -496,7 +477,6 @@ class Plot(BiocompDB, table=True):
     in_figure: str = Field(foreign_key="figure.file", primary_key=True)
     position: int = Field(default=0, primary_key=True)
 
-    from_prediction: Optional[int] = Field(foreign_key="prediction.id", default=None)
     from_datafile: Optional[str] = Field(foreign_key="datafile.file", default=None)
     at_location: Optional[AxPosition] = Field(sa_column=Column(JSON))
 
@@ -507,8 +487,31 @@ class Plot(BiocompDB, table=True):
     datasource_type: Optional[str] = None
     meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
-    prediction: Optional[Prediction] = Relationship(back_populates="plotted_in")
+    # prediction data embedded directly in plot
+    prediction_network_name: Optional[str] = None
+    prediction_datafile_path: Optional[str] = None  # data used to query the model
+    prediction_trained_model_name: Optional[str] = Field(
+        foreign_key="trainedmodel.name", default=None
+    )
+    prediction_mse: Optional[float] = None
+    prediction_grid_mse: Optional[float] = None
+    prediction_normalized_grid_mse: Optional[float] = None
+    prediction_n_points: Optional[int] = None
+    prediction_extra_stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    # relationships
     datafile: Optional[DataFile] = Relationship(back_populates="plotted_in")
+    trained_model: Optional["TrainedModel"] = Relationship(
+        back_populates="prediction_plots",
+        sa_relationship_kwargs={"foreign_keys": "[Plot.prediction_trained_model_name]"},
+    )
+
+    @property
+    def has_prediction(self) -> bool:
+        return (
+            self.prediction_network_name is not None
+            and self.prediction_trained_model_name is not None
+        )
 
 
 class Figure(BiocompDB, table=True):

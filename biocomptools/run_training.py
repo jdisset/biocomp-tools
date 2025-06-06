@@ -193,19 +193,15 @@ class TrainingProgram(BaseModel):
 
     def gen_metadata(self):
         import os
+        import socket
 
         starttime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        def get_hostmachine():
-            import socket
-
-            return socket.gethostname()
 
         hashes = get_package_git_hashes(['dracon', 'biocomp', 'biocomptools'])
 
         self._metadata = {
             'start_time': starttime,
-            'host': f"{os.environ.get('USER')}@{get_hostmachine()}",
+            'host': f"{os.environ.get('USER')}@{socket.gethostname()}",
             'biocomp_hash': hashes.get('biocomp', 'unknown'),
             'biocomptools_hash': hashes.get('biocomptools', 'unknown'),
             'dracon_hash': hashes.get('dracon', 'unknown'),

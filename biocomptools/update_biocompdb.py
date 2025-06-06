@@ -36,9 +36,7 @@ from biocomptools.toollib.common import config
 from dracon.commandline import make_program, Arg
 
 ProcessDatafileResult: TypeAlias = Tuple[md.DataFile, str, Dict[str, Any]]
-FigureProcessorResult: TypeAlias = Tuple[
-    Optional[md.Figure], List[md.Plot], List[md.Prediction], List[Tuple[md.Plot, md.Prediction]]
-]
+FigureProcessorResult: TypeAlias = Tuple[Optional[md.Figure], List[md.Plot]]
 ExperimentWorkerResult: TypeAlias = Tuple[
     str, Optional[md.Experiment], List[Dict[str, Any]], List[Tuple[str, str]]
 ]
@@ -79,6 +77,7 @@ class ExperimentWorkerArgs(BaseModel):
     config_calib_paths: List[str]
     metadata_exclusion_patterns: List[str]
     n_inner_workers: int
+    delete_existing: bool = True
     verbose: bool
     model_config = {'arbitrary_types_allowed': True}
 
@@ -248,9 +247,11 @@ def clean_dict(data: Any, patterns: List[str], cur_path: str = '') -> Any:
 
 def _proc_plot_task(
     task: dict, fig_file: str, task_idx: int, patterns: List[str]
-) -> Tuple[Optional[md.Plot], Optional[md.Prediction]]:
+) -> Optional[md.Plot]:
     ds_type = task.get('datasource_type')
     net_name = task.get('network_name') or task.get('network', {}).get('name')
+
+    # base plot args
     plot_args = {
         'in_figure': fig_file,
         'position': task_idx,
@@ -261,22 +262,32 @@ def _proc_plot_task(
         'datasource_type': ds_type,
         'meta': clean_dict(dict(task), patterns),
     }
+
     if ds_type == 'database' and (df_path := task.get('datafile', {}).get('file')):
-        return md.Plot(from_datafile=df_path, **plot_args), None
-    if ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
+        return md.Plot(from_datafile=df_path, **plot_args)
+
+    elif ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
         pred_stats = task.get('prediction_stats', {})
-        pred = md.Prediction(
-            network_name=net_name,
-            datafile_path=task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
-            trained_model_name=model_sig,
-            mse=pred_stats.get('mse'),
-            grid_mse=pred_stats.get('grid_mse'),
-            normalized_grid_mse=pred_stats.get('normalized_grid_mse', pred_stats.get('grid_mse')),
-            n_points=pred_stats.get('eval_npoints'),
-            extra_stats=pred_stats,
+        # embed prediction data directly in plot
+        plot_args.update(
+            {
+                'prediction_network_name': net_name,
+                'prediction_datafile_path': task.get('extra_prediction_info', {})
+                .get('datafile', {})
+                .get('file'),
+                'prediction_trained_model_name': model_sig,
+                'prediction_mse': pred_stats.get('mse'),
+                'prediction_grid_mse': pred_stats.get('grid_mse'),
+                'prediction_normalized_grid_mse': pred_stats.get(
+                    'normalized_grid_mse', pred_stats.get('grid_mse')
+                ),
+                'prediction_n_points': pred_stats.get('eval_npoints'),
+                'prediction_extra_stats': pred_stats,
+            }
         )
-        return md.Plot(from_prediction=None, **plot_args), pred
-    return None, None
+        return md.Plot(**plot_args)
+
+    return None
 
 
 def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorResult:
@@ -285,7 +296,8 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
     try:
         metadata = _extract_file_meta(fig_path)
         if not metadata:
-            return None, [], [], []
+            return None, []
+
         rel_path = fig_path.relative_to(base_dir).as_posix()
         fig_meta_content = metadata.get('FigureMetadata', {})
         cleaned_fig_meta = {k: v for k, v in metadata.items() if k != 'FigureMetadata'}
@@ -293,39 +305,34 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
             cleaned_fig_meta['FigureMetadata'] = {
                 k: v for k, v in fig_meta_content.items() if k != 'plot_tasks'
             }
+
         figure = md.Figure(file=rel_path, meta=cleaned_fig_meta)
-        l_plots, l_preds, l_plots_need_id = [], [], []
+        plots = []
         ptasks = fig_meta_content.get('plot_tasks', [])
         should_debug = False
+
         if len(ptasks) == 0:
             logging.getLogger('biocomp_db').warning(
                 f"No plot tasks found in figure {fig_path.name}. "
                 "This may indicate an incomplete or improperly formatted figure."
             )
-
         elif len(ptasks) > 10:
             logging.getLogger('biocomp_db').warning(
-                f"Figure {fig_path.name} has {len(ptasks)} plot tasks. "
+                f"Figure {fig_path.name} has {len(ptasks)} plot tasks."
             )
             should_debug = True
+
         for i, task_data in enumerate(ptasks):
-            plot, pred = _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns)
-            if plot:
-                (
-                    l_preds.append(pred),
-                    l_plots_need_id.append((plot, pred)),
-                ) if pred else l_plots.append(plot)
-            if should_debug:
-                print(f"Processed plot {i + 1}/{len(ptasks)}: {plot} with prediction: {pred}")
-                print(f"Plot metadata: {plot.meta if plot else 'None'}, ")
+            if plot := _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns):
+                plots.append(plot)
+                if should_debug:
+                    print(f"Processed plot {i + 1}/{len(ptasks)}: {plot}")
+                    print(f"Plot has prediction: {plot.has_prediction}")
 
         if should_debug:
-            print(
-                f"Processed {len(l_plots)} plots and {len(l_preds)} predictions from {fig_path.name}."
-            )
-            print(f"Plots needing prediction ID: {len(l_plots_need_id)}")
+            print(f"Processed {len(plots)} plots from {fig_path.name}.")
 
-        return figure, l_plots, l_preds, l_plots_need_id
+        return figure, plots
     except Exception as e:
         if isinstance(e, FigureProcessingError):
             raise
@@ -340,7 +347,7 @@ def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
         xp.recipes = xp.find_recipes(path_prefix=base_dir, recipe_subpath=args.recipe_rel_subpath_s)
         logger.debug(f"Recipes found by find_recipes for {xp.name}: {len(xp.recipes)}")
     except Exception as e:
-        logger.error("Error finding recipes for experiment {xp.name}")
+        logger.error(f"Error finding recipes for experiment {xp.name}")
         logger.exception(e)
         local_errors.append(('recipe_finding', f"Exp '{xp.name}': {e}"))
         xp.recipes = []
@@ -448,9 +455,6 @@ class BiocompDBUpdater(BaseModel):
             '**/datafile/attrs',
             '**/calibration',
         ]
-    )
-    _plots_needing_prediction_id: List[Tuple[md.Plot, md.Prediction]] = PrivateAttr(
-        default_factory=list
     )
 
     @staticmethod
@@ -619,14 +623,12 @@ class BiocompDBUpdater(BaseModel):
         progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
         return models
 
-    def _load_figs(
-        self, progress: Progress
-    ) -> Tuple[List[md.Figure], List[md.Plot], List[md.Prediction]]:
+    def _load_figs(self, progress: Progress) -> Tuple[List[md.Figure], List[md.Plot]]:
         self._logger.info("loading figures...")
-        figs, plots, preds = [], [], []
+        figs, plots = [], []
         if not self.plots_dir.is_dir():
             self._logger.warning(f"Plots dir {self.plots_dir} not found")
-            return figs, plots, preds
+            return figs, plots
 
         fig_paths = [
             p
@@ -635,9 +637,8 @@ class BiocompDBUpdater(BaseModel):
             if '__archive' not in p.as_posix()
         ]
         self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
-        self._plots_needing_prediction_id.clear()
         if not fig_paths:
-            return figs, plots, preds
+            return figs, plots
 
         tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
         with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
@@ -647,21 +648,21 @@ class BiocompDBUpdater(BaseModel):
             futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
             for fut in as_completed(futures):
                 try:
-                    fig_o, loc_ps, loc_preds, loc_ps_pred_id = fut.result()
-                    if fig_o:
-                        figs.append(fig_o)
-                        plots.extend(loc_ps)
-                        preds.extend(loc_preds)
-                        self._plots_needing_prediction_id.extend(loc_ps_pred_id)
+                    fig_obj, plots_list = fut.result()
+                    if fig_obj:
+                        figs.append(fig_obj)
+                        plots.extend(plots_list)
                 except FigureProcessingError as e:
                     self._logger.warning(f"Error processing figure: {e}")
                     self._logger.exception(e)
                 except Exception as e:
-                    self._logger.error("Critical error processing figure future for {futures[fut]}")
+                    self._logger.error(
+                        f"Critical error processing figure future for {futures[fut]}"
+                    )
                     self._logger.exception(e)
                 progress.update(tid, advance=1)
         progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
-        return figs, plots, preds
+        return figs, plots
 
     def _build_nets_task_tpe(
         self, recipe: md.Recipe, lib: Any, cache_path: Path
@@ -676,6 +677,9 @@ class BiocompDBUpdater(BaseModel):
 
     def _commit_db(self, items: List[Any], progress: Progress) -> None:
         db_p = self._resolve_path(config.db.sqlite.path, self.base_dir)
+        if getattr(self, "delete_existing", False) and db_p.exists():
+            self._logger.warning(f"Deleting existing database at {db_p}")
+            db_p.unlink()
         if not db_p.exists():
             self._logger.warning(f"db file {db_p} not found. creating new.")
             md.create_biocompdb_sqlite(db_p, echo=False)
@@ -686,13 +690,10 @@ class BiocompDBUpdater(BaseModel):
         self._logger.info("--- starting database commit ---")
         with Session(engine) as sess:
             try:
-                preds_commit = [i for i in items if isinstance(i, md.Prediction)]
-                others = [i for i in items if not isinstance(i, md.Prediction)]
-
-                tid_other = progress.add_task(
-                    "[db]Merging items (pre-pred)...", total=len(others), visible=self.verbose
+                tid_commit = progress.add_task(
+                    "[db]Merging items...", total=len(items), visible=self.verbose
                 )
-                for item in others:
+                for item in items:
                     try:
                         sess.merge(item)
                     except Exception:
@@ -701,75 +702,13 @@ class BiocompDBUpdater(BaseModel):
                             exc_info=True,
                         )
                     if self.verbose:
-                        progress.advance(tid_other)
+                        progress.advance(tid_commit)
                 progress.update(
-                    tid_other,
-                    description="[db]Items merged (pre-pred).",
-                    completed=len(others),
+                    tid_commit,
+                    description="[db]Items merged.",
+                    completed=len(items),
                     visible=False,
                 )
-                sess.commit()
-
-                pred_id_map: Dict[Tuple[str, Optional[str], str], int] = {}
-                tid_preds = progress.add_task(
-                    "[db]Adding predictions...", total=len(preds_commit), visible=self.verbose
-                )
-                for pred in preds_commit:
-                    try:
-                        merged_pred = sess.merge(pred)
-                        sess.flush()  # flush to get id
-                        if merged_pred.id is not None:
-                            pred_id_map[
-                                (
-                                    merged_pred.network_name,
-                                    merged_pred.datafile_path,
-                                    merged_pred.trained_model_name,
-                                )
-                            ] = merged_pred.id
-                        else:
-                            self._logger.error(
-                                f"Prediction id not populated for {merged_pred.network_name}"
-                            )
-                    except Exception:
-                        self._logger.error(
-                            f"Error merging prediction for {pred.network_name}", exc_info=True
-                        )
-                    if self.verbose:
-                        progress.advance(tid_preds)
-                progress.update(
-                    tid_preds,
-                    description="[db]Predictions added.",
-                    completed=len(preds_commit),
-                    visible=False,
-                )
-
-                tid_plots_links = progress.add_task(
-                    "[db]Linking/merging plots...",
-                    total=len(self._plots_needing_prediction_id),
-                    visible=self.verbose,
-                )
-                for plot, pred_ref in self._plots_needing_prediction_id:
-                    key = (
-                        pred_ref.network_name,
-                        pred_ref.datafile_path,
-                        pred_ref.trained_model_name,
-                    )
-                    if pred_id := pred_id_map.get(key):
-                        plot.from_prediction = pred_id  # type: ignore[assignment] # from_prediction is int|None
-                    else:
-                        self._logger.warning(
-                            f"Could not find committed prediction ID for plot of {pred_ref.network_name} (fig: {plot.in_figure})"
-                        )
-                    sess.merge(plot)
-                    if self.verbose:
-                        progress.advance(tid_plots_links)
-                progress.update(
-                    tid_plots_links,
-                    description="[db]Plots linked/merged.",
-                    completed=len(self._plots_needing_prediction_id),
-                    visible=False,
-                )
-
                 sess.commit()
                 self._logger.info("database transaction committed.")
             except Exception:
@@ -799,11 +738,10 @@ class BiocompDBUpdater(BaseModel):
             self._logger.warning("nothing to process.")
             return
 
-        lib, xps_map, cals_map, models_list, figs_list, plots_f_figs, preds_f_figs = (
+        lib, xps_map, cals_map, models_list, figs_list, plots_list = (
             ut.load_lib(),
             {},
             {},
-            [],
             [],
             [],
             [],
@@ -939,7 +877,7 @@ class BiocompDBUpdater(BaseModel):
             if self.process_models:
                 models_list = self._load_models(progress)
             if self.process_figures:
-                figs_list, plots_f_figs, preds_f_figs = self._load_figs(progress)
+                figs_list, plots_list = self._load_figs(progress)
 
             items_commit = [
                 i
@@ -948,13 +886,12 @@ class BiocompDBUpdater(BaseModel):
                     list(cals_map.values()),
                     models_list,
                     figs_list,
-                    plots_f_figs,
-                    preds_f_figs,
+                    plots_list,
                 ]
                 for i in grp
                 if i
             ]
-            if items_commit or self._plots_needing_prediction_id:
+            if items_commit:
                 self._commit_db(items_commit, progress)
             else:
                 self._logger.info("no items to commit to database.")
