@@ -274,6 +274,7 @@ class NetworkModel(BaseModel):
         max_points_per_batch=None,
         disable_variational: bool = True,
         z_value: Union[str, float] = 'uniform',
+        with_shared_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
     ) -> np.ndarray:
@@ -294,6 +295,7 @@ class NetworkModel(BaseModel):
             max_points_per_batch=max_points_per_batch,
             disable_variational=disable_variational,
             z_value=z_value,
+            with_shared_params=with_shared_params,
             collect_in_indices=collect_in_indices,
             collect_out_indices=collect_out_indices,
         )
@@ -307,6 +309,7 @@ class NetworkModel(BaseModel):
         max_points_per_batch=None,
         disable_variational: bool = True,
         z_value: Union[str, float] = 'uniform',
+        with_shared_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
     ):
@@ -340,8 +343,12 @@ class NetworkModel(BaseModel):
             key = jax.random.PRNGKey(key)
 
         # prepare parameters
-        assert self._params is not None
-        params = self._params
+        if with_shared_params is None:
+            params = self._params
+        else:
+            shared_params = get_shared_params(with_shared_params)
+            params = pr.ParameterTree.merge(shared_params, self._local_params)
+
         if disable_variational:
             logger.debug("disabling variational embeddings")
             logstd = params['shared']['quantization']['logstdevs']

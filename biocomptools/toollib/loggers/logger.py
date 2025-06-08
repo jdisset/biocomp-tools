@@ -3,7 +3,6 @@
 from typing import List, Tuple, Callable, Union
 from pydantic import BaseModel, ConfigDict
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -39,8 +38,8 @@ class FunctionLogger(Logger):
         if len(self.periods) == 1:
             self.periods = self.periods * len(self.functions)
 
-        assert (
-            len(self.periods) == len(self.functions)
-        ), f"Number of periods in FunctionLogger ({len(self.periods)}) must match number of functions ({len(self.functions)})"
+        assert len(self.periods) == len(self.functions), (
+            f"Number of periods in FunctionLogger ({len(self.periods)}) must match number of functions ({len(self.functions)})"
+        )
 
         return list(zip(self.periods, self.functions))

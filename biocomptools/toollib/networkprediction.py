@@ -7,6 +7,7 @@ from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_name
 from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
+import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomp.plotting.plotting_core import knn_stats, build_tree
 from pathlib import Path
@@ -64,18 +65,20 @@ def _calculate_single_network_stats(
     yhat: np.ndarray,
     gt: Optional[np.ndarray],
     x: np.ndarray,
-    output_pos: int,
+    output_pos: Union[int, List[int]],
     nb_points_in_eval: int,
     rescaler,
     gridstats_params: Dict[str, Any],
     network_info: Dict[str, Any],
 ) -> Dict[str, Any]:
     """calculate statistics for a single network (used in parallel processing)"""
-    # transform to latent space for statistics
+    print(f"Calculating singgle net stats for network {network_idx}. output_pos: {output_pos}")
+    print(
+        f"    yhat shape: {yhat.shape}, gt shape: {None if gt is None else gt.shape}, x shape: {x.shape}"
+    )
     latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
     latent_yhat = latent_yhats[:, output_pos]
 
-    # calculate basic statistics
     network_stats = {
         'xp_name': network_info.get('xp_name'),
         'recipe_name': network_info.get('recipe_name'),
@@ -93,12 +96,11 @@ def _calculate_single_network_stats(
     # add comparison stats if ground truth available
     if gt is not None:
         latent_x = rescaler.fwd(x)
-        latent_gt = np.asarray(rescaler.fwd(gt).flatten(), dtype=np.float32)
+        latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
         mse = float(np.mean((latent_yhat - latent_gt) ** 2))
         network_stats['mse'] = float(mse)
         network_stats['rmse'] = float(np.sqrt(mse))
 
-        # calculate grid stats
         grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
         network_stats.update(grid_stats)
 
@@ -111,7 +113,9 @@ def _calculate_grid_stats(
     latent_x: np.ndarray,
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """calculate grid statistics (extracted for parallel processing)"""
+    """
+    calculate grid statistics (extracted for parallel processing)
+    """
     grid = make_hypercube(
         latent_x.shape[1],
         res=params['hypercube_res'],
@@ -119,7 +123,6 @@ def _calculate_grid_stats(
         xmax=params['hypercube_max'],
     )
 
-    # latent_yhat and gt should be at least 2D, i.e. column vectors
     latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
 
@@ -153,21 +156,23 @@ def _calculate_grid_stats(
     grid_mse = np.nanmean((yhat_mean - gt_mean) ** 2)
     grid_rmse = np.sqrt(grid_mse)
 
-    # some grid-wide statistics
     grid_gt_var = np.nanvar(gt_mean)
     EPSILON = 1e-9
     grid_r_squared = 1 - (grid_mse / (grid_gt_var + EPSILON))
 
     # KL divergence
+    # All operations here are element-wise. kl_divergences will be a
+    # (n_grid_points, D) array. np.nanmean averages them all into a single scalar,
+    # representing the average KL divergence across all dimensions and grid points.
     safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
     safe_yhat_stdev = np.maximum(yhat_stdev, EPSILON)
     log_term = np.log(safe_yhat_stdev / safe_gt_stdev)
     numerator_term = safe_gt_stdev**2 + (gt_mean - yhat_mean) ** 2
     denominator_term = 2 * safe_yhat_stdev**2
     kl_divergences = log_term + numerator_term / denominator_term - 0.5
-    kl_divergences = np.maximum(kl_divergences, 0.0)  # (even though KL should be non-negative)
+    kl_divergences = np.maximum(kl_divergences, 0.0)
     kl_mean = np.nanmean(kl_divergences)
-    kl_similarities = np.exp(-kl_divergences)  # similarity for each grid point
+    kl_similarities = np.exp(-kl_divergences)
     grid_kl_similarity = np.nanmean(kl_similarities) * 100
 
     stats = {
@@ -345,7 +350,10 @@ class NetworkPrediction(DataSource):
 
         return aligned_predict_at, aligned_ground_truth
 
-    def compute_all_network_predictions(self):
+    def compute_all_network_predictions(
+        self,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+    ):
         """compute predictions for all networks"""
 
         logger.debug(f"computing predictions with model {self.network_model.signature}")
@@ -371,7 +379,6 @@ class NetworkPrediction(DataSource):
         self._input_shapes = []
         self._output_shapes = []
         if self.collection_points is not None and len(self.collection_points) > 0:
-            # create collection points data for each collection point
             for collection_point in self.collection_points:
                 (in_idx, input_shapes), (out_idx, output_shapes) = (
                     self.network_model.get_node_indices(
@@ -389,6 +396,7 @@ class NetworkPrediction(DataSource):
             key=self.seed,
             z_value=self.z_value,
             disable_variational=self.disable_variational,
+            with_shared_params=with_shared_params,
             collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
             collect_out_indices=np.concatenate(collect_out_idx).flatten()
             if collect_out_idx
@@ -504,7 +512,11 @@ class NetworkPrediction(DataSource):
     ):
         n_samples = 5
 
+        assert len(latent_gt) == len(latent_yhat) == len(latent_x)
         sample_ids = np.random.choice(len(latent_gt), n_samples, replace=False)
+        logger.debug(f"Randomly selected sample IDs for logging: {sample_ids}")
+        logger.debug(f"latent_gt shape: {latent_gt.shape}, latent_yhat shape: {latent_yhat.shape}")
+        logger.debug(f"latent_x shape: {latent_x.shape}")
         gt_sample = latent_gt[sample_ids]
         yhat_sample = latent_yhat[sample_ids]
         latentx_sample = latent_x[sample_ids]
@@ -520,12 +532,12 @@ class NetworkPrediction(DataSource):
         df = pd.DataFrame(
             {
                 'unscaled X': unscaledx_sample,
-                'unscaled gt': original_gt,
-                'unscaled yhat': original_yhat,
+                'unscaled gt': original_gt.tolist(),
+                'unscaled yhat': original_yhat.tolist(),
                 'latent X': latentx_sample,
-                'latent gt': gt_sample,
-                'latent yhat': yhat_sample,
-                'l2 error': se_sample,
+                'latent gt': gt_sample.tolist(),
+                'latent yhat': yhat_sample.tolist(),
+                'l2 error': se_sample.tolist(),
             }
         )
 
@@ -656,7 +668,7 @@ class NetworkPrediction(DataSource):
             'recipe_name': recipe_name,
             'network_name': network_name,
             'eval_npoints': nb_points_in_eval,
-            'samples': yhat.shape[0],  # number of actual prediction points used
+            'samples': yhat.shape[0],
             'mse': None,
             'rmse': None,
             'latent_mean': float(latent_yhat.mean()),
@@ -670,7 +682,9 @@ class NetworkPrediction(DataSource):
             assert self._x is not None and len(self._x) > network_idx
             x = self._x[network_idx]
             latent_x = rescaler.fwd(x)
-            latent_gt = np.asarray(rescaler.fwd(gt).flatten(), dtype=np.float32)
+            latent_gts = np.asarray(rescaler.fwd(gt), dtype=np.float32)
+            latent_gt = latent_gts[:, output_pos]
+
             mse = float(np.mean((latent_yhat - latent_gt) ** 2))
             network_stats['mse'] = float(mse)
             network_stats['rmse'] = float(np.sqrt(mse))
@@ -771,7 +785,7 @@ class NetworkPrediction(DataSource):
                         # log stats for this network
                         if tasks[idx].get('gt') is not None:  # if ground truth exists
                             rescaler = tasks[idx]['rescaler']
-                            latent_gt = rescaler.fwd(tasks[idx]['gt']).flatten()
+                            latent_gt = rescaler.fwd(tasks[idx]['gt'])
                             latent_yhat = rescaler.fwd(tasks[idx]['yhat'])[
                                 :, tasks[idx]['output_pos']
                             ]
@@ -806,11 +820,11 @@ class NetworkPrediction(DataSource):
 
         return all_stats
 
-    def get_network_stats(self):
+    def get_network_stats(self, with_shared_params: Optional[pr.ParameterTree] = None):
         """get statistics for all networks, computing if necessary"""
-        if not hasattr(self, '_network_stats') or self._network_stats is None:
-            if not hasattr(self, '_yhats') or self._yhats is None:
-                self.compute_all_network_predictions()
+        if not hasattr(self, '_network_stats') or self._network_stats is None or with_shared_params:
+            if not hasattr(self, '_yhats') or self._yhats is None or with_shared_params:
+                self.compute_all_network_predictions(with_shared_params=with_shared_params)
             else:
                 # just calculate stats if predictions already exist
                 self._network_stats = self._calculate_all_network_stats()

@@ -135,9 +135,10 @@ class DBSource(DataSource, NetworkSet):
             logger.debug(f"DBSource: getting XY data for network {network.name}")
             try:
                 X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
-                print(
-                    f"DBSource: got XY data for network {network.name} with shapes {X.shape}, {Y.shape}"
-                )
+                if X.shape[1] != actual_network.get_nb_inputs():
+                    raise ValueError(
+                        f"Input size mismatch for network {network.name}: expected {actual_network.get_nb_inputs()} inputs, got {X.shape[1]} inputs"
+                    )
             except Exception as e:
                 logger.error(f"Error getting XY data for network {network.name}: {e}")
                 logger.exception(e)

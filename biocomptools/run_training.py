@@ -20,6 +20,7 @@ from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG
 from biocomp.library import PartsLibrary
 from biocomp.utils import PartialFunction, load_lib, save
 from biocomp.train import TrainingConfig
+from functools import partial
 
 import dracon as dr
 from dracon.deferred import DeferredNode
@@ -292,38 +293,12 @@ class TrainingProgram(BaseModel):
 
         metadata = make_json_ready(metadata)
 
-        def get_best_model(all_params, all_losses):
-            from biocomp.jaxutils import tree_get, tree_to_np
-            import pickle
-
-            best_model_id, smoothed_loss, end_loss = get_best_smoothed_loss_replicate_id(all_losses)
-            logger.debug(f"Best model is replicate number {best_model_id}")
-
-            params = tree_get(all_params, best_model_id)
-            if params is None:
-                return None
-
-            copied_params = pickle.loads(pickle.dumps(params))
-
-            best_params = get_shared_params(copied_params)
-
-            if best_params is None:
-                return None
-
-            local_metadata = metadata.copy()
-            local_metadata['replicate_number'] = best_model_id
-            local_metadata['end_loss'] = float(end_loss)
-
-            model = BiocompModel(
-                compute_config=compute_conf,
-                rescaler=data_conf.rescaler,
-                shared_params=tree_to_np(best_params),
-                metadata=make_json_ready(local_metadata),
-            )
-
-            return model
-
-        return get_best_model
+        return partial(
+            get_best_model,
+            compute_conf=compute_conf,
+            rescaler=data_conf.rescaler,
+            metadata=metadata,
+        )
 
     def save_best(self, all_params, all_losses: list[np.ndarray], save_dir, name=None):
         model = self.get_best_model_func()(all_params, all_losses)
@@ -360,6 +335,40 @@ class TrainingProgram(BaseModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def get_best_model(all_params, all_losses, compute_conf, rescaler, metadata=None):
+    from biocomp.jaxutils import tree_get, tree_to_np
+    import pickle
+
+    metadata = metadata or {}
+
+    best_model_id, smoothed_loss, end_loss = get_best_smoothed_loss_replicate_id(all_losses)
+    logger.debug(f"Best model is replicate number {best_model_id}")
+
+    params = tree_get(all_params, best_model_id)
+    if params is None:
+        return None
+
+    copied_params = pickle.loads(pickle.dumps(params))
+
+    best_params = get_shared_params(copied_params)
+
+    if best_params is None:
+        return None
+
+    local_metadata = metadata.copy()
+    local_metadata['replicate_number'] = best_model_id
+    local_metadata['end_loss'] = float(end_loss)
+
+    model = BiocompModel(
+        compute_config=compute_conf,
+        rescaler=rescaler,
+        shared_params=tree_to_np(best_params),
+        metadata=make_json_ready(local_metadata),
+    )
+
+    return model
 
 
 def main():
