@@ -4,6 +4,7 @@ from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, 
 import numpy as np
 import jax.numpy as jnp
 from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
+from biocomp.datautils import DataRescaler, IdentityRescaler
 from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
@@ -12,7 +13,9 @@ from biocomptools.toollib.datasources import DataSource
 from biocomp.plotting.plotting_core import knn_stats, build_tree
 from pathlib import Path
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# from concurrent.futures import ProcessPoolExecutor as PoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
 from functools import partial
 
 logger = get_logger(__name__)
@@ -70,12 +73,9 @@ def _calculate_single_network_stats(
     rescaler,
     gridstats_params: Dict[str, Any],
     network_info: Dict[str, Any],
+    enable_gridstats: bool = True,
 ) -> Dict[str, Any]:
     """calculate statistics for a single network (used in parallel processing)"""
-    print(f"Calculating singgle net stats for network {network_idx}. output_pos: {output_pos}")
-    print(
-        f"    yhat shape: {yhat.shape}, gt shape: {None if gt is None else gt.shape}, x shape: {x.shape}"
-    )
     latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
     latent_yhat = latent_yhats[:, output_pos]
 
@@ -101,8 +101,10 @@ def _calculate_single_network_stats(
         network_stats['mse'] = float(mse)
         network_stats['rmse'] = float(np.sqrt(mse))
 
-        grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
-        network_stats.update(grid_stats)
+        
+        if enable_gridstats:
+            grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
+            network_stats.update(grid_stats)
 
     return network_stats
 
@@ -221,6 +223,8 @@ class NetworkPrediction(DataSource):
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
     already_latent: bool = False  # no need to rescale if the input data is already in latent space
+
+    enable_gridstats: bool = True  # enable grid statistics calculation
     gridstats_hypercube_res: int = 40  # resolution for hypercube grid
     gridstats_hypercube_min: float = 0.0  # minimum value for hypercube grid
     gridstats_hypercube_max: float = 1.0  # maximum value for hypercube grid
@@ -229,6 +233,8 @@ class NetworkPrediction(DataSource):
     gridstats_min_points: int = 40
 
     n_stats_workers: int = 8  # number of workers for parallel processing of statistics
+
+    verbose: bool = False  # print prediction statistics to the console
 
     _yhats: Optional[List[np.ndarray]] = None
     _x: Optional[List[np.ndarray]] = None
@@ -356,23 +362,24 @@ class NetworkPrediction(DataSource):
     ):
         """compute predictions for all networks"""
 
-        logger.debug(f"computing predictions with model {self.network_model.signature}")
-        logger.debug(
-            f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
-        )
-
         # stack inputs from all networks
         assert isinstance(self._aligned_x, list)
         stacked_x = np.column_stack(self._aligned_x)
 
         effective_max_evals = len(self._aligned_x[0])
-        logger.debug(f"effective_max_evals: {effective_max_evals}")
 
         predict_f = (
             self.network_model.predict
             if self.already_latent
             else self.network_model.predict_unscaled
         )
+
+        if self.verbose:
+            logger.debug(f"computing predictions with model {self.network_model.signature}")
+            logger.debug(
+                f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
+            )
+            logger.debug(f"effective_max_evals: {effective_max_evals}")
 
         collect_in_idx = []
         collect_out_idx = []
@@ -422,26 +429,21 @@ class NetworkPrediction(DataSource):
 
         for i, (network_output, x) in enumerate(zip(network_outputs, self.predict_at)):
             effective_max_evals = min(max_evals, len(x))
-            logger.debug(f"processing network {i}, effective_max_evals: {effective_max_evals}")
 
             # store prediction results
             truncated_output = network_output[:effective_max_evals]
             self._yhats.append(np.asarray(truncated_output, dtype=np.float32))
-            logger.debug(f"stored yhat shape: {truncated_output.shape}")
 
             # store ground truth if available
             if self.ground_truth[i] is not None:
                 truncated_gt = self._aligned_ground_truth[i][:effective_max_evals]
                 self._gtruths.append(np.asarray(truncated_gt, dtype=np.float32))
-                logger.debug(f"stored ground truth shape: {truncated_gt.shape}")
             else:
                 self._gtruths.append(None)
-                logger.debug("stored ground truth: None")
 
             # store inputs
             truncated_x = x[:effective_max_evals]
             self._x.append(np.asarray(truncated_x, dtype=np.float32))
-            logger.debug(f"stored x shape: {truncated_x.shape}")
 
         # validate results
         assert len(self._x) == len(self.predict_at)
@@ -453,19 +455,16 @@ class NetworkPrediction(DataSource):
         """create a function to get x and y data for a specific network"""
 
         def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
-            logger.debug(
-                f"getting xy for network {network_idx} with model {self.network_model.signature}"
-            )
+            if self.verbose:
+                logger.debug(
+                    f"getting xy for network {network_idx} with model {self.network_model.signature}"
+                )
 
             # compute predictions if not already computed
             if not hasattr(self, '_yhats') or self._yhats is None:
-                logger.debug("computing all network predictions")
                 self.compute_all_network_predictions()
                 if self.save_csv_to:
-                    logger.debug("saving prediction statistics to CSV")
                     self.save_csv()
-                else:
-                    logger.debug("no save_csv_to path provided")
 
             assert isinstance(self._x, list)
             assert isinstance(self._yhats, list)
@@ -475,9 +474,10 @@ class NetworkPrediction(DataSource):
             yhat = self._yhats[network_idx]
             gt = self._gtruths[network_idx]
 
-            logger.debug(
-                f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
-            )
+            if self.verbose:
+                logger.debug(
+                    f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
+                )
 
             assert isinstance(self.network_model.network, list)
 
@@ -486,7 +486,8 @@ class NetworkPrediction(DataSource):
             # get output position for this network
             _, output_pos, _, _ = get_reordered_protein_names(network)
             assert isinstance(output_pos, int)
-            logger.debug(f"output_pos: {output_pos}")
+            if self.verbose:
+                logger.debug(f"output_pos: {output_pos}")
 
             stats = self.get_network_stats()
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
@@ -494,10 +495,12 @@ class NetworkPrediction(DataSource):
             pdata.metadata['prediction_stats'] = stats[network_idx].copy()
 
             if self.use_output_as_input:
-                logger.debug("using output as input, returning yhat as both x and y")
+                if self.verbose:
+                    logger.info("using output as input, returning yhat as both x and y")
                 return yhat, yhat
             else:
-                logger.debug("using original input, returning x and yhat")
+                if self.verbose:
+                    logger.info("using original input, returning x and yhat")
                 return x, yhat
 
         return get_xy
@@ -510,196 +513,48 @@ class NetworkPrediction(DataSource):
         latent_yhat: np.ndarray,
         latent_x: np.ndarray,
     ):
-        n_samples = 5
+        if self.verbose:
+            n_samples = 5
 
-        assert len(latent_gt) == len(latent_yhat) == len(latent_x)
-        sample_ids = np.random.choice(len(latent_gt), n_samples, replace=False)
-        logger.debug(f"Randomly selected sample IDs for logging: {sample_ids}")
-        logger.debug(f"latent_gt shape: {latent_gt.shape}, latent_yhat shape: {latent_yhat.shape}")
-        logger.debug(f"latent_x shape: {latent_x.shape}")
-        gt_sample = latent_gt[sample_ids]
-        yhat_sample = latent_yhat[sample_ids]
-        latentx_sample = latent_x[sample_ids]
-        se_sample = (yhat_sample - gt_sample) ** 2
+            assert len(latent_gt) == len(latent_yhat) == len(latent_x)
+            sample_ids = np.random.choice(len(latent_gt), n_samples, replace=False)
+            gt_sample = latent_gt[sample_ids]
+            yhat_sample = latent_yhat[sample_ids]
+            latentx_sample = latent_x[sample_ids]
+            se_sample = (yhat_sample - gt_sample) ** 2
 
-        original_yhat = self.network_model.model.rescaler.inv(yhat_sample)
-        original_gt = self.network_model.model.rescaler.inv(gt_sample)
-        unscaledx_sample = self.network_model.model.rescaler.inv(latentx_sample)
-        unscaledx_sample = [tuple(np.round(x, 3) for x in xs) for xs in unscaledx_sample]
-        latentx_sample = [tuple(np.round(x, 3) for x in xs) for xs in latentx_sample]
-        import pandas as pd
+            original_yhat = self.network_model.model.rescaler.inv(yhat_sample)
+            original_gt = self.network_model.model.rescaler.inv(gt_sample)
+            unscaledx_sample = self.network_model.model.rescaler.inv(latentx_sample)
+            unscaledx_sample = [tuple(np.round(x, 3) for x in xs) for xs in unscaledx_sample]
+            latentx_sample = [tuple(np.round(x, 3) for x in xs) for xs in latentx_sample]
+            import pandas as pd
 
-        df = pd.DataFrame(
-            {
-                'unscaled X': unscaledx_sample,
-                'unscaled gt': original_gt.tolist(),
-                'unscaled yhat': original_yhat.tolist(),
-                'latent X': latentx_sample,
-                'latent gt': gt_sample.tolist(),
-                'latent yhat': yhat_sample.tolist(),
-                'l2 error': se_sample.tolist(),
-            }
-        )
+            df = pd.DataFrame(
+                {
+                    'unscaled X': unscaledx_sample,
+                    'unscaled gt': original_gt.tolist(),
+                    'unscaled yhat': original_yhat.tolist(),
+                    'latent X': latentx_sample,
+                    'latent gt': gt_sample.tolist(),
+                    'latent yhat': yhat_sample.tolist(),
+                    'l2 error': se_sample.tolist(),
+                }
+            )
 
-        logger.debug(
-            f"""network {network_idx} evaluated over {prediction_stats['samples']} samples:
-                - mse: {prediction_stats['mse']:.3f}
-                - rmse: {prediction_stats['rmse']:.3f}
-                - mean: {prediction_stats['latent_mean']:.3f}
-                - std: {prediction_stats['latent_std']:.3f}
-                - min: {prediction_stats['latent_min']:.3f}
-                - max: {prediction_stats['latent_max']:.3f}
-                """
-        )
-
-        logger.debug(f"Random samples:\n{df.round(3).to_string()}")
-
-    def _grid_stats(self, latent_yhat, latent_gt, latent_x):
-        grid = make_hypercube(
-            latent_x.shape[1],
-            res=self.gridstats_hypercube_res,
-            xmin=self.gridstats_hypercube_min,
-            xmax=self.gridstats_hypercube_max,
-        )
-
-        # latent_yhat and gt should be at least 2D, i.e. column vectors
-        latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
-        latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
-
-        logger.debug(f"latent_yhat shape: {latent_yhat.shape}")
-        logger.debug(f"latent_gt shape: {latent_gt.shape}")
-
-        # mask out NaN or inf values
-        valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
-        valid_latent_x = np.asarray(latent_x[valid_x_mask])
-        valid_latent_yhat = np.asarray(latent_yhat[valid_x_mask])
-        valid_latent_gt = np.asarray(latent_gt[valid_x_mask])
-
-        logger.debug(f"{grid.shape=}")
-        logger.debug(f"{latent_x.shape=}, {valid_latent_x.shape=}")
-        logger.debug(f"Building KDTree for {valid_latent_x.shape[0]} points")
-        t0 = time.time()
-        tree = build_tree(valid_latent_x)
-        t1 = time.time()
-        logger.debug(f"KDTree built in {t1 - t0:.2f}s")
-
-        iw, gt_stdev, gt_mean = knn_stats(
-            grid,
-            valid_latent_gt,
-            tree=tree,
-            stats=['iw', 'std', 'mean'],
-            k=self.gridstats_k,
-            radius=self.gridstats_radius,
-            min_points=self.gridstats_min_points,
-        )  # type: ignore
-        yhat_stdev, yhat_mean = knn_stats(
-            grid,
-            valid_latent_yhat,
-            iw=iw,
-            stats=['std', 'mean'],
-            k=self.gridstats_k,
-            radius=self.gridstats_radius,
-            min_points=self.gridstats_min_points,
-        )  # type: ignore
-
-        t2 = time.time()
-        logger.debug(f"knn_stats took {t2 - t1:.2f}s")
-        grid_mse = np.nanmean((yhat_mean - gt_mean) ** 2)
-        grid_rmse = np.sqrt(grid_mse)
-        logger.debug(f"grid rmse: {grid_rmse:.3f}")
-
-        # some grid-wide statistics
-        grid_gt_var = np.nanvar(gt_mean)
-        EPSILON = 1e-9
-        grid_r_squared = 1 - (grid_mse / (grid_gt_var + EPSILON))
-
-        # KL divergence
-        safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
-        safe_yhat_stdev = np.maximum(yhat_stdev, EPSILON)
-        log_term = np.log(safe_yhat_stdev / safe_gt_stdev)
-        numerator_term = safe_gt_stdev**2 + (gt_mean - yhat_mean) ** 2
-        denominator_term = 2 * safe_yhat_stdev**2
-        kl_divergences = log_term + numerator_term / denominator_term - 0.5
-        kl_divergences = np.maximum(kl_divergences, 0.0)  # (even though KL should be non-negative)
-        kl_mean = np.nanmean(kl_divergences)
-        kl_similarities = np.exp(-kl_divergences)  # similarity for each grid point
-        grid_kl_similarity = np.nanmean(kl_similarities) * 100
-
-        stats = {
-            'grid_gt_var': grid_gt_var,
-            'grid_mse': grid_mse,
-            'grid_rmse': grid_rmse,
-            'grid_kl': kl_mean,
-            'grid_kl_similarity': grid_kl_similarity,
-            'grid_r_squared': grid_r_squared,
-        }
-
-        logger.debug(f"grid stats: {stats}")
-
-        t3 = time.time()
-        logger.debug(f"rest of grid stats took {t3 - t2:.2f}s")
-
-        return stats
-
-    def _calculate_network_stats(
-        self, network_idx, network, yhat, gt, output_pos, nb_points_in_eval
-    ):
-        """calculate statistics for a single network"""
-
-        # transform to latent space for statistics
-        rescaler = self.network_model.model.rescaler
-        latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
-        latent_yhat = latent_yhats[:, output_pos]
-
-        # calculate basic statistics
-        xp_name = None
-        try:
-            xp_name = network.recipe.experiment.name
-        except Exception:
-            pass
-        recipe_name = None
-        try:
-            recipe_name = network.recipe.name
-        except Exception:
-            pass
-        network_name = getattr(network, 'name', f"Network_{network_idx}")
-        network_stats = {
-            'xp_name': xp_name,
-            'recipe_name': recipe_name,
-            'network_name': network_name,
-            'eval_npoints': nb_points_in_eval,
-            'samples': yhat.shape[0],
-            'mse': None,
-            'rmse': None,
-            'latent_mean': float(latent_yhat.mean()),
-            'latent_std': float(latent_yhat.std()),
-            'latent_min': float(latent_yhat.min()),
-            'latent_max': float(latent_yhat.max()),
-        }
-
-        # add comparison stats if ground truth available
-        if gt is not None:
-            assert self._x is not None and len(self._x) > network_idx
-            x = self._x[network_idx]
-            latent_x = rescaler.fwd(x)
-            latent_gts = np.asarray(rescaler.fwd(gt), dtype=np.float32)
-            latent_gt = latent_gts[:, output_pos]
-
-            mse = float(np.mean((latent_yhat - latent_gt) ** 2))
-            network_stats['mse'] = float(mse)
-            network_stats['rmse'] = float(np.sqrt(mse))
-
-            network_stats.update(self._grid_stats(latent_yhat, latent_gt, latent_x))
-
-            self._log_stats(network_idx, network_stats, latent_gt, latent_yhat, latent_x)
-
-        return network_stats
+            logger.info(
+                f"""network {network_idx} evaluated over {prediction_stats['samples']} samples:
+                    - mse: {prediction_stats['mse']:.3f}
+                    - rmse: {prediction_stats['rmse']:.3f}
+                    - mean: {prediction_stats['latent_mean']:.3f}
+                    - std: {prediction_stats['latent_std']:.3f}
+                    - min: {prediction_stats['latent_min']:.3f}
+                    - max: {prediction_stats['latent_max']:.3f}
+                    """
+            )
+            logger.info(f"Random samples:\n{df.round(3).to_string()}")
 
     def _calculate_all_network_stats(self) -> List[Dict[str, Any]]:
-        """calculate statistics for all networks and return as a list of dictionaries"""
-        all_stats = []
-
-        # prepare data for parallel processing
         tasks = []
         for i, network in enumerate(self.network_model.network):
             network_name = getattr(network, 'name', f"Network_{i}")
@@ -709,29 +564,9 @@ class NetworkPrediction(DataSource):
             gt = self._gtruths[i]
             x = self._x[i]
 
-            # get output position
-            output_pos = 0
-            try:
-                _, output_pos, _, _ = get_reordered_protein_names(network)
-            except ValueError:
-                logger.warning(f"no protein names found for network {network_name}, skipping stats")
-                continue
-
-            # extract network info for parallel processing
-            xp_name = None
-            try:
-                xp_name = network.recipe.experiment.name
-            except Exception:
-                pass
-            recipe_name = None
-            try:
-                recipe_name = network.recipe.name
-            except Exception:
-                pass
+            _, output_pos, _, _ = get_reordered_protein_names(network)
 
             network_info = {
-                'xp_name': xp_name,
-                'recipe_name': recipe_name,
                 'network_name': network_name,
             }
 
@@ -744,7 +579,6 @@ class NetworkPrediction(DataSource):
                 'min_points': self.gridstats_min_points,
             }
 
-            # or as a dict (more readable)
             tasks.append(
                 {
                     'network_idx': i,
@@ -753,26 +587,24 @@ class NetworkPrediction(DataSource):
                     'x': x,
                     'output_pos': output_pos,
                     'nb_points_in_eval': nb_points_in_eval,
-                    'rescaler': self.network_model.model.rescaler,
+                    'rescaler': self.network_model.model.rescaler
+                    if not self.already_latent
+                    else IdentityRescaler(),
                     'gridstats_params': gridstats_params,
                     'network_info': network_info,
+                    'enable_gridstats': self.enable_gridstats,
                 }
             )
 
+        all_stats = [None] * len(self.network_model.network)
+
         if self.n_stats_workers > 1 and len(tasks) > 1:
-            logger.debug(
-                f"calculating network stats in parallel with {self.n_stats_workers} workers"
+            logger.info(
+                f"Calculating network stats in parallel with {self.n_stats_workers} workers."
             )
-
-            # create results list initialized with None
-            results = [None] * len(tasks)
-
-            with ProcessPoolExecutor(max_workers=self.n_stats_workers) as executor:
+            with PoolExecutor(max_workers=self.n_stats_workers) as executor:
                 future_to_idx = {
-                    executor.submit(
-                        _calculate_single_network_stats,
-                        **task,
-                    ): task['network_idx']
+                    executor.submit(_calculate_single_network_stats, **task): task['network_idx']
                     for task in tasks
                 }
 
@@ -780,43 +612,47 @@ class NetworkPrediction(DataSource):
                     idx = future_to_idx[future]
                     try:
                         result = future.result()
-                        results[idx] = result
+                        all_stats[idx] = result
 
-                        # log stats for this network
-                        if tasks[idx].get('gt') is not None:  # if ground truth exists
+                        if tasks[idx].get('gt') is not None:
                             rescaler = tasks[idx]['rescaler']
                             latent_gt = rescaler.fwd(tasks[idx]['gt'])
                             latent_yhat = rescaler.fwd(tasks[idx]['yhat'])[
                                 :, tasks[idx]['output_pos']
                             ]
                             latent_x = rescaler.fwd(tasks[idx]['x'])
-                            self._log_stats(
-                                idx,
-                                result,
-                                latent_gt,
-                                latent_yhat,
-                                latent_x,
-                            )
+                            self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
 
                     except Exception as e:
-                        logger.error(f"error calculating stats for network {idx}: {e}")
+                        logger.error(
+                            f"Error calculating stats for network {idx} in parallel worker: {e}"
+                        )
                         logger.exception(e)
-                        raise
+                        all_stats[idx] = {'error': str(e)}
 
-            all_stats = results
         else:
-            # sequential processing
-            logger.debug("calculating network stats sequentially")
-            for task in tasks:
-                network_stats = self._calculate_network_stats(
-                    network_idx=task['network_idx'],
-                    network=self.network_model.network[task['network_idx']],
-                    yhat=task['yhat'],
-                    gt=task['gt'],
-                    output_pos=task['output_pos'],
-                    nb_points_in_eval=task['nb_points_in_eval'],
+            if len(tasks) > 0:
+                logger.info(
+                    "Calculating network stats sequentially using the unified static method."
                 )
-                all_stats.append(network_stats)
+
+            for task in tasks:
+                idx = task['network_idx']
+                try:
+                    result = _calculate_single_network_stats(**task)
+                    all_stats[idx] = result
+
+                    if task.get('gt') is not None:
+                        rescaler = task['rescaler']
+                        latent_gt = rescaler.fwd(task['gt'])
+                        latent_yhat = rescaler.fwd(task['yhat'])[:, task['output_pos']]
+                        latent_x = rescaler.fwd(task['x'])
+                        self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
+
+                except Exception as e:
+                    logger.error(f"Error calculating stats for network {idx} sequentially: {e}")
+                    logger.exception(e)
+                    all_stats[idx] = {'error': str(e)}
 
         return all_stats
 
@@ -833,7 +669,6 @@ class NetworkPrediction(DataSource):
 
     def save_csv(self):
         """save prediction statistics to a CSV file"""
-        logger.debug("saving prediction statistics to CSV")
         try:
             import pandas as pd
         except ImportError:
@@ -847,7 +682,8 @@ class NetworkPrediction(DataSource):
         for key, value in self.metadata.items():
             df[key] = value
 
-        logger.debug(f"prediction statistics DataFrame:\n{df.to_string()}")
+        if self.verbose:
+            logger.debug(f"prediction statistics DataFrame:\n{df.to_string()}")
 
         try:
             save_to = Path(self.save_csv_to)
@@ -871,7 +707,6 @@ class NetworkPrediction(DataSource):
         if isinstance(self.input_order, list):
             # single input order for all networks
             if all(isinstance(x, int) for x in self.input_order):
-                print(f"input_order is a list of integers: {self.input_order}")
                 logger.debug(f"using same input_order {self.input_order} for all networks")
                 return [self.input_order] * len(self.network_model.network)
 
@@ -1046,7 +881,6 @@ class NetworkPrediction(DataSource):
             assert len(self.per_prediction_info) >= network_idx
             metadata['extra_prediction_info'] = self.per_prediction_info[network_idx]
 
-        logger.debug(f"created metadata for network {network_idx}")
         return metadata
 
     def _extract_plot_data(
