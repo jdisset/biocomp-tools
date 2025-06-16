@@ -2,6 +2,7 @@
 
 from typing import List, Tuple, Callable, Union
 from pydantic import BaseModel, ConfigDict
+from typing import Dict, Any, Optional
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -22,6 +23,15 @@ class Logger(BaseModel):
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         """Return a list of (period, callback_function) tuples for the training loop."""
         raise NotImplementedError
+
+    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """
+        Return a dictionary of the latest metrics from this logger.
+        If `replicate` is specified, metrics for that single replicate are returned.
+        If `replicate` is None, metrics for all replicates are returned (structure
+        is logger-dependent, often a list of metrics).
+        """
+        return None
 
     def finalize(self):
         """Optional cleanup after training ends."""

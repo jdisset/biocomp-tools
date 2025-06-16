@@ -60,6 +60,21 @@ class MLflowLogger(Logger):
     _logged_plots: set[str] = set()  # Track logged plots by content hash
     _active_run = None
 
+    def _flatten_dict(self, d: Any, parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
+        """Flatten a nested dictionary or a list of dictionaries."""
+        items = []
+        if isinstance(d, dict):
+            for k, v in d.items():
+                new_key = parent_key + sep + k if parent_key else k
+                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+        elif isinstance(d, list):
+            for i, v in enumerate(d):
+                new_key = parent_key + sep + str(i)
+                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((parent_key, d))
+        return dict(items)
+
     def _log_new_artifacts(self):
         """Log any new plots/images/text files that haven't been logged yet"""
         assert self._training_program is not None
@@ -286,43 +301,53 @@ class MLflowLogger(Logger):
 
         def log_metrics(step, training_config, step_history=None, **kwargs):
             logger.debug(f"Processing metrics for step {step}")
-
             if step_history is None:
-                logger.info("No step history provided")
                 return
 
             try:
-                # Log loss metrics
+                # Log training loss from step_history
                 losses = step_history.get('loss')
                 if losses is not None:
-                    metrics = {}
-
-                    # Log individual replicate losses
-                    for i, loss in enumerate(losses):
-                        if not np.isnan(loss).any():
-                            replicate_mean = float(np.mean(loss))
-                            metrics[f"loss_replicate_{i}"] = replicate_mean
-
-                    # Log aggregate metrics
+                    metrics = {
+                        f"loss_replicate_{i}": float(np.mean(loss))
+                        for i, loss in enumerate(losses)
+                        if not np.isnan(loss).any()
+                    }
                     valid_losses = [l for l in losses if not np.isnan(l).any()]
                     if valid_losses:
-                        all_losses = np.concatenate(valid_losses)
-                        metrics.update(
-                            {
-                                "loss_min": float(np.min(all_losses)),
-                            }
+                        metrics["loss_min"] = float(np.min(np.concatenate(valid_losses)))
+                    mlflow.log_metrics(metrics, step=step)
+
+                # Log metrics from other loggers
+                all_logger_metrics = {}
+                for logger_obj in self._training_program.loggers:
+                    if logger_obj is self:
+                        continue
+
+                    logger_metrics = logger_obj.get_metrics(replicate=None)
+                    if logger_metrics:
+                        flat_metrics = self._flatten_dict(logger_metrics)
+                        all_logger_metrics.update(flat_metrics)
+
+                if all_logger_metrics:
+                    numeric_metrics = {
+                        k: v
+                        for k, v in all_logger_metrics.items()
+                        if isinstance(v, (int, float, np.number))
+                    }
+                    if len(numeric_metrics) != len(all_logger_metrics):
+                        logger.warning(
+                            "Some logger metrics were non-numeric and skipped by MLflow."
                         )
 
-                    mlflow.log_metrics(metrics, step=step)
-                    logger.debug(f"Logged loss metrics for {len(losses)} replicates")
+                    if numeric_metrics:
+                        mlflow.log_metrics(numeric_metrics, step=step)
+                        logger.debug(f"Logged {len(numeric_metrics)} metrics from other loggers.")
 
-                # Log any other metrics from step_history
+                # Log any other metrics from step_history and new plots
                 other_metrics = step_history.get('metrics', {})
                 if other_metrics:
                     mlflow.log_metrics(other_metrics, step=step)
-                    logger.debug(f"Logged {len(other_metrics)} additional metrics")
-
-                # Log any new plots
                 if self.log_plots:
                     self._log_new_artifacts()
 
