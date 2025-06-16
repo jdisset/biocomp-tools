@@ -7,11 +7,13 @@ from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
 from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
+from biocomptools.toollib.loggers.checkpointlogger import CheckpointLogger
 from biocomptools.trainutils import (
     plot_loss,
     make_unique_dir,
     print_matadata,
     get_best_smoothed_loss_replicate_id,
+    get_latest_avg_loss,
     make_json_ready,
 )
 
@@ -29,7 +31,7 @@ from dracon.commandline import make_program, Arg
 import sys
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Annotated, TypeVar, Any
+from typing import List, Optional, Annotated, TypeVar, Any, Callable
 from pydantic import Field, BaseModel, ConfigDict
 from sqlmodel import Session
 from datetime import datetime
@@ -75,6 +77,7 @@ DEFAULT_TYPES = [
     EnhancedConsoleLogger,
     ConsoleLogger,
     FunctionLogger,
+    CheckpointLogger,
 ] + PLOT_TYPES
 
 DEFAULT_TYPES = list(set(DEFAULT_TYPES))
@@ -131,6 +134,7 @@ class TrainingProgram(BaseModel):
     _modeldump: dict = {}
     _save_dir: Path = Path('.')
     _run_name: Optional[str] = None
+    _training_dman: Optional[Any] = None
 
     @property
     def _engine(self):
@@ -166,18 +170,15 @@ class TrainingProgram(BaseModel):
             session.expunge_all()
             session.close()
 
-        self.gen_metadata()
-
+        self._yamldump = dr.dump(self)
+        self._modeldump = self.model_dump()
         self._save_dir = make_unique_dir(
             Path(self.base_dir) / self.experiment_name, suffix=self.run_name_suffix
         )
-
         self._run_name = self._save_dir.name
 
         # construct loggers
         new_loggers = []
-        self._yamldump = dr.dump(self)
-        self._modeldump = self.model_dump()
 
         for logg in self.loggers:
             if isinstance(logg, DeferredNode):
@@ -187,10 +188,12 @@ class TrainingProgram(BaseModel):
                         'compute_conf': self.compute_conf,
                         'data_conf': self.data_conf,
                         'training_set': self.training_set,
+                        'validation_set': self.validation_set,
                     }
                 )
             new_loggers.append(logg)
         self.loggers = new_loggers
+        self.gen_metadata()
 
     def gen_metadata(self):
         import os
@@ -206,7 +209,6 @@ class TrainingProgram(BaseModel):
             'biocomp_hash': hashes.get('biocomp', 'unknown'),
             'biocomptools_hash': hashes.get('biocomptools', 'unknown'),
             'dracon_hash': hashes.get('dracon', 'unknown'),
-            'model_dump': self._modeldump,
         }
 
         self._metadata.update(self.metadata)
@@ -220,6 +222,32 @@ class TrainingProgram(BaseModel):
             dataset=self.training_set,
         )
 
+    def _enrich_metadata(self):
+        """Adds detailed run and data information to the metadata dictionary."""
+        assert self._training_dman is not None
+        dman = self._training_dman
+
+        dataman_info = {
+            "network_names": [n.name for n in dman.get_networks()],
+            "input_dimensions": [x.shape[1] for x in dman.get_X()],
+            "output_dimensions": [y.shape[1] for y in dman.get_Y()],
+            "data_config": dman.data_cfg.model_dump(),
+        }
+
+        self._metadata.update(
+            {
+                'run_name': self._run_name,
+                'experiment_name': self.experiment_name,
+                'training_set': self.training_set.content,
+                'validation_set': self.validation_set.content,
+                'training_conf': self.training_conf,
+                'compute_conf': self.compute_conf,
+                'data_conf': self.data_conf,
+                'data_manager_info': dataman_info,
+                'final_model_dump': self._modeldump,
+            }
+        )
+
     def run(self):
         from biocomp.train import start
 
@@ -230,16 +258,13 @@ class TrainingProgram(BaseModel):
             f.write(self._yamldump)
 
         self._build_dman()
+        self._enrich_metadata()
 
         # Initialize loggers
         logger.debug(
             f"Initializing {len(self.loggers)} loggers of types {[type(l) for l in self.loggers]}"
         )
         for logger_obj in self.loggers:
-            if isinstance(logger_obj, DeferredNode):
-                logger_obj = logger_obj.construct()
-
-            logger.debug(f"Initializing a {type(logger_obj)}")
             logger_obj.initialize(self)
 
         # Set up logging to file
@@ -266,44 +291,33 @@ class TrainingProgram(BaseModel):
         for logger_obj in self.loggers:
             logger_obj.finalize()
 
-    def get_best_model_func(self):
+    def get_replicate_model_func(self):
+        """Returns a factory function for creating a BiocompModel for a specific replicate."""
         from copy import deepcopy
 
         compute_conf = deepcopy(self.compute_conf)
         data_conf = deepcopy(self.data_conf)
-
-        metadata = {}
-        if self._metadata:
-            metadata = self._metadata.copy()
-
-        dman = self._training_dman
-        metadata['run_name'] = self._run_name
-        metadata['experiment_name'] = self.experiment_name
-        metadata['training_set'] = make_json_ready(self.training_set.content)
-        metadata['validation_set'] = make_json_ready(self.validation_set.content)
-        metadata['training_conf'] = make_json_ready(self.training_conf)
-        dataman_info = {}
-        dataman_info["network_names"] = [n.name for n in dman.get_networks()]
-        dataman_info["input_dimensions"] = [x.shape[1] for x in dman.get_X()]
-        dataman_info["output_dimensions"] = [y.shape[1] for y in dman.get_Y()]
-        dataman_info["data_config"] = (dman.data_cfg.model_dump(),)
-        metadata['data_manager_info'] = make_json_ready(dataman_info)
-
-        self._metadata.update(metadata)
-
-        metadata = make_json_ready(metadata)
+        # self._metadata is now fully enriched, so we just need to pass it
+        base_metadata = make_json_ready(self._metadata)
 
         return partial(
-            get_best_model,
+            create_replicate_model,
             compute_conf=compute_conf,
             rescaler=data_conf.rescaler,
-            metadata=metadata,
+            base_metadata=base_metadata,
+            loggers=self.loggers,
         )
 
+    def get_best_model_func(self):
+        """Returns a factory function for creating the best BiocompModel."""
+        replicate_model_factory = self.get_replicate_model_func()
+        return partial(get_best_model, model_factory=replicate_model_factory)
+
     def save_best(self, all_params, all_losses: list[np.ndarray], save_dir, name=None):
-        model = self.get_best_model_func()(all_params, all_losses)
+        model_factory = self.get_best_model_func()
+        model = model_factory(all_params=all_params, all_losses=all_losses)
         if model is None:
-            logger.warning("!!!!!! No best model found !!!!!")
+            logger.error("!!!!!! No best model found !!!!!")
             return
         if name is None:
             name = f"{model.signature}.bestmodel"
@@ -312,24 +326,29 @@ class TrainingProgram(BaseModel):
         logger.debug(f"Saved best model to {fname}")
 
     def save_outputs(self, all_params, all_losses: list, save_dir: Path):
-        save(all_params, save_dir / 'final_all_models.pickle')
         self.save_best(all_params, all_losses, save_dir)
 
         # Save loss history
         np.save(save_dir / 'loss_history.npy', all_losses)
+
+        # Collect per-replicate metrics from loggers for the final run metadata
+        logger_metrics = [
+            m for m in (logger.get_metrics(replicate=None) for logger in self.loggers) if m
+        ]
+        if logger_metrics:
+            self._metadata['logger_metrics_all_replicates'] = make_json_ready(logger_metrics)
 
         fig, ax = plot_loss(all_losses)
         assert self._metadata, "Metadata not set"
         assert self._run_name, "Run name not set"
 
         fig = print_matadata(fig, ax, self._metadata, run_name=self._run_name)
-
         fig.savefig(save_dir / 'summary_loss_plot.pdf')
-        # save metadata as json
+
         with open(save_dir / 'metadata.json', 'w') as f:
             import json
 
-            json.dump(self._metadata, f)
+            json.dump(make_json_ready(self._metadata), f, indent=2)
 
         logger.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
 
@@ -337,38 +356,53 @@ class TrainingProgram(BaseModel):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-def get_best_model(all_params, all_losses, compute_conf, rescaler, metadata=None):
+def create_replicate_model(
+    all_params, all_losses, replicate_id, compute_conf, rescaler, base_metadata, loggers
+):
+    """Creates a BiocompModel for a single, specific replicate with its latest metrics."""
     from biocomp.jaxutils import tree_get, tree_to_np
     import pickle
 
-    metadata = metadata or {}
-
-    best_model_id, smoothed_loss, end_loss = get_best_smoothed_loss_replicate_id(all_losses)
-    logger.debug(f"Best model is replicate number {best_model_id}")
-
-    params = tree_get(all_params, best_model_id)
+    params = tree_get(all_params, replicate_id)
     if params is None:
+        logger.warning(f"No parameters found for replicate {replicate_id}.")
         return None
 
-    copied_params = pickle.loads(pickle.dumps(params))
-
-    best_params = get_shared_params(copied_params)
-
-    if best_params is None:
+    shared_params = get_shared_params(pickle.loads(pickle.dumps(params)))
+    if shared_params is None:
         return None
 
-    local_metadata = metadata.copy()
-    local_metadata['replicate_number'] = best_model_id
-    local_metadata['end_loss'] = float(end_loss)
+    local_metadata = base_metadata.copy()
+    local_metadata['replicate_number'] = replicate_id
+
+    latest_loss = get_latest_avg_loss(all_losses, replicate_id)
+    if not np.isnan(latest_loss):
+        local_metadata['training_loss'] = latest_loss
+
+    rep_metrics = [
+        m for m in (logger.get_metrics(replicate=replicate_id) for logger in loggers) if m
+    ]
+    if rep_metrics:
+        local_metadata['logger_metrics'] = make_json_ready(rep_metrics)
 
     model = BiocompModel(
         compute_config=compute_conf,
         rescaler=rescaler,
-        shared_params=tree_to_np(best_params),
+        shared_params=tree_to_np(shared_params),
         metadata=make_json_ready(local_metadata),
     )
-
     return model
+
+
+def get_best_model(all_params, all_losses, model_factory: Callable):
+    """Finds the best replicate and uses the model_factory to create its model."""
+    best_model_id, _, _ = get_best_smoothed_loss_replicate_id(all_losses)
+    if best_model_id == -1:
+        logger.warning("Could not determine best model.")
+        return None
+
+    logger.debug(f"Best model is replicate number {best_model_id}")
+    return model_factory(all_params=all_params, all_losses=all_losses, replicate_id=best_model_id)
 
 
 def main():

@@ -62,19 +62,46 @@ def ffill(arr, mask=None):
     return arr[np.arange(idx.shape[0])[:, None], idx]
 
 
+def get_latest_avg_loss(all_losses: list[ndArray], replicate_id: int, window: int = 64) -> float:
+    """Calculates the average loss over the last `window` for a specific replicate."""
+    if not all_losses:
+        return np.nan
+    losses_array = np.concatenate(all_losses, axis=1)
+    if replicate_id >= losses_array.shape[0]:
+        return np.nan
+
+    replicate_losses = losses_array[replicate_id]
+    avg_window = min(window, len(replicate_losses))
+    latest_window = replicate_losses[-avg_window:]
+
+    return float(np.nanmean(latest_window))
+
+
 def get_best_smoothed_loss_replicate_id(
-    all_losses: list[ndArray],  # total_steps * (n_replicates, batches_per_step)
+    all_losses: list[ndArray],
     sigma: float = 12.0,
     max_window: int = 64,
 ) -> Tuple[int, np.ndarray, float]:
-    losses_array = np.concatenate(all_losses, axis=1)  # (n_replicates, batches_per_step)
+    """Determines the best replicate based on the average loss in the final window."""
+    if not all_losses:
+        return -1, np.array([]), np.inf
+
+    losses_array = np.concatenate(all_losses, axis=1)
+    n_replicates = losses_array.shape[0]
+
+    end_vals = np.array(
+        [get_latest_avg_loss(all_losses, i, window=max_window) for i in range(n_replicates)]
+    )
+
+    if np.all(np.isnan(end_vals)):
+        return -1, np.array([]), np.inf
+
+    best_replicate_id = int(np.nanargmin(end_vals))
+    best_loss_value = end_vals[best_replicate_id]
+
     smoothed_losses = gaussian_filter1d(losses_array, sigma=sigma, mode='nearest')
-    avg_window = max(min(max_window, losses_array.shape[1]), 1)
-    endval = np.mean(losses_array[:, -avg_window:], axis=1)
-    endval[np.isnan(endval)] = np.inf
-    best_replicate_id = int(np.argmin(endval))
-    end_loss_value = endval[best_replicate_id]
-    return best_replicate_id, smoothed_losses, end_loss_value
+
+    return best_replicate_id, smoothed_losses, best_loss_value
 
 
 def plot_loss(all_losses: list[ndArray]):
