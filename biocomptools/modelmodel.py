@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, model_validator, BeforeValidator, Field
 from dracon.utils import ser_debug
-from typing import Optional, List, Union, Tuple, Callable
+from typing import Optional, List, Union, Tuple, Callable, Type, TypeVar
 import numpy as np
 from pathlib import Path
 import pickle
@@ -67,6 +67,9 @@ class NodeSpec(BaseModel):
     node_id: int
 
 
+M = TypeVar('M', bound='BiocompModel')
+
+
 class BiocompModel(ArbitraryModel):
     """model containing compute configuration, rescaler, and shared parameters"""
 
@@ -106,6 +109,63 @@ class BiocompModel(ArbitraryModel):
             assert isinstance(m, cls)
             logger.debug(f"loaded model with signature {m.signature}")
             return m
+
+    def save_h5(self, filename: str):
+        """Saves the entire BiocompModel to a single HDF5 file."""
+        import h5py
+        import json
+
+        with h5py.File(filename, 'w') as f:
+            f.attrs['__model_class__'] = f"{self.__class__.__module__}.{self.__class__.__name__}"
+
+            f.attrs['compute_config'] = json.dumps(self.compute_config.model_dump())
+            f.attrs['rescaler'] = self.rescaler.model_dump_json()
+            f.attrs['metadata'] = json.dumps(self.metadata)
+
+            params_group = f.create_group('shared_params')
+            params_group.attrs['tagnames'] = self.shared_params.tagnames
+
+            data_group = params_group.create_group('data')
+            pr.save_ptree_to_hdf5_group(self.shared_params.data, data_group)
+
+            tags_group = params_group.create_group('tags')
+            pr.save_ptree_to_hdf5_group(self.shared_params.tags, tags_group)
+
+            print(f"Saved {self.__class__.__name__} to {filename}")
+
+    @classmethod
+    def load_h5(cls: Type[M], filename: str) -> M:
+        """Loads a BiocompModel from an HDF5 file."""
+        import h5py
+        import json
+        from pydantic import TypeAdapter
+
+        with h5py.File(filename, 'r') as f:
+            compute_config_data = json.loads(f.attrs['compute_config'])
+            compute_config = cmp.ComputeConfig.model_validate(compute_config_data)
+
+            # Pydantic v2's TypeAdapter is great for handling Unions like DataRescaler
+            rescaler_adapter = TypeAdapter(DataRescaler)
+            rescaler = rescaler_adapter.validate_json(f.attrs['rescaler'])
+
+            metadata = json.loads(f.attrs['metadata'])
+
+            # 2. Load the ParameterTree
+            params_group = f['shared_params']
+            tagnames = list(params_group.attrs.get('tagnames', []))
+
+            data_tree = pr.load_ptree_from_hdf5_group(params_group['data'])
+            tags_tree = pr.load_ptree_from_hdf5_group(params_group['tags'])
+
+            shared_params = pr.ParameterTree(data=data_tree, tags=tags_tree, tagnames=tagnames)
+
+            # 3. Instantiate the model class with the loaded components
+            return cls(
+                compute_config=compute_config,
+                rescaler=rescaler,
+                shared_params=shared_params,
+                metadata=metadata,
+            )
 
 
 def load_model(maybe_path):
