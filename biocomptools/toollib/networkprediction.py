@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
 
-def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> np.ndarray:
+def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> NdArray:
     """
     Create a hypercube grid of points in n dimensions.
     """
@@ -33,22 +33,22 @@ def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) 
     return np.vstack([g.ravel() for g in grid]).T
 
 
-def validate_predict_at(v: Any) -> List[np.ndarray]:
+def validate_predict_at(v: Any) -> List[NdArray]:
     """convert single numpy array to list of arrays"""
-    if isinstance(v, np.ndarray):
+    if isinstance(v, NdArray):
         return [np.asarray(v, dtype=np.float32)]
-    if isinstance(v, list) and all(isinstance(x, np.ndarray) for x in v):
+    if isinstance(v, list) and all(isinstance(x, NdArray) for x in v):
         return [np.asarray(x, dtype=np.float32) for x in v]
     return v
 
 
-def validate_ground_truth(v: Any) -> Optional[List[Optional[np.ndarray]]]:
+def validate_ground_truth(v: Any) -> Optional[List[Optional[NdArray]]]:
     """convert single numpy array to list of arrays or none to list of none"""
     if v is None:
         return None
-    if isinstance(v, np.ndarray):
+    if isinstance(v, NdArray):
         return [np.asarray(v, dtype=np.float32)]
-    if isinstance(v, list) and all(isinstance(x, (np.ndarray, type(None))) for x in v):
+    if isinstance(v, list) and all(isinstance(x, (NdArray, type(None))) for x in v):
         return [np.asarray(x, dtype=np.float32) if x is not None else None for x in v]
     return v
 
@@ -65,9 +65,9 @@ def validate_input_order(v: Any) -> Optional[List[List[int]]]:
 # static function for parallel processing
 def _calculate_single_network_stats(
     network_idx: int,
-    yhat: np.ndarray,
-    gt: Optional[np.ndarray],
-    x: np.ndarray,
+    yhat: NdArray,
+    gt: Optional[NdArray],
+    x: NdArray,
     output_pos: Union[int, List[int]],
     nb_points_in_eval: int,
     rescaler,
@@ -110,9 +110,9 @@ def _calculate_single_network_stats(
 
 
 def _calculate_grid_stats(
-    latent_yhat: np.ndarray,
-    latent_gt: np.ndarray,
-    latent_x: np.ndarray,
+    latent_yhat: NdArray,
+    latent_gt: NdArray,
+    latent_x: NdArray,
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
@@ -202,11 +202,11 @@ class NetworkPrediction(DataSource):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
-    predict_at: Annotated[Union[np.ndarray, List[np.ndarray]], BeforeValidator(validate_predict_at)]
+    predict_at: Annotated[Union[NdArray, List[NdArray]], BeforeValidator(validate_predict_at)]
     network_model: NetworkModel
     input_order: Annotated[Optional[List[List[int]]], BeforeValidator(validate_input_order)] = None
     ground_truth: Annotated[
-        Optional[Union[np.ndarray, List[Optional[np.ndarray]]]],
+        Optional[Union[NdArray, List[Optional[NdArray]]]],
         BeforeValidator(validate_ground_truth),
     ] = None
 
@@ -236,11 +236,11 @@ class NetworkPrediction(DataSource):
 
     verbose: bool = False  # print prediction statistics to the console
 
-    _yhats: Optional[List[np.ndarray]] = None
-    _x: Optional[List[np.ndarray]] = None
-    _gtruths: Optional[List[Optional[np.ndarray]]] = None
-    _aligned_x: Optional[List[np.ndarray]] = None
-    _aligned_ground_truth: Optional[List[Optional[np.ndarray]]] = None
+    _yhats: Optional[List[NdArray]] = None
+    _x: Optional[List[NdArray]] = None
+    _gtruths: Optional[List[Optional[NdArray]]] = None
+    _aligned_x: Optional[List[NdArray]] = None
+    _aligned_ground_truth: Optional[List[Optional[NdArray]]] = None
     _network_stats: Optional[List[Dict[str, Any]]] = None
 
     def model_post_init(self, *args, **kwargs):
@@ -309,7 +309,7 @@ class NetworkPrediction(DataSource):
         self.predict_at = new_predict_at
         self.ground_truth = new_gt
 
-    def _prepare_inputs(self) -> Tuple[List[np.ndarray], List[Optional[np.ndarray]]]:
+    def _prepare_inputs(self) -> Tuple[List[NdArray], List[Optional[NdArray]]]:
         """prepare inputs by padding or truncating to the same length"""
         max_prediction_length = max(len(x) for x in self.predict_at)
         logger.debug(f"max_prediction_length across networks: {max_prediction_length}")
@@ -419,7 +419,7 @@ class NetworkPrediction(DataSource):
 
         self._network_stats = self._calculate_all_network_stats()
 
-    def _process_prediction_results(self, network_outputs: List[np.ndarray], max_evals: int):
+    def _process_prediction_results(self, network_outputs: List[NdArray], max_evals: int):
         """process and store prediction results"""
         self._x = []
         self._yhats = []
@@ -451,10 +451,10 @@ class NetworkPrediction(DataSource):
 
     def _create_xy_function(
         self, network_idx: int
-    ) -> Callable[[PlotData], Tuple[np.ndarray, np.ndarray]]:
+    ) -> Callable[[PlotData], Tuple[NdArray, NdArray]]:
         """create a function to get x and y data for a specific network"""
 
-        def get_xy(pdata: PlotData) -> Tuple[np.ndarray, np.ndarray]:
+        def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
             if self.verbose:
                 logger.debug(
                     f"getting xy for network {network_idx} with model {self.network_model.signature}"
@@ -509,9 +509,9 @@ class NetworkPrediction(DataSource):
         self,
         network_idx: int,
         prediction_stats: Dict[str, Any],
-        latent_gt: np.ndarray,
-        latent_yhat: np.ndarray,
-        latent_x: np.ndarray,
+        latent_gt: NdArray,
+        latent_yhat: NdArray,
+        latent_x: NdArray,
     ):
         if self.verbose:
             n_samples = 5
