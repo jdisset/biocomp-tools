@@ -27,6 +27,7 @@ from functools import partial
 import dracon as dr
 from dracon.deferred import DeferredNode
 from dracon.commandline import make_program, Arg
+import asyncio
 
 import sys
 import numpy as np
@@ -248,7 +249,7 @@ class TrainingProgram(BaseModel):
             }
         )
 
-    def run(self):
+    async def run(self):
         from biocomp.train import start
 
         # Prepare output directory
@@ -278,7 +279,7 @@ class TrainingProgram(BaseModel):
             logger_callbacks.extend(callbacks)
 
         # Start training
-        all_params, all_losses, step_history = start(
+        all_params, all_losses, step_history = await start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
@@ -405,7 +406,7 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
     return model_factory(all_params=all_params, all_losses=all_losses, replicate_id=best_model_id)
 
 
-def main():
+async def main():
     cliprog = make_program(
         TrainingProgram,
         name='biocomp-train',
@@ -420,8 +421,8 @@ def main():
         capture_globals=False,
     )
     assert isinstance(trainprog, TrainingProgram), f"{trainprog=}"
-    trainprog.run()
+    await trainprog.run()
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
