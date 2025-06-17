@@ -11,6 +11,7 @@ from biocomp.parameters import ParameterTree, PTree, flatten_PTree, get_path_com
 from biocomp.jaxutils import tree_get
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
+from biocomptools.modelmodel import get_shared_params, get_nonshared_params
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -24,6 +25,74 @@ def get_plot_rows_and_columns(num_plots: int, ideal_ratio: float = 1.5):
     if n_cols == 0:
         n_cols = 1
     return n_rows, n_cols
+
+
+def _count_filtered_parameters(params_section):
+    """Count the number of non-ArrayRef parameters in a section."""
+    if params_section is None:
+        return 0
+
+    params_data = (
+        params_section.data if isinstance(params_section, ParameterTree) else params_section
+    )
+    pvalues, (pnames, _) = flatten_PTree(params_data)
+
+    count = 0
+    for name in pnames:
+        # Skip ArrayRef parameters
+        if hasattr(name, "actual_path"):
+            continue
+        # Skip parameters whose name ends with "variable_id"
+        name_components = get_path_components(name)
+        if name_components and name_components[-1].endswith("variable_id"):
+            continue
+        count += 1
+
+    return count
+
+
+def _calculate_figure_dimensions(
+    shared_params,
+    nonshared_params,
+    plot_local_params,
+    base_width=4.0,
+    base_height=3,
+):
+    """Calculate figure dimensions based on parameter counts and subplot layouts."""
+    shared_count = _count_filtered_parameters(shared_params)
+    nonshared_count = _count_filtered_parameters(nonshared_params) if plot_local_params else 0
+
+    # Calculate rows and columns for each section
+    shared_rows = 0
+    shared_cols = 0
+    if shared_count > 0:
+        shared_rows, shared_cols = get_plot_rows_and_columns(shared_count, ideal_ratio=1.25)
+
+    nonshared_rows = 0
+    nonshared_cols = 0
+    if nonshared_count > 0:
+        nonshared_rows, nonshared_cols = get_plot_rows_and_columns(
+            nonshared_count, ideal_ratio=1.25
+        )
+
+    # Determine overall dimensions
+    max_cols = max(shared_cols, nonshared_cols)
+    total_rows = shared_rows + nonshared_rows
+
+    if max_cols == 0:
+        max_cols = 1
+    if total_rows == 0:
+        total_rows = 1
+
+    # Calculate figure size with consistent subplot sizing
+    fwidth = max_cols * base_width + 1.0  # add margin
+    fheight = total_rows * base_height + 2.0  # add margin for titles
+
+    # Apply reasonable bounds
+    fwidth = max(7, min(fwidth, 35))
+    fheight = max(7, min(fheight, 45))
+
+    return fwidth, fheight, shared_rows, nonshared_rows
 
 
 def format_stat(value: float, threshold: float = 1e-3) -> str:
@@ -60,15 +129,17 @@ def _compute_statistics(pvalues_flat, gvalues_flat, pnames, learning_rate, shape
 
         if has_grads and i < len(gvalues_flat):
             g_flat = gvalues_flat[i]
-            g_l2 = np.linalg.norm(g_flat)
-            stats['g'] = {
-                'l2': g_l2,
-                'mean': np.mean(g_flat),
-                # Handle single element case for std calculation
-                'std': np.std(g_flat) if g_flat.size > 1 else 0.0,
-            }
-            if has_lr and w_l2 > 1e-9:
-                stats['ratio'] = (learning_rate * g_l2) / w_l2
+            # Handle None gradients
+            if g_flat is not None:
+                g_l2 = np.linalg.norm(g_flat)
+                stats['g'] = {
+                    'l2': g_l2,
+                    'mean': np.mean(g_flat),
+                    # Handle single element case for std calculation
+                    'std': np.std(g_flat) if g_flat.size > 1 else 0.0,
+                }
+                if has_lr and w_l2 > 1e-9:
+                    stats['ratio'] = (learning_rate * g_l2) / w_l2
 
         stats_list.append(stats)
 
@@ -161,6 +232,26 @@ def _get_title_color(last_name_part, colors):
         return colors['title_special']
     else:
         return colors['title_default']
+
+
+def _format_name_tuple_for_title(name_tuple, skip_first_name=True):
+    """
+    Format name_tuple for display, handling ArrayRefPath properly.
+
+    For ArrayRefPath, show the actual_path clearly marked as a reference.
+    For regular ParamPath, show the path components.
+    """
+    if hasattr(name_tuple, "actual_path"):  # ArrayRefPath
+        actual_components = get_path_components(name_tuple.actual_path)
+        display_path = '/'.join(
+            actual_components[1:]
+            if skip_first_name and len(actual_components) > 1
+            else actual_components
+        )
+        return f"{display_path} [ArrayRef]"
+    else:  # Regular ParamPath or tuple
+        components = get_path_components(name_tuple)
+        return '/'.join(components[1:] if skip_first_name and len(components) > 1 else components)
 
 
 def _build_stat_matrix(stats, stat_ranges, stat_keys, num_rows):
@@ -313,7 +404,7 @@ def _plot_layer(
     ax.tick_params(colors=colors['text_color'])
     ax.tick_params(axis='y', labelcolor=colors['weights_label'])
 
-    if g_flat is not None:
+    if g_flat is not None and g_flat.size > 0:
         ax_grad = ax.twinx()
         g_counts, _ = np.histogram(g_flat, bins=shared_bins)
         ax_grad.bar(
@@ -329,18 +420,155 @@ def _plot_layer(
         ax_grad.spines['top'].set_visible(False)
         ax_grad.spines['left'].set_visible(False)
         ax_grad.spines['right'].set_color(colors['grid_color'])
+    elif g_flat is None:
+        # Show "[no gradients]" label when gradients are missing
+        ax_grad = ax.twinx()
+        ax_grad.set_ylabel("[no gradients]", color=colors['gradients_label'], fontsize=9)
+        ax_grad.set_ylim(0, 1)
+        ax_grad.set_yticks([])
+        ax_grad.spines['top'].set_visible(False)
+        ax_grad.spines['left'].set_visible(False)
+        ax_grad.spines['right'].set_color(colors['grid_color'])
 
     last_name = get_path_components(name_tuple)[-1]
     title_color = _get_title_color(last_name, colors)
-    layer_name = '/'.join(get_path_components(name_tuple)[1:] if skip_first_name else name_tuple)
+    layer_name = _format_name_tuple_for_title(name_tuple, skip_first_name)
+
+    # Create title with parameter count in brackets instead of parentheses
+    full_title = f"{layer_name} [{stats['w']['size']:,}]"
     ax.set_title(
-        f"{layer_name} ({stats['w']['size']:,})",
+        full_title,
         fontsize=11,
         color=title_color,
         y=1.4,
     )
 
-    _add_stats_heatmap(ax, stats, stat_ranges, g_flat is not None, colors)
+    _add_stats_heatmap(ax, stats, stat_ranges, g_flat is not None and g_flat.size > 0, colors)
+
+
+def _plot_parameter_section(
+    subfig,
+    params_section,
+    gradients_section,
+    section_name: str,
+    learning_rate: Optional[float],
+    bins: int,
+    skip_first_name: bool,
+    colors,
+    grid_alpha: float,
+    bg_color: str = '#ffffff',
+):
+    """Plot a section (shared or non-shared) of parameters in a subfigure."""
+    if params_section is None:
+        return
+
+    # Filter out ArrayRef parameters
+    params_data = (
+        params_section.data if isinstance(params_section, ParameterTree) else params_section
+    )
+    pvalues, (pnames, _) = flatten_PTree(params_data)
+
+    filtered_indices = []
+    for i, name in enumerate(pnames):
+        # Skip ArrayRef parameters
+        if hasattr(name, "actual_path"):
+            continue
+        # Skip parameters whose name ends with "variable_id"
+        name_components = get_path_components(name)
+        if name_components and name_components[-1].endswith("variable_id"):
+            continue
+        filtered_indices.append(i)
+
+    if not filtered_indices:
+        return
+
+    # Filter the data
+    pvalues_filtered = [pvalues[i] for i in filtered_indices]
+    pnames_filtered = [pnames[i] for i in filtered_indices]
+
+    pvalues_flat = []
+    pvalues_shapes = []
+    for p in pvalues_filtered:
+        p_arr = np.array(p, dtype=np.float32)
+        pvalues_flat.append(p_arr.flatten())
+        pvalues_shapes.append(p_arr.shape)
+
+    # Handle gradients
+    gvalues_flat = []
+    if gradients_section is not None:
+        grads_data = (
+            gradients_section.data
+            if isinstance(gradients_section, ParameterTree)
+            else gradients_section
+        )
+        gvalues, (gnames, _) = flatten_PTree(grads_data)
+        
+        # Filter gradients to match filtered parameters
+        gvalues_filtered = []
+        for i in filtered_indices:
+            if i < len(gvalues):
+                gvalues_filtered.append(gvalues[i])
+            else:
+                # If gradient doesn't exist for this parameter, mark as None
+                gvalues_filtered.append(None)
+        
+        gvalues_flat = []
+        for g in gvalues_filtered:
+            if g is not None:
+                gvalues_flat.append(np.array(g, dtype=np.float32).flatten())
+            else:
+                gvalues_flat.append(None)
+
+    if not pvalues_flat:
+        return
+
+    stats_list, stat_ranges = _compute_statistics(
+        pvalues_flat, gvalues_flat, pnames_filtered, learning_rate, pvalues_shapes
+    )
+
+    num_layers = len(pvalues_flat)
+    n_rows, n_cols = get_plot_rows_and_columns(num_layers, ideal_ratio=1.25)
+
+    # Create subplots in the subfigure
+    axes = subfig.subplots(
+        n_rows,
+        n_cols,
+        gridspec_kw={
+            'hspace': 1.2,
+            'wspace': 0.8,
+        },
+    )
+
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+    axes_flat = axes.flatten()
+
+    # Set background color for all axes
+    for ax in axes_flat:
+        ax.set_facecolor(bg_color)
+
+    # Plot each parameter
+    for i, ax in enumerate(axes_flat):
+        if i >= num_layers or stats_list[i] is None:
+            ax.set_visible(False)
+            continue
+
+        _plot_layer(
+            ax,
+            i,
+            pvalues_flat[i],
+            gvalues_flat[i] if gvalues_flat and i < len(gvalues_flat) else None,
+            pnames_filtered[i],
+            stats_list[i],
+            stat_ranges,
+            bins,
+            skip_first_name,
+            colors,
+            grid_alpha,
+        )
+
+    # Add section title
+    subfig.suptitle(f"{section_name} Parameters", fontsize=12, color=colors['text_color'], y=0.95)
 
 
 def plot_parameter_diagnostics(
@@ -353,6 +581,7 @@ def plot_parameter_diagnostics(
     skip_first_name: bool = True,
     colors=None,
     grid_alpha: float = 0.15,
+    plot_local_params: bool = True,
 ):
     if colors is None:
         colors = {
@@ -368,79 +597,86 @@ def plot_parameter_diagnostics(
             'bg_color': 'white',
             'text_color': 'black',
             'grid_color': 'gray',
+            'shared_bg': '#EEFDF7aa',
+            'nonshared_bg': '#FDF6EEaa',
         }
 
-    params_data = params.data if isinstance(params, ParameterTree) else params
-    pvalues, (pnames, _) = flatten_PTree(params_data)
+    # Separate shared and non-shared parameters using the proper functions
+    shared_params = get_shared_params(params)
+    nonshared_params = get_nonshared_params(params) if plot_local_params else None
 
-    pvalues_flat = []
-    pvalues_shapes = []
-    for p in pvalues:
-        p_arr = np.array(p, dtype=np.float32)
-        pvalues_flat.append(p_arr.flatten())
-        pvalues_shapes.append(p_arr.shape)
+    shared_gradients = None
+    nonshared_gradients = None
+    if param_gradients is not None:
+        shared_gradients = get_shared_params(param_gradients)
+        nonshared_gradients = get_nonshared_params(param_gradients) if plot_local_params else None
 
-    has_grads = param_gradients is not None
-    has_lr = learning_rate is not None
+    # Determine height ratios based on which sections have data
+    has_shared = shared_params is not None
+    has_nonshared = nonshared_params is not None and plot_local_params
 
-    gvalues_flat = []
-    if has_grads:
-        grads_data = (
-            param_gradients.data if isinstance(param_gradients, ParameterTree) else param_gradients
-        )
-        gvalues, _ = flatten_PTree(grads_data)
-        gvalues_flat = [np.array(g, dtype=np.float32).flatten() for g in gvalues]
-
-    stats_list, stat_ranges = _compute_statistics(
-        pvalues_flat, gvalues_flat, pnames, learning_rate, pvalues_shapes
+    # Calculate optimal figure dimensions based on parameter counts
+    fwidth, fheight, shared_rows, nonshared_rows = _calculate_figure_dimensions(
+        shared_params, nonshared_params, plot_local_params
     )
 
-    num_layers = len(pvalues_flat)
-    n_rows, n_cols = get_plot_rows_and_columns(num_layers)
-
-    hspace = 1.2
-    wspace = 0.7
-    top = 0.92
-    bottom = 0.02
-    left = 0.03
-    right = 0.97
-
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(n_cols * 3.5, n_rows * 2.5),
-        gridspec_kw={
-            'hspace': hspace,
-            'wspace': wspace,
-            'top': top,
-            'bottom': bottom,
-            'left': left,
-            'right': right,
-        },
-    )
-    fig.suptitle(title, fontsize=16, color=colors['text_color'], y=0.96)
+    # Create figure with subfigures
+    fig = plt.figure(figsize=(fwidth, fheight))
+    fig.suptitle(title, fontsize=16, color=colors['text_color'], y=0.98)
     fig.patch.set_facecolor(colors['bg_color'])
 
-    if not isinstance(axes, np.ndarray):
-        axes = np.array([axes])
-    axes_flat = axes.flatten()
+    if has_shared and has_nonshared:
+        # Use proportional height ratios based on actual row counts
+        height_ratios = (
+            [shared_rows, nonshared_rows] if shared_rows > 0 and nonshared_rows > 0 else [1, 1]
+        )
+        subfigs = fig.subfigures(2, 1, height_ratios=height_ratios, hspace=0.0)
+        shared_subfig = subfigs[0]
+        nonshared_subfig = subfigs[1]
+        shared_subfig.patch.set_facecolor(colors['shared_bg'])
+        nonshared_subfig.patch.set_facecolor(colors['nonshared_bg'])
+    elif has_shared:
+        shared_subfig = (
+            fig.subfigures(1, 1)[0]
+            if isinstance(fig.subfigures(1, 1), list)
+            else fig.subfigures(1, 1)
+        )
+        shared_subfig.patch.set_facecolor(colors['shared_bg'])
+        nonshared_subfig = None
+    elif has_nonshared:
+        shared_subfig = None
+        nonshared_subfig = (
+            fig.subfigures(1, 1)[0]
+            if isinstance(fig.subfigures(1, 1), list)
+            else fig.subfigures(1, 1)
+        )
+        nonshared_subfig.patch.set_facecolor(colors['nonshared_bg'])
+    else:
+        # No parameters to plot
+        return fig
 
-    for ax in axes_flat:
-        ax.set_facecolor(colors['bg_color'])
+    # Plot shared parameters with light blue background
+    if has_shared and shared_subfig is not None:
+        _plot_parameter_section(
+            shared_subfig,
+            shared_params,
+            shared_gradients,
+            "SHARED",
+            learning_rate,
+            bins,
+            skip_first_name,
+            colors,
+            grid_alpha,
+        )
 
-    for i, ax in enumerate(axes_flat):
-        if i >= num_layers or stats_list[i] is None:
-            ax.set_visible(False)
-            continue
-
-        _plot_layer(
-            ax,
-            i,
-            pvalues_flat[i],
-            gvalues_flat[i] if has_grads else None,
-            pnames[i],
-            stats_list[i],
-            stat_ranges,
+    # Plot non-shared parameters with light green background
+    if has_nonshared and nonshared_subfig is not None:
+        _plot_parameter_section(
+            nonshared_subfig,
+            nonshared_params,
+            nonshared_gradients,
+            "LOCAL",
+            learning_rate,
             bins,
             skip_first_name,
             colors,
@@ -470,6 +706,12 @@ class ParamGradLogger(Logger):
         description="Optional learning rate to compute update/weight ratio. If not provided, this ratio is not computed.",
     )
     dpi: int = Field(default=200, description="DPI for the saved plot images.")
+    plot_local_params: bool = Field(
+        default=False,
+        description="Whether to plot local (non-shared) parameters. If False, only shared parameters are plotted.",
+    )
+
+    replicate: Optional[int] = None
 
     # Private state
     _save_dir: Optional[Path] = None
@@ -503,30 +745,30 @@ class ParamGradLogger(Logger):
             grads = step_history.get('grad')  # Gradients are optional
 
             n_replicates = training_config.n_replicates
+            import time
 
+            times = []
             for i in range(n_replicates):
+                t0 = time.time()
                 replicate_params = tree_get(params, i)
-
                 replicate_gradients = None
                 if grads is not None:
-                    grads_for_rep = tree_get(grads, i)
-                    if grads_for_rep is not None:
-                        # Grads have a leading dimension for batches_per_step, so we average over it.
-                        replicate_gradients = jax.tree_util.tree_map(
-                            lambda x: x.mean(axis=0), grads_for_rep
-                        )
-
+                    replicate_gradients = tree_get(grads, i)
+                t1 = time.time()
                 fig = plot_parameter_diagnostics(
                     params=replicate_params,
                     param_gradients=replicate_gradients,
                     learning_rate=self.learning_rate,
                     title=f"Parameter Diagnostics - Step {step}",
                     show_plot=False,
+                    plot_local_params=self.plot_local_params,
                 )
+                t2 = time.time()
 
                 try:
                     save_path = (
-                        self._save_dir / f"plots/rep{i}/paramsdiag/{step:04d}_paramsdiag.png"
+                        self._save_dir
+                        / f"plots/params_diagnostics/replicate{i}/{step:04d}_params.png"
                     )
                     save_path.parent.mkdir(parents=True, exist_ok=True)
                     fig.savefig(save_path, dpi=self.dpi)
@@ -534,5 +776,15 @@ class ParamGradLogger(Logger):
                     logger.error(f"Failed to save parameter diagnostic plot: {e}")
                 finally:
                     plt.close(fig)
+                    t3 = time.time()
+                    times.append((t1 - t0, t2 - t1, t3 - t2))
+
+            for i, (t0, t1, t2) in enumerate(times):
+                print(
+                    f"Replicate {i}: "
+                    f"Param extraction: {t0:.2f}s, "
+                    f"Plot generation: {t1:.2f}s, "
+                    f"Saving: {t2:.2f}s"
+                )
 
         return [(self.periods, log_param_grads)]
