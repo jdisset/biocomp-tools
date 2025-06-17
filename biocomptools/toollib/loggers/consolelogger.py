@@ -24,6 +24,8 @@ class EnhancedConsoleLogger(Logger):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._history: Dict[int, Dict] = {}
+        self._replicate_histories: Dict[int, List] = {}  # replicate_id -> list of all losses
+        self._global_step_counter = 0
         self._best_mean_loss = float('inf')
 
     def _print_step_stats(self, step: int, losses: np.ndarray):
@@ -59,31 +61,42 @@ class EnhancedConsoleLogger(Logger):
             'best_mean': best_mean,
         }
 
+        # Update per-replicate full history
+        for replicate_id, replicate_losses in enumerate(losses):
+            if replicate_id not in self._replicate_histories:
+                self._replicate_histories[replicate_id] = []
+            self._replicate_histories[replicate_id].extend(replicate_losses)
+
         if best_mean < self._best_mean_loss:
             self._best_mean_loss = best_mean
 
     def _plot_loss_history(self):
-        """Plot the loss history in the console using log scale"""
+        """Plot the loss history in the console using log scale - one line per replicate"""
         import plotext as plt
 
-        if not self._history:
+        if not self._replicate_histories:
             return
-
-        steps = np.cumsum([v['losses'].shape[1] for _, v in self._history.items()])
-        best_means = [float(self._history[k]['best_mean']) for k in self._history]
 
         plt.clf()
         plt.theme("matrix")
         plt.plot_size(self.plot_width, self.plot_height)
-        plt.plot(steps, best_means, marker="braille")
+        
+        # Plot each replicate as a separate line
+        colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'white']
+        for replicate_id, loss_history in self._replicate_histories.items():
+            if loss_history:  # only plot if we have data
+                x_values = list(range(len(loss_history)))
+                color = colors[replicate_id % len(colors)]
+                plt.plot(x_values, loss_history, marker="braille", color=color, label=f"Rep {replicate_id}")
+        
         plt.yscale("log")
-        plt.title(f"Training Loss (current best: {self._best_mean_loss:.4f})")
+        plt.title(f"Training Loss per Replicate (best avg: {self._best_mean_loss:.4f})")
         plt.xlabel("Batch")
         plt.ylabel("Loss (log scale)")
         plt.show()
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        def log_loss(step, training_config, step_history=None, **kwargs):
+        def log_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
             if step_history is not None:
                 losses = step_history.get('loss')
                 if losses is not None:
@@ -101,7 +114,7 @@ class ConsoleLogger(Logger):
         super().__init__(*args, **kwargs)
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        def log_loss(step, training_config, step_history=None, **kwargs):
+        def log_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
             # we will show the avg, min and max loss of the current step for each replicate:
             if step_history is not None:
                 losses = step_history.get('loss')

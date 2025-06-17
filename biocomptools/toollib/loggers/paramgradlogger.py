@@ -1,4 +1,6 @@
 ## {{{                          --     imports     --
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent GUI issues in threads
 import matplotlib.pyplot as plt
 import numpy as np
 import jax
@@ -531,11 +533,11 @@ def _plot_parameter_section(
         for i, g in enumerate(gvalues_filtered):
             if g is not None:
                 g_arr = np.array(g, dtype=np.float32)
-                
+
                 # validate gradient shape matches parameter shape (ignoring trailing dims of size 1)
                 g_shape_squeezed = tuple(d for d in g_arr.shape if d != 1)
                 p_shape_squeezed = tuple(d for d in pvalues_shapes[i] if d != 1)
-                
+
                 if g_shape_squeezed != p_shape_squeezed:
                     logger.warning(
                         f"Gradient shape {g_arr.shape} does not match parameter shape "
@@ -606,7 +608,7 @@ def plot_parameter_diagnostics(
     learning_rate: Optional[float] = None,
     title: str = "Parameter & Gradient Diagnostics",
     bins: int = 30,
-    show_plot: bool = True,
+    show_plot: bool = False,
     skip_first_name: bool = True,
     colors=None,
     grid_alpha: float = 0.15,
@@ -755,7 +757,13 @@ class ParamGradLogger(Logger):
         """Returns the callback for logging parameter and gradient diagnostics."""
 
         def log_param_grads(
-            step: int, training_config, step_history: Optional[dict] = None, **kwargs
+            step: int,
+            training_config,
+            step_history: Optional[dict] = None,
+            xbatches=None,
+            ybatches=None,
+            stack=None,
+            **kwargs,
         ):
             if step == 0:  # Skip initial state
                 return
@@ -772,15 +780,15 @@ class ParamGradLogger(Logger):
 
             params = step_history['latest_params']
             grads = step_history.get('grad')  # Gradients are optional
-            
+
             # Extract learning rate from step_history if available
             effective_learning_rate = self.learning_rate
             lr_display_text = ""
-            
+
             if 'learning_rate' in step_history and self.learning_rate is None:
                 # learning_rate contains history across all batches in the step
                 lr_history = step_history['learning_rate']
-                
+
                 # Extract learning rates for first replicate to check pattern
                 first_replicate_lr = tree_get(lr_history, 0)
                 if first_replicate_lr is not None:
@@ -789,12 +797,12 @@ class ParamGradLogger(Logger):
                         start_lr = float(lr_array[0])
                         end_lr = float(lr_array[-1])
                         mean_lr = float(lr_array.mean())
-                        
+
                         if np.allclose(lr_array, start_lr):
                             lr_display_text = f"learning rate: {start_lr:.2e}"
                         else:
                             lr_display_text = f"learning rate: {start_lr:.2e} → {end_lr:.2e}"
-                        
+
                         effective_learning_rate = mean_lr
                     else:  # scalar learning rate
                         effective_learning_rate = float(lr_array)
@@ -812,22 +820,22 @@ class ParamGradLogger(Logger):
                     # grads contains history across all batches in the step
                     # we need to average them to get the mean gradient for the step
                     replicate_grads_history = tree_get(grads, i)
-                    
+
                     # average gradients across batch history
                     if replicate_grads_history is not None:
                         # the gradient history is structured as a tree where each leaf
                         # contains an array with shape (batches_per_step, *param_shape)
                         replicate_gradients = jax.tree.map(
                             lambda g: g.mean(axis=0) if g is not None else None,
-                            replicate_grads_history
+                            replicate_grads_history,
                         )
                 t1 = time.time()
-                
+
                 # Create title with learning rate info
                 main_title = f"Parameter Diagnostics - Step {step}"
                 if lr_display_text:
                     main_title += f"\n{lr_display_text}"
-                
+
                 fig = plot_parameter_diagnostics(
                     params=replicate_params,
                     param_gradients=replicate_gradients,

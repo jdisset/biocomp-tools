@@ -320,7 +320,7 @@ class ValidationLossLogger(Logger):
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         self.initialize(training_program)
 
-        def log_validation_loss(step, training_config, step_history=None, **kwargs):
+        def log_validation_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
             if step_history is None or 'latest_params' not in step_history:
                 logger.warning("No latest params available for validation")
                 return
