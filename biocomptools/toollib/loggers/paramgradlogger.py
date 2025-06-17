@@ -16,8 +16,10 @@ from biocomptools.modelmodel import get_shared_params, get_nonshared_params
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+IDEAL_RATIO = 0.65
 
-def get_plot_rows_and_columns(num_plots: int, ideal_ratio: float = 1.5):
+
+def get_plot_rows_and_columns(num_plots: int, ideal_ratio: float = IDEAL_RATIO):
     n_cols = int(ceil(sqrt(num_plots / ideal_ratio)))
     n_rows = int(ceil(num_plots / n_cols))
     if n_rows == 0:
@@ -66,13 +68,13 @@ def _calculate_figure_dimensions(
     shared_rows = 0
     shared_cols = 0
     if shared_count > 0:
-        shared_rows, shared_cols = get_plot_rows_and_columns(shared_count, ideal_ratio=1.25)
+        shared_rows, shared_cols = get_plot_rows_and_columns(shared_count, ideal_ratio=IDEAL_RATIO)
 
     nonshared_rows = 0
     nonshared_cols = 0
     if nonshared_count > 0:
         nonshared_rows, nonshared_cols = get_plot_rows_and_columns(
-            nonshared_count, ideal_ratio=1.25
+            nonshared_count, ideal_ratio=IDEAL_RATIO
         )
 
     # Determine overall dimensions
@@ -89,8 +91,8 @@ def _calculate_figure_dimensions(
     fheight = total_rows * base_height + 2.0  # add margin for titles
 
     # Apply reasonable bounds
-    fwidth = max(7, min(fwidth, 35))
-    fheight = max(7, min(fheight, 45))
+    fwidth = max(7, min(fwidth, 55))
+    fheight = max(7, min(fheight, 40))
 
     return fwidth, fheight, shared_rows, nonshared_rows
 
@@ -122,6 +124,7 @@ def _compute_statistics(pvalues_flat, gvalues_flat, pnames, learning_rate, shape
                 'mean': w_mean,
                 'std': w_std,
                 'size': w_flat.size,
+                'shape': shapes[i] if i < len(shapes) else w_flat.size,
             },
             'g': {},
             'ratio': np.nan,
@@ -131,15 +134,22 @@ def _compute_statistics(pvalues_flat, gvalues_flat, pnames, learning_rate, shape
             g_flat = gvalues_flat[i]
             # Handle None gradients
             if g_flat is not None:
-                g_l2 = np.linalg.norm(g_flat)
-                stats['g'] = {
-                    'l2': g_l2,
-                    'mean': np.mean(g_flat),
-                    # Handle single element case for std calculation
-                    'std': np.std(g_flat) if g_flat.size > 1 else 0.0,
-                }
-                if has_lr and w_l2 > 1e-9:
-                    stats['ratio'] = (learning_rate * g_l2) / w_l2
+                # double-check shape consistency
+                if g_flat.size != w_flat.size:
+                    logger.warning(
+                        f"Gradient size {g_flat.size} does not match parameter size "
+                        f"{w_flat.size} for parameter {pnames[i]}"
+                    )
+                else:
+                    g_l2 = np.linalg.norm(g_flat)
+                    stats['g'] = {
+                        'l2': g_l2,
+                        'mean': np.mean(g_flat),
+                        # Handle single element case for std calculation
+                        'std': np.std(g_flat) if g_flat.size > 1 else 0.0,
+                    }
+                    if has_lr and w_l2 > 1e-9:
+                        stats['ratio'] = (learning_rate * g_l2) / w_l2
 
         stats_list.append(stats)
 
@@ -434,8 +444,13 @@ def _plot_layer(
     title_color = _get_title_color(last_name, colors)
     layer_name = _format_name_tuple_for_title(name_tuple, skip_first_name)
 
-    # Create title with parameter count in brackets instead of parentheses
-    full_title = f"{layer_name} [{stats['w']['size']:,}]"
+    # Create title with parameter shape in brackets
+    param_shape = stats['w'].get('shape', stats['w']['size'])
+    if isinstance(param_shape, tuple):
+        shape_str = str(param_shape)
+    else:
+        shape_str = f"({param_shape:,},)"  # fallback to size if shape not available
+    full_title = f"{layer_name} {shape_str}"
     ax.set_title(
         full_title,
         fontsize=11,
@@ -502,7 +517,7 @@ def _plot_parameter_section(
             else gradients_section
         )
         gvalues, (gnames, _) = flatten_PTree(grads_data)
-        
+
         # Filter gradients to match filtered parameters
         gvalues_filtered = []
         for i in filtered_indices:
@@ -511,11 +526,25 @@ def _plot_parameter_section(
             else:
                 # If gradient doesn't exist for this parameter, mark as None
                 gvalues_filtered.append(None)
-        
+
         gvalues_flat = []
-        for g in gvalues_filtered:
+        for i, g in enumerate(gvalues_filtered):
             if g is not None:
-                gvalues_flat.append(np.array(g, dtype=np.float32).flatten())
+                g_arr = np.array(g, dtype=np.float32)
+                
+                # validate gradient shape matches parameter shape (ignoring trailing dims of size 1)
+                g_shape_squeezed = tuple(d for d in g_arr.shape if d != 1)
+                p_shape_squeezed = tuple(d for d in pvalues_shapes[i] if d != 1)
+                
+                if g_shape_squeezed != p_shape_squeezed:
+                    logger.warning(
+                        f"Gradient shape {g_arr.shape} does not match parameter shape "
+                        f"{pvalues_shapes[i]} for parameter {pnames_filtered[i]} "
+                        f"(after squeezing: {g_shape_squeezed} vs {p_shape_squeezed})"
+                    )
+                    gvalues_flat.append(None)
+                else:
+                    gvalues_flat.append(g_arr.flatten())
             else:
                 gvalues_flat.append(None)
 
@@ -527,7 +556,7 @@ def _plot_parameter_section(
     )
 
     num_layers = len(pvalues_flat)
-    n_rows, n_cols = get_plot_rows_and_columns(num_layers, ideal_ratio=1.25)
+    n_rows, n_cols = get_plot_rows_and_columns(num_layers, ideal_ratio=IDEAL_RATIO)
 
     # Create subplots in the subfigure
     axes = subfig.subplots(
@@ -703,7 +732,7 @@ class ParamGradLogger(Logger):
     )
     learning_rate: Optional[float] = Field(
         default=None,
-        description="Optional learning rate to compute update/weight ratio. If not provided, this ratio is not computed.",
+        description="Optional learning rate to compute update/weight ratio. If None, will use learning rate from step_history if available.",
     )
     dpi: int = Field(default=200, description="DPI for the saved plot images.")
     plot_local_params: bool = Field(
@@ -743,6 +772,33 @@ class ParamGradLogger(Logger):
 
             params = step_history['latest_params']
             grads = step_history.get('grad')  # Gradients are optional
+            
+            # Extract learning rate from step_history if available
+            effective_learning_rate = self.learning_rate
+            lr_display_text = ""
+            
+            if 'learning_rate' in step_history and self.learning_rate is None:
+                # learning_rate contains history across all batches in the step
+                lr_history = step_history['learning_rate']
+                
+                # Extract learning rates for first replicate to check pattern
+                first_replicate_lr = tree_get(lr_history, 0)
+                if first_replicate_lr is not None:
+                    lr_array = np.array(first_replicate_lr)
+                    if lr_array.ndim > 0:  # array of learning rates across batches
+                        start_lr = float(lr_array[0])
+                        end_lr = float(lr_array[-1])
+                        mean_lr = float(lr_array.mean())
+                        
+                        if np.allclose(lr_array, start_lr):
+                            lr_display_text = f"learning rate: {start_lr:.2e}"
+                        else:
+                            lr_display_text = f"learning rate: {start_lr:.2e} → {end_lr:.2e}"
+                        
+                        effective_learning_rate = mean_lr
+                    else:  # scalar learning rate
+                        effective_learning_rate = float(lr_array)
+                        lr_display_text = f"learning rate: {effective_learning_rate:.2e}"
 
             n_replicates = training_config.n_replicates
             import time
@@ -753,13 +809,30 @@ class ParamGradLogger(Logger):
                 replicate_params = tree_get(params, i)
                 replicate_gradients = None
                 if grads is not None:
-                    replicate_gradients = tree_get(grads, i)
+                    # grads contains history across all batches in the step
+                    # we need to average them to get the mean gradient for the step
+                    replicate_grads_history = tree_get(grads, i)
+                    
+                    # average gradients across batch history
+                    if replicate_grads_history is not None:
+                        # the gradient history is structured as a tree where each leaf
+                        # contains an array with shape (batches_per_step, *param_shape)
+                        replicate_gradients = jax.tree.map(
+                            lambda g: g.mean(axis=0) if g is not None else None,
+                            replicate_grads_history
+                        )
                 t1 = time.time()
+                
+                # Create title with learning rate info
+                main_title = f"Parameter Diagnostics - Step {step}"
+                if lr_display_text:
+                    main_title += f"\n{lr_display_text}"
+                
                 fig = plot_parameter_diagnostics(
                     params=replicate_params,
                     param_gradients=replicate_gradients,
-                    learning_rate=self.learning_rate,
-                    title=f"Parameter Diagnostics - Step {step}",
+                    learning_rate=effective_learning_rate,
+                    title=main_title,
                     show_plot=False,
                     plot_local_params=self.plot_local_params,
                 )
