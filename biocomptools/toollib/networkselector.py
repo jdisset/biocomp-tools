@@ -278,6 +278,7 @@ class NetworkSelector(BaseModel):
 
 class NetworkSet(BaseModel):
     content: List[Union[NetworkDataPair, NetworkSelector, "NetworkSet"]] = []
+    name: Optional[str] = None
 
     @property
     def _engine(self):
@@ -443,6 +444,18 @@ class NetworkSetUnion(NetworkSet):
             return {"sets": data}
         return data
 
+    def update_name(self):
+        if self.name is not None:
+            return
+        if any(s.name is None for s in self.sets):
+            return
+        name = ''
+        for i, s in enumerate(self.sets):
+            name += f"({s.name})"
+            if i < len(self.sets) - 1:
+                name += ' U '
+        self.name = name
+
     def run_selectors(self, session=None):
         try:
             logger.debug(f"Running union on {len(self.sets)} sets")
@@ -457,6 +470,7 @@ class NetworkSetUnion(NetworkSet):
             if not self.allow_duplicates:
                 new_content = list(set(new_content))
             self.content = new_content
+            self.update_name()
         except Exception as e:
             logger.error(f"Error running union on {len(self.sets)} sets.")
             logger.exception(e)
@@ -479,6 +493,18 @@ class NetworkSetIntersection(NetworkSet):
             return {"sets": data}
         return data
 
+    def update_name(self):
+        if self.name is not None:
+            return
+        if any(s.name is None for s in self.sets):
+            return
+        name = ''
+        for i, s in enumerate(self.sets):
+            name += f"({s.name})"
+            if i < len(self.sets) - 1:
+                name += ' ∩ '
+        self.name = name
+
     def run_selectors(self, session=None):
         try:
             logger.debug(f"Running intersection on {len(self.sets)} sets")
@@ -490,6 +516,7 @@ class NetworkSetIntersection(NetworkSet):
                 new_content = list(set(new_content) & set(s.content))
             new_content = list(set(new_content) & set(self.content))
             self.content = new_content
+            self.update_name()
         except Exception as e:
             logger.error(f"Error running intersection on {len(self.sets)} sets.")
             logger.exception(e)
@@ -504,6 +531,13 @@ class NetworkSetDifference(NetworkSet):
     set1: NetworkSet
     set2: NetworkSet
 
+    def update_name(self):
+        if self.name is not None:
+            return
+        if self.set1.name is None or self.set2.name is None:
+            return
+        self.name = f"({self.set1.name}) - ({self.set2.name})"
+
     def run_selectors(self, session=None):
         try:
             logger.debug(
@@ -514,6 +548,7 @@ class NetworkSetDifference(NetworkSet):
 
             new_content = list(set(self.set1.content) - set(self.set2.content))
             self.content = new_content
+            self.update_name()
         except Exception as e:
             logger.error(
                 f"Error running difference on {len(self.set1.content)} - {len(self.set2.content)}."
@@ -527,12 +562,20 @@ class NetworkFilter(NetworkSet):
 
     source_set: NetworkSet
 
+    def update_name(self):
+        if self.name is not None:
+            return
+        if self.source_set.name is None:
+            return
+        self.name = self.source_set.name
+
     def run_selectors(self, session=None):
         try:
             self.source_set.run_selectors(session)
             self.content = [
                 net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
             ]
+            self.update_name()
         except Exception as e:
             logger.error(f"Error running filter on {len(self.source_set.content)} items.")
             logger.exception(e)
