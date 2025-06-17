@@ -1,5 +1,6 @@
 ## {{{                          --     imports     --
 import matplotlib
+
 matplotlib.use('Agg')  # Use non-interactive backend to prevent GUI issues in threads
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,7 +8,8 @@ import jax
 from math import ceil, sqrt
 from pathlib import Path
 from pydantic import Field
-from typing import Union, Optional, List, Tuple, Callable
+from typing import Union, Optional, List, Tuple, Callable, Literal
+
 
 from biocomp.parameters import ParameterTree, PTree, flatten_PTree, get_path_components
 from biocomp.jaxutils import tree_get
@@ -728,23 +730,14 @@ class ParamGradLogger(Logger):
     Gradients are averaged over the batches within the step.
     """
 
-    output_dir: str = Field(
-        default="param_grad_plots",
-        description="Subdirectory within the run's save directory to store plots.",
-    )
-    learning_rate: Optional[float] = Field(
-        default=None,
-        description="Optional learning rate to compute update/weight ratio. If None, will use learning rate from step_history if available.",
-    )
-    dpi: int = Field(default=200, description="DPI for the saved plot images.")
-    plot_local_params: bool = Field(
-        default=False,
-        description="Whether to plot local (non-shared) parameters. If False, only shared parameters are plotted.",
-    )
+    output_dir: str = "plots/params_diagnostics"
+    plot_local_params: bool = False
+    learning_rate: Optional[float] = None  # if None, will try to extract from step_history
+    replicate: Optional[int] = None  # if None, will plot all replicates
+    grad_aggregation: Literal['mean', 'first'] = 'mean'
+    file_format: Literal['png', 'pdf'] = 'png'
+    dpi: int = 200
 
-    replicate: Optional[int] = None
-
-    # Private state
     _save_dir: Optional[Path] = None
 
     def initialize(self, training_program):
@@ -760,9 +753,6 @@ class ParamGradLogger(Logger):
             step: int,
             training_config,
             step_history: Optional[dict] = None,
-            xbatches=None,
-            ybatches=None,
-            stack=None,
             **kwargs,
         ):
             if step == 0:  # Skip initial state
@@ -825,10 +815,26 @@ class ParamGradLogger(Logger):
                     if replicate_grads_history is not None:
                         # the gradient history is structured as a tree where each leaf
                         # contains an array with shape (batches_per_step, *param_shape)
-                        replicate_gradients = jax.tree.map(
-                            lambda g: g.mean(axis=0) if g is not None else None,
-                            replicate_grads_history,
-                        )
+                        if self.grad_aggregation == 'mean':
+                            replicate_gradients = jax.tree.map(
+                                lambda g: g.mean(axis=0) if g is not None else None,
+                                replicate_grads_history,
+                            )
+                        elif self.grad_aggregation == 'first':
+                            replicate_gradients = jax.tree.map(
+                                lambda g: g[0] if g is not None else None,
+                                replicate_grads_history,
+                            )
+                        else:
+                            logger.warning(
+                                f"Unknown grad_aggregation method '{self.grad_aggregation}', "
+                                "defaulting to 'mean'."
+                            )
+                            replicate_gradients = jax.tree.map(
+                                lambda g: g.mean(axis=0) if g is not None else None,
+                                replicate_grads_history,
+                            )
+
                 t1 = time.time()
 
                 # Create title with learning rate info
@@ -848,8 +854,7 @@ class ParamGradLogger(Logger):
 
                 try:
                     save_path = (
-                        self._save_dir
-                        / f"plots/params_diagnostics/replicate{i}/{step:04d}_params.png"
+                        self._save_dir / f"replicate{i}/{step:04d}_params.{self.file_format}"
                     )
                     save_path.parent.mkdir(parents=True, exist_ok=True)
                     fig.savefig(save_path, dpi=self.dpi)
@@ -861,7 +866,7 @@ class ParamGradLogger(Logger):
                     times.append((t1 - t0, t2 - t1, t3 - t2))
 
             for i, (t0, t1, t2) in enumerate(times):
-                print(
+                logger.debug(
                     f"Replicate {i}: "
                     f"Param extraction: {t0:.2f}s, "
                     f"Plot generation: {t1:.2f}s, "

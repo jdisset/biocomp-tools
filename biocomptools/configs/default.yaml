@@ -26,6 +26,7 @@ paths:
     networks: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/networks')}
     xp: ${getenv('BIOCOMP_NETWORK_CACHE_DIR', '${&base_dir}/xp')}
     data: ${getenv('BIOCOMP_DATA_CACHE_DIR', '${&base_dir}/data')}
+    jax: ${getenv('BIOCOMP_JAX_CACHE_DIR', '${&base_dir}/jax')}
 
 mlflow:
   server: ${getenv('BIOCOMP_MLFLOW_SERVER', 'https://mlf.rachael.jdisset.com')}
@@ -112,7 +113,7 @@ logging:
     biocomp.plotutils: INFO
 
     dracon.commandline: INFO
-    dracon.interpolation: DEBUG
+    dracon.interpolation: INFO
     matplotlib: WARNING
     matplotlib.font_manager: ERROR
     fontTools: WARNING

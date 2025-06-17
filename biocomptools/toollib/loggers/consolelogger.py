@@ -96,7 +96,7 @@ class EnhancedConsoleLogger(Logger):
         plt.show()
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        def log_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
+        def log_loss(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is not None:
                 losses = step_history.get('loss')
                 if losses is not None:
@@ -114,7 +114,7 @@ class ConsoleLogger(Logger):
         super().__init__(*args, **kwargs)
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        def log_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
+        def log_loss(step, training_config, step_history=None, stack=None, **kwargs):
             # we will show the avg, min and max loss of the current step for each replicate:
             if step_history is not None:
                 losses = step_history.get('loss')

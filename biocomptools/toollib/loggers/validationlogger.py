@@ -38,7 +38,6 @@ class ValidationLossLogger(Logger):
     # General configuration
     name: Optional[str] = None
     n_evals: int = 1024
-    batch_sampling_ratio: float = 0.1
     enable_gridstats: bool = True
     seed: int = 42
     predictor_n_stats_workers: int = 8
@@ -320,7 +319,7 @@ class ValidationLossLogger(Logger):
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         self.initialize(training_program)
 
-        def log_validation_loss(step, training_config, step_history=None, xbatches=None, ybatches=None, stack=None, **kwargs):
+        def log_validation_loss(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is None or 'latest_params' not in step_history:
                 logger.warning("No latest params available for validation")
                 return
