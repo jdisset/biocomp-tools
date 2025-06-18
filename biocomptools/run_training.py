@@ -32,7 +32,7 @@ import asyncio
 import sys
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Annotated, TypeVar, Any, Callable
+from typing import List, Optional, Annotated, TypeVar, Any, Callable, Dict
 from pydantic import Field, BaseModel, ConfigDict
 from sqlmodel import Session
 from datetime import datetime
@@ -109,23 +109,19 @@ class TrainingProgram(BaseModel):
         default_factory=NetworkSet
     )
 
-    validation_set: Annotated[NetworkSet, Arg(help='Networks in validation set')] = Field(
-        default_factory=NetworkSet
-    )
-
     base_dir: Annotated[
         str,
         Arg(
-            help='Base directory to save model (will be saved in base_dir/experiment_name/run_name)'
+            help='Base directory to save model (will be saved under <base_dir>/<experiment_name>/<run_name>)'
         ),
-    ] = './training_output'
+    ] = config.paths.training_output
 
     loggers: Annotated[List[MaybeDeferred[Logger]], Arg(help='Loggers to use')] = Field(
         default_factory=lambda: []
     )
 
     experiment_name: Annotated[str, Arg(help='Name of the experiment')] = 'default_xp'
-    metadata: dict[str, Any] = {}
+    metadata: Dict[str, Any] = {}
 
     run_name_suffix: str = ''
 
@@ -167,7 +163,6 @@ class TrainingProgram(BaseModel):
 
         with self.db_session as session:
             self.training_set.run_selectors(session)
-            self.validation_set.run_selectors(session)
             session.expunge_all()
             session.close()
 
@@ -189,7 +184,6 @@ class TrainingProgram(BaseModel):
                         'compute_conf': self.compute_conf,
                         'data_conf': self.data_conf,
                         'training_set': self.training_set,
-                        'validation_set': self.validation_set,
                     }
                 )
             new_loggers.append(logg)
@@ -239,8 +233,7 @@ class TrainingProgram(BaseModel):
             {
                 'run_name': self._run_name,
                 'experiment_name': self.experiment_name,
-                'training_set': self.training_set.content,
-                'validation_set': self.validation_set.content,
+                'training_set': {'content': self.training_set.content, 'name': self.training_set.name},
                 'training_conf': self.training_conf,
                 'compute_conf': self.compute_conf,
                 'data_conf': self.data_conf,
@@ -267,6 +260,11 @@ class TrainingProgram(BaseModel):
         )
         for logger_obj in self.loggers:
             logger_obj.initialize(self)
+
+        # add logger metadata to the metadata
+        logger_metadata = [m for m in (logger.metadata for logger in self.loggers) if m]
+        if logger_metadata:
+            self._metadata['loggers'] = make_json_ready(logger_metadata)
 
         # Set up logging to file
         log_file = self._training_dir / 'output.log.txt'
@@ -406,7 +404,7 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
     return model_factory(all_params=all_params, all_losses=all_losses, replicate_id=best_model_id)
 
 
-async def main():
+async def main_async():
     cliprog = make_program(
         TrainingProgram,
         name='biocomp-train',
@@ -424,5 +422,9 @@ async def main():
     await trainprog.run()
 
 
+def main():
+    asyncio.run(main_async())
+
+
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
