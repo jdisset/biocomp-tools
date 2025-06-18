@@ -16,6 +16,8 @@ class Logger(BaseModel):
 
     periods: Union[int, List[int]] = 1  # Number of steps between logs or list of periods
 
+    metadata: Dict[str, Any] = {}
+
     def initialize(self, training_program):
         """Optional initialization before training starts."""
         pass

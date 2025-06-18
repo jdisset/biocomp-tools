@@ -37,6 +37,7 @@ class ValidationLossLogger(Logger):
 
     # General configuration
     name: Optional[str] = None
+    validation_set: Optional[NetworkSet] = None
     n_evals: int = 1024
     enable_gridstats: bool = True
     seed: int = 42
@@ -49,7 +50,6 @@ class ValidationLossLogger(Logger):
     plot_smoothing_sigma: float = 3.0
 
     # Required components (can be auto-filled from TrainingProgram)
-    validation_set: Optional[NetworkSet] = None
     compute_conf: Optional[Union[ComputeConfig, Dict]] = None
     data_conf: Optional[Union[DataConfig, Dict]] = None
     n_replicates: int = 1
@@ -90,8 +90,6 @@ class ValidationLossLogger(Logger):
             self.compute_conf = training_program.compute_conf
             self.data_conf = training_program.data_conf
             self.n_replicates = training_program.training_conf.n_replicates
-            if self.validation_set is None:
-                self.validation_set = training_program.validation_set
             if self.save_plots:
                 self._plot_save_dir = Path(training_program._save_dir) / f"plots/{self.name}"
                 self._plot_save_dir.mkdir(exist_ok=True, parents=True)
@@ -135,6 +133,14 @@ class ValidationLossLogger(Logger):
             enable_gridstats=self.enable_gridstats,
         )
 
+        self.metadata = {
+            'validation_name': self.name,
+            'validation_set': {
+                'content': self.validation_set.content,
+                'name': self.validation_set.name,
+            },
+        }
+
     def _get_replicate_metrics(self, metrics_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Helper to format metrics for a single replicate."""
         result = {'RMSE': float(metrics_dict.get('avg_rmse', np.nan))}
@@ -173,7 +179,7 @@ class ValidationLossLogger(Logger):
                 return None
         else:
             all_reps_metrics = [self._get_replicate_metrics(m) for m in latest_metrics_list]
-            return {f'{self.name}_validation_loss': all_reps_metrics}
+            return {f'validation@{self.name}': all_reps_metrics}
 
     def _compute_validation_metrics(self, params) -> Tuple[Optional[List[Dict]], float]:
         from time import time
