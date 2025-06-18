@@ -267,6 +267,9 @@ class TrainingProgram(BaseModel):
         for logger_obj in self.loggers:
             logger_obj.initialize(self)
 
+        self._yamldump = dr.dump(self)
+        self._modeldump = self.model_dump()
+
         # add logger metadata to the metadata
         logger_metadata = [m for m in (logger.metadata for logger in self.loggers) if m]
         if logger_metadata:

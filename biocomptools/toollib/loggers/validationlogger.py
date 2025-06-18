@@ -40,7 +40,8 @@ class ValidationLossLogger(Logger):
     n_evals: int = 2048
     enable_gridstats: bool = False
     seed: int = 42
-    predictor_n_stats_workers: int = 4
+    predictor_n_stats_workers: int = 8
+    plot_training_losses: bool = False
 
     # Plotting configuration
     save_plots: bool = True
@@ -306,7 +307,7 @@ class ValidationLossLogger(Logger):
             )
 
         # Add training loss line for main plot (grey)
-        if is_main and training_history is not None:
+        if is_main and training_history is not None and self.plot_training_losses:
             training_losses = []
             train_steps = []
             for h in training_history:

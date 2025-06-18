@@ -159,8 +159,9 @@ class MLflowLogger(Logger):
         mlflow.set_tracking_uri(self.tracking_url)
 
         if not self.validate_connection():
-            logger.error("Failed to validate MLflow connection - logging will be disabled")
-            return
+            error_msg = f"Failed to validate MLflow connection to {self.tracking_url}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
         # Get or create the experiment
         try:
@@ -181,9 +182,10 @@ class MLflowLogger(Logger):
             self._log_datamanager_info()
 
         except Exception as e:
-            logger.error("Failed to set up MLflow experiment")
+            error_msg = f"Failed to set up MLflow experiment '{training_program.experiment_name}': {e}"
+            logger.error(error_msg)
             logger.exception(e)
-            return
+            raise RuntimeError(error_msg)
 
     def _log_training_config(self):
         """Log all configuration objects and metadata"""

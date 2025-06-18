@@ -1,4 +1,4 @@
-import pickle
+import dill as pickle
 from pathlib import Path
 from typing import List, Tuple, Callable, Optional
 from pydantic import Field
