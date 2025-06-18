@@ -125,6 +125,8 @@ class TrainingProgram(BaseModel):
 
     run_name_suffix: str = ''
 
+    use_jax_sampling: bool = True
+
     # Private
     _lib: Optional[PartsLibrary] = None
     _yamldump: str = ''
@@ -216,6 +218,7 @@ class TrainingProgram(BaseModel):
             data_conf=self.data_conf,
             dataset=self.training_set,
         )
+        self._training_dman.jax_sampling = self.use_jax_sampling
 
     def _enrich_metadata(self):
         """Adds detailed run and data information to the metadata dictionary."""
@@ -233,7 +236,10 @@ class TrainingProgram(BaseModel):
             {
                 'run_name': self._run_name,
                 'experiment_name': self.experiment_name,
-                'training_set': {'content': self.training_set.content, 'name': self.training_set.name},
+                'training_set': {
+                    'content': self.training_set.content,
+                    'name': self.training_set.name,
+                },
                 'training_conf': self.training_conf,
                 'compute_conf': self.compute_conf,
                 'data_conf': self.data_conf,

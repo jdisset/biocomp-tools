@@ -79,6 +79,23 @@ def _calculate_single_network_stats(
     latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
     latent_yhat = latent_yhats[:, output_pos]
 
+    # check for empty output - this can happen if output_pos selects invalid columns
+    if latent_yhat.size == 0:
+        return {
+            'xp_name': network_info.get('xp_name'),
+            'recipe_name': network_info.get('recipe_name'),
+            'network_name': network_info.get('network_name', f"Network_{network_idx}"),
+            'eval_npoints': nb_points_in_eval,
+            'samples': yhat.shape[0],
+            'mse': None,
+            'rmse': None,
+            'latent_mean': np.nan,
+            'latent_std': np.nan,
+            'latent_min': np.nan,
+            'latent_max': np.nan,
+            'error': 'Empty output array - invalid output_pos selection',
+        }
+
     network_stats = {
         'xp_name': network_info.get('xp_name'),
         'recipe_name': network_info.get('recipe_name'),
@@ -97,13 +114,76 @@ def _calculate_single_network_stats(
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
-        mse = float(np.mean((latent_yhat - latent_gt) ** 2))
+
+        # handle different ground truth formats
+        if latent_gt.ndim > 1:
+            # Check if ground truth has same width as predictions (all proteins)
+            if latent_gt.shape[1] == latent_yhats.shape[1]:
+                # Ground truth has all proteins, apply output_pos selection
+                latent_gt_selected = latent_gt[:, output_pos]
+            elif latent_gt.shape[1] == network_info.get('n_dependent_outputs', 1):
+                # Ground truth is already filtered to dependent outputs only
+                if latent_gt.shape[1] == 1:
+                    # Single dependent output - use it directly
+                    latent_gt_selected = latent_gt[:, 0]
+                else:
+                    # Multiple dependent outputs - need to map output_pos to the filtered space
+                    # This is a complex case that might need more information about which output is which
+                    # For now, if we can't determine the mapping, use all available outputs
+                    latent_gt_selected = latent_gt
+                    logger.warning(
+                        f"Ground truth has {latent_gt.shape[1]} columns (matching n_dependent_outputs), "
+                        f"but output_pos={output_pos}. Using all columns for comparison."
+                    )
+            else:
+                # Unexpected shape - try to handle gracefully
+                if isinstance(output_pos, int) and output_pos < latent_gt.shape[1]:
+                    latent_gt_selected = latent_gt[:, output_pos]
+                else:
+                    latent_gt_selected = latent_gt[:, 0] if latent_gt.shape[1] >= 1 else latent_gt
+                    logger.warning(
+                        f"Ground truth shape {latent_gt.shape} doesn't match expected patterns. "
+                        f"Expected either {latent_yhats.shape[1]} (all proteins) or "
+                        f"{network_info.get('n_dependent_outputs', 1)} (dependent outputs only). "
+                        f"Using column 0 for comparison."
+                    )
+        else:
+            latent_gt_selected = latent_gt
+
+        if latent_gt_selected.size == 0:
+            network_stats['error'] = 'Empty ground truth array - invalid output_pos selection'
+            return network_stats
+
+        # Ensure shapes are compatible for comparison
+        if latent_gt_selected.ndim == 1 and latent_yhat.ndim == 1:
+            # Both are 1D - compatible
+            pass
+        elif latent_gt_selected.ndim == 2 and latent_yhat.ndim == 1:
+            # Ground truth is 2D but we expect 1D - flatten if single column
+            if latent_gt_selected.shape[1] == 1:
+                latent_gt_selected = latent_gt_selected[:, 0]
+            else:
+                logger.error(
+                    f"Shape mismatch: latent_yhat is 1D but latent_gt_selected has shape {latent_gt_selected.shape}"
+                )
+                network_stats['error'] = f'Shape mismatch for comparison: yhat is 1D, gt is {latent_gt_selected.shape}'
+                return network_stats
+        elif latent_gt_selected.shape != latent_yhat.shape:
+            logger.error(
+                f"Shape mismatch: latent_yhat has shape {latent_yhat.shape}, "
+                f"latent_gt_selected has shape {latent_gt_selected.shape}"
+            )
+            network_stats['error'] = f'Shape mismatch: yhat {latent_yhat.shape} vs gt {latent_gt_selected.shape}'
+            return network_stats
+
+        mse = float(np.mean((latent_yhat - latent_gt_selected) ** 2))
         network_stats['mse'] = float(mse)
         network_stats['rmse'] = float(np.sqrt(mse))
 
-        
         if enable_gridstats:
-            grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
+            grid_stats = _calculate_grid_stats(
+                latent_yhat, latent_gt_selected, latent_x, gridstats_params
+            )
             network_stats.update(grid_stats)
 
     return network_stats
@@ -565,9 +645,16 @@ class NetworkPrediction(DataSource):
             x = self._x[i]
 
             _, output_pos, _, _ = get_reordered_protein_names(network)
+            
+            # Calculate dependent outputs for validation
+            all_outputs = set(network.get_output_proteins())
+            input_proteins = set(network.get_inverted_input_proteins())
+            dependent_outputs = all_outputs - input_proteins
+            n_dependent_outputs = len(dependent_outputs)
 
             network_info = {
                 'network_name': network_name,
+                'n_dependent_outputs': n_dependent_outputs,
             }
 
             gridstats_params = {
@@ -598,6 +685,22 @@ class NetworkPrediction(DataSource):
 
         all_stats = [None] * len(self.network_model.network)
 
+        def get_info_dump(task, i):
+            return {
+                'n_networks': len(self.network_model.network),
+                'shapes_yhats': [yh.shape for yh in self._yhats],
+                'shapes_x': [x.shape for x in self._x],
+                'input_order': self.input_order,
+                'collection_points': self.collection_points,
+                'task_network_idx': task['network_idx'],
+                'task_network_name': task['network_info'].get('network_name', f"Network_{i}"),
+                'task_yhat_shape': task['yhat'].shape,
+                'task_gt_shape': None if task['gt'] is None else task['gt'].shape,
+                'task_x_shape': task['x'].shape,
+                'task_output_pos': task['output_pos'],
+                'task_nb_points_in_eval': task['nb_points_in_eval'],
+            }
+
         if self.n_stats_workers > 1 and len(tasks) > 1:
             logger.info(
                 f"Calculating network stats in parallel with {self.n_stats_workers} workers."
@@ -624,9 +727,11 @@ class NetworkPrediction(DataSource):
                             self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
 
                     except Exception as e:
+                        net_name = tasks[idx]['network_info'].get('network_name', f"Network_{idx}")
                         logger.error(
-                            f"Error calculating stats for network {idx} in parallel worker: {e}"
+                            f"Error calculating stats for network {net_name} in parallel worker: {e}"
                         )
+                        logger.error(f"Task info: {get_info_dump(tasks[idx], idx)}")
                         logger.exception(e)
                         all_stats[idx] = {'error': str(e)}
 
@@ -650,7 +755,11 @@ class NetworkPrediction(DataSource):
                         self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
 
                 except Exception as e:
-                    logger.error(f"Error calculating stats for network {idx} sequentially: {e}")
+                    net_name = task['network_info'].get('network_name', f"Network_{idx}")
+                    logger.error(
+                        f"Error calculating stats for network {net_name} in sequential processing: {e}"
+                    )
+                    logger.error(f"Task info: {get_info_dump(tasks[idx], idx)}")
                     logger.exception(e)
                     all_stats[idx] = {'error': str(e)}
 

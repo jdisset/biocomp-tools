@@ -2,7 +2,7 @@ import mlflow
 import sys
 from pathlib import Path
 import json
-from typing import Any, List, Optional, Tuple, Callable
+from typing import Any, List, Optional, Tuple, Callable, Dict
 from pydantic import Field, ConfigDict, BaseModel
 import numpy as np
 from dracon.deferred import DeferredNode
@@ -74,6 +74,21 @@ class MLflowLogger(Logger):
         else:
             items.append((parent_key, d))
         return dict(items)
+
+    def _sanitize_metric_name(self, name: str) -> str:
+        """Sanitize metric names for MLFlow compatibility.
+        
+        MLFlow only allows: alphanumerics, underscores (_), dashes (-), 
+        periods (.), spaces ( ), colon(:) and slashes (/).
+        """
+        import re
+        # Replace @ and other invalid characters with underscores
+        sanitized = re.sub(r'[^a-zA-Z0-9_\-.\s:/]', '_', name)
+        return sanitized
+
+    def _sanitize_metrics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize all metric names in a dictionary."""
+        return {self._sanitize_metric_name(k): v for k, v in metrics.items()}
 
     def _log_new_artifacts(self):
         """Log any new plots/images/text files that haven't been logged yet"""
@@ -149,17 +164,12 @@ class MLflowLogger(Logger):
 
         # Get or create the experiment
         try:
-            experiment = mlflow.get_experiment_by_name(training_program.experiment_name)
-            if experiment is None:
-                logger.debug(f"Creating new experiment '{training_program.experiment_name}'")
-                experiment_id = mlflow.create_experiment(training_program.experiment_name)
-            else:
-                logger.debug(f"Using existing experiment '{training_program.experiment_name}'")
-                experiment_id = experiment.experiment_id
-
+            # Use set_experiment which handles creation automatically
+            mlflow.set_experiment(training_program.experiment_name)
+            
             # Start the run with the same name as the training program's run
             self._active_run = mlflow.start_run(
-                experiment_id=experiment_id, run_name=training_program._run_name
+                run_name=training_program._run_name
             )
 
             # Enable system metrics logging
@@ -197,9 +207,6 @@ class MLflowLogger(Logger):
                     "compute_config": make_json_ready(self._training_program.compute_conf),
                     "data_config": make_json_ready(self._training_program.data_conf),
                     "training_set": make_json_ready(self._training_program.training_set.content),
-                    "validation_set": make_json_ready(
-                        self._training_program.validation_set.content
-                    ),
                 }
             )
 
@@ -316,7 +323,8 @@ class MLflowLogger(Logger):
                     valid_losses = [l for l in losses if not np.isnan(l).any()]
                     if valid_losses:
                         metrics["loss_min"] = float(np.min(np.concatenate(valid_losses)))
-                    mlflow.log_metrics(metrics, step=step)
+                    sanitized_metrics = self._sanitize_metrics(metrics)
+                    mlflow.log_metrics(sanitized_metrics, step=step)
 
                 # Log metrics from other loggers
                 all_logger_metrics = {}
@@ -341,18 +349,21 @@ class MLflowLogger(Logger):
                         )
 
                     if numeric_metrics:
-                        mlflow.log_metrics(numeric_metrics, step=step)
-                        logger.debug(f"Logged {len(numeric_metrics)} metrics from other loggers.")
+                        sanitized_metrics = self._sanitize_metrics(numeric_metrics)
+                        mlflow.log_metrics(sanitized_metrics, step=step)
+                        logger.debug(f"Logged {len(sanitized_metrics)} metrics from other loggers.")
 
                 # Log any other metrics from step_history and new plots
                 other_metrics = step_history.get('metrics', {})
                 if other_metrics:
-                    mlflow.log_metrics(other_metrics, step=step)
+                    sanitized_other_metrics = self._sanitize_metrics(other_metrics)
+                    mlflow.log_metrics(sanitized_other_metrics, step=step)
                 if self.log_plots:
                     self._log_new_artifacts()
 
             except Exception as e:
                 logger.error(f"Error logging metrics for step {step}: {e}")
+                logger.exception(e)
 
         return [(self.periods, log_metrics)]
 

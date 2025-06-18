@@ -69,51 +69,52 @@ logging:
     dev_debug: "%(asctime)s.%(msecs)03d %(levelname)-8s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
 
   levels:
-    # # BCTOOLS INFO:
-    biocomptools.run_training: INFO
-    biocomptools.toollib.datasources: INFO
-    biocomptools.toollib.networkselector: INFO
-    biocomptools.toollib.networkprediction: INFO
-    biocomptools.toollib.models: INFO
-    biocomptools.toollib.figuremakers.innernodes: INFO
-    biocomptools.toollib.plot: INFO
-    biocomptools.toollib.trainutils: INFO
-    biocomptools.mlflowlogger: INFO
-    biocomptools.modelmodel: INFO
-    biocomptools.plot: INFO
 
-    # # BCTOOLS DEBUG:
-    # biocomptools.run_training: DEBUG
-    # biocomptools.toollib.datasources: DEBUG
-    # biocomptools.toollib.networkselector: DEBUG
-    # biocomptools.toollib.networkprediction: DEBUG
-    # biocomptools.toollib.models: DEBUG
-    # biocomptools.toollib.figuremakers.innernodes: DEBUG
-    # biocomptools.toollib.plot: DEBUG
-    # biocomptools.toollib.trainutils: DEBUG
-    # biocomptools.mlflowlogger: DEBUG
-    # biocomptools.modelmodel: DEBUG
-    # biocomptools.plot: DEBUG
+    # # # BCTOOLS INFO:
+    # biocomptools.run_training: INFO
+    # biocomptools.toollib.datasources: INFO
+    # biocomptools.toollib.networkselector: INFO
+    # biocomptools.toollib.networkprediction: INFO
+    # biocomptools.toollib.models: INFO
+    # biocomptools.toollib.figuremakers.innernodes: INFO
+    # biocomptools.toollib.plot: INFO
+    # biocomptools.toollib.trainutils: INFO
+    # biocomptools.mlflowlogger: INFO
+    # biocomptools.modelmodel: INFO
+    # biocomptools.plot: INFO
 
-    # # BC DEBUG:
-    # biocomp: DEBUG
-    # biocomp.train: DEBUG
-    # biocomp.nodes: DEBUG
-    # biocomp.quantization: DEBUG
-    # biocomp.compute: DEBUG
-    # biocomp.network: DEBUG
-    # biocomp.networks: DEBUG
-    # biocomp.plotutils: DEBUG
+    # BCTOOLS DEBUG:
+    biocomptools.run_training: DEBUG
+    biocomptools.toollib.datasources: DEBUG
+    biocomptools.toollib.networkselector: DEBUG
+    biocomptools.toollib.networkprediction: DEBUG
+    biocomptools.toollib.models: DEBUG
+    biocomptools.toollib.figuremakers.innernodes: DEBUG
+    biocomptools.toollib.plot: DEBUG
+    biocomptools.toollib.trainutils: DEBUG
+    biocomptools.mlflowlogger: DEBUG
+    biocomptools.modelmodel: DEBUG
+    biocomptools.plot: DEBUG
 
-    # BC INF:
-    biocomp: INFO
-    biocomp.train: INFO
-    biocomp.nodes: INFO
-    biocomp.quantization: INFO
-    biocomp.compute: INFO
-    biocomp.network: INFO
-    biocomp.networks: INFO
-    biocomp.plotutils: INFO
+    # BC DEBUG:
+    biocomp: DEBUG
+    biocomp.train: DEBUG
+    biocomp.nodes: DEBUG
+    biocomp.quantization: DEBUG
+    biocomp.compute: DEBUG
+    biocomp.network: DEBUG
+    biocomp.networks: DEBUG
+    biocomp.plotutils: DEBUG
+
+    # # BC INF:
+    # biocomp: INFO
+    # biocomp.train: INFO
+    # biocomp.nodes: INFO
+    # biocomp.quantization: INFO
+    # biocomp.compute: INFO
+    # biocomp.network: INFO
+    # biocomp.networks: INFO
+    # biocomp.plotutils: INFO
 
     dracon.commandline: INFO
     dracon.interpolation: INFO

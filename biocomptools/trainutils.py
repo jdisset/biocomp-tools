@@ -64,9 +64,18 @@ def ffill(arr, mask=None):
 
 def get_latest_avg_loss(all_losses: list[ndArray], replicate_id: int, window: int = 64) -> float:
     """Calculates the average loss over the last `window` for a specific replicate."""
-    if not all_losses:
+    if len(all_losses) == 0:
         return np.nan
-    losses_array = np.concatenate(all_losses, axis=1)
+    
+    # Check if losses are 1D or 2D and concatenate appropriately
+    first_loss = all_losses[0]
+    if len(first_loss.shape) == 1:
+        # 1D case: each loss array is shape (n_replicates,)
+        losses_array = np.stack(all_losses, axis=1)  # shape: (n_replicates, n_steps)
+    else:
+        # 2D case: each loss array is shape (n_replicates, n_batches_or_something)
+        losses_array = np.concatenate(all_losses, axis=1)
+    
     if replicate_id >= losses_array.shape[0]:
         return np.nan
 

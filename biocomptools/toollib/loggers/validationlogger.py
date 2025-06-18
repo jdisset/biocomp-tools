@@ -19,7 +19,6 @@ from rich.table import Table
 from biocomp.utils import load_lib
 from biocomp.datautils import DataConfig, DataManager
 import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict
 from biocomptools.trainutils import ffill
 from biocomptools.toollib.loggers.paramgradlogger import get_plot_rows_and_columns
@@ -38,16 +37,14 @@ class ValidationLossLogger(Logger):
     # General configuration
     name: Optional[str] = None
     validation_set: Optional[NetworkSet] = None
-    n_evals: int = 1024
-    enable_gridstats: bool = True
+    n_evals: int = 2048
+    enable_gridstats: bool = False
     seed: int = 42
-    predictor_n_stats_workers: int = 8
+    predictor_n_stats_workers: int = 4
 
     # Plotting configuration
     save_plots: bool = True
     plot_dpi: int = 200
-    plot_smoothing: bool = True
-    plot_smoothing_sigma: float = 3.0
 
     # Required components (can be auto-filled from TrainingProgram)
     compute_conf: Optional[Union[ComputeConfig, Dict]] = None
@@ -81,9 +78,9 @@ class ValidationLossLogger(Logger):
         if self.name is None:
             if training_program:
                 idx = self.find_myself(training_program)
-                self.name = f"validation_loss_{idx}"
+                self.name = f"loss_{idx}"
             else:
-                self.name = "validation_loss"
+                self.name = "loss"
 
         if training_program:
             self._training_program = training_program
@@ -91,7 +88,7 @@ class ValidationLossLogger(Logger):
             self.data_conf = training_program.data_conf
             self.n_replicates = training_program.training_conf.n_replicates
             if self.save_plots:
-                self._plot_save_dir = Path(training_program._save_dir) / f"plots/{self.name}"
+                self._plot_save_dir = Path(training_program._save_dir) / f"plots/val_{self.name}"
                 self._plot_save_dir.mkdir(exist_ok=True, parents=True)
         elif self.compute_conf is None or self.data_conf is None:
             raise ValueError("In standalone mode, compute_conf and data_conf must be provided.")
@@ -113,6 +110,11 @@ class ValidationLossLogger(Logger):
                     dataset=self.validation_set,
                 )
                 self._xynetworks = dman.get_per_network_xy_samples(self.n_evals)
+                xs, ys, networks = self._xynetworks
+                # print network names for debugging:
+                logger.debug(
+                    f"ValidationLossLogger {self.name} has {len(networks)} networks: {networks}"
+                )
 
         xs, ys, networks = self._xynetworks
         assert isinstance(self.compute_conf, ComputeConfig) and isinstance(
@@ -179,7 +181,7 @@ class ValidationLossLogger(Logger):
                 return None
         else:
             all_reps_metrics = [self._get_replicate_metrics(m) for m in latest_metrics_list]
-            return {f'validation@{self.name}': all_reps_metrics}
+            return {f'validation::{self.name}': all_reps_metrics}
 
     def _compute_validation_metrics(self, params) -> Tuple[Optional[List[Dict]], float]:
         from time import time
@@ -260,17 +262,18 @@ class ValidationLossLogger(Logger):
 
         n_rows, n_cols = get_plot_rows_and_columns(n_nets, ideal_ratio=1.0)
         fig = plt.figure(figsize=(5 * n_cols, 2.5 * (n_rows + 2)), dpi=self.plot_dpi)
-        gs = fig.add_gridspec(n_rows + 2, n_cols)
+        gs = fig.add_gridspec(n_rows + 2, n_cols, hspace=0.5, wspace=0.5)
         fig.suptitle(f'{self.name.title()} Loss History - Step {step}', fontsize=14)
 
-        ax_main = fig.add_subplot(gs[0:2, :])
+        ax_main = fig.add_subplot(gs[0:2, 0:2])
         self._plot_single_metric(
             ax_main,
             loss_data[0],
             steps,
             'Overall Average RMSE',
             is_main=True,
-            smoothed=self.plot_smoothing,
+            training_steps=steps,
+            training_history=self._history,
         )
 
         axes_flat = [fig.add_subplot(gs[r + 2, c]) for r in range(n_rows) for c in range(n_cols)]
@@ -278,40 +281,54 @@ class ValidationLossLogger(Logger):
             if i >= n_nets:
                 ax.set_visible(False)
                 continue
-            self._plot_single_metric(
-                ax, loss_data[i + 1], steps, all_net_names[i], smoothed=self.plot_smoothing
-            )
+            self._plot_single_metric(ax, loss_data[i + 1], steps, all_net_names[i])
 
         # plt.tight_layout(rect=[0, 0, 1, 0.96])
         fig.savefig(self._plot_save_dir / f"history_step_{step:05d}.png")
         plt.close(fig)
 
-    def _plot_single_metric(self, ax, data, steps, title, smoothed=False, is_main=False):
+    def _plot_single_metric(
+        self, ax, data, steps, title, is_main=False, training_steps=None, training_history=None
+    ):
         filled_data = ffill(data)
-
-        if smoothed and self.plot_smoothing_sigma > 0:
-            smoothed_data = gaussian_filter1d(
-                filled_data, sigma=self.plot_smoothing_sigma, axis=1, mode='nearest'
-            )
-            alpha = 0.3
-        else:
-            alpha = 1.0
-            smoothed_data = filled_data
-
         cmap = plt.cm.get_cmap('tab10')
 
+        # Plot validation loss lines (colored)
         for i in range(self.n_replicates):
             ax.plot(
-                steps, data[i, :], color=cmap(i % 10), linestyle='-', linewidth=0.5, alpha=alpha
+                steps,
+                data[i, :],
+                color=cmap(i % 10),
+                linestyle='-',
+                linewidth=1.5 if is_main else 0.5,
+                alpha=1.0,
+                label=f'Val Rep {i}' if is_main else None,
             )
 
-            if smoothed and self.plot_smoothing_sigma > 0:
+        # Add training loss line for main plot (grey)
+        if is_main and training_history is not None:
+            training_losses = []
+            train_steps = []
+            for h in training_history:
+                if h.get('training_loss') is not None:
+                    train_steps.append(h['step'])
+                    # Average training loss across replicates
+                    loss_array = h['training_loss']
+                    if hasattr(loss_array, 'mean'):
+                        avg_loss = float(loss_array.mean())
+                    else:
+                        avg_loss = float(np.mean(loss_array))
+                    training_losses.append(avg_loss)
+
+            if training_losses:
                 ax.plot(
-                    steps,
-                    smoothed_data[i, :],
-                    color=cmap(i % 10),
-                    label=f'Rep {i}',
-                    linewidth=1.5 if is_main else 1.0,
+                    train_steps,
+                    training_losses,
+                    color='grey',
+                    linestyle='-',
+                    linewidth=1.0,
+                    alpha=0.7,
+                    label='Training Loss',
                 )
 
         ax.set_title(title, fontsize=11 if is_main else 7)
@@ -319,15 +336,18 @@ class ValidationLossLogger(Logger):
         ax.set_xlabel('Step')
         ax.set_ylabel('RMSE (log scale)')
         ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
-        if is_main and self.n_replicates > 1:
+        if is_main and (self.n_replicates > 1 or training_history is not None):
             ax.legend(fontsize='small')
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         self.initialize(training_program)
 
-        def log_validation_loss(step, training_config, step_history=None, stack=None, **kwargs):
+        def log_validation_loss(step, training_config, step_history=None, **kwargs):
             if step_history is None or 'latest_params' not in step_history:
-                logger.warning("No latest params available for validation")
+                if step == 0:
+                    logger.debug("No latest params available for validation at step 0 (expected)")
+                else:
+                    logger.warning(f"No latest params available for validation at step {step}")
                 return
 
             logger.info(f"Computing {self.name} loss at step {step}...")
@@ -339,9 +359,34 @@ class ValidationLossLogger(Logger):
                 logger.warning(f"Could not compute {self.name} metrics")
                 return
 
-            self._history.append({'step': step, 'metrics': metrics_list})
+            # Store training loss alongside validation metrics
+            training_loss = step_history.get('loss')
+            self._history.append(
+                {'step': step, 'metrics': metrics_list, 'training_loss': training_loss}
+            )
             self._print_validation_stats(step, metrics_list, eval_time)
             if self.save_plots:
                 self._plot_history(step)
 
         return [(self.periods, log_validation_loss)]
+
+    def finalize(self):
+        """Create video from validation loss history plots using ffmpeg."""
+        if self._plot_save_dir is None:
+            return
+
+        from biocomptools.toollib.video_utils import create_video_from_plots
+
+        logger.info("ValidationLossLogger: Creating video from validation plots...")
+
+        video_path = self._plot_save_dir / "validation_history_video.mp4"
+        video_created = create_video_from_plots(
+            plot_dir=self._plot_save_dir,
+            output_path=video_path,
+            plot_pattern="history_step_*.png",
+        )
+
+        if video_created:
+            logger.info(f"ValidationLossLogger: Created validation video: {video_path}")
+        else:
+            logger.debug("ValidationLossLogger: No video created (insufficient plots or errors)")

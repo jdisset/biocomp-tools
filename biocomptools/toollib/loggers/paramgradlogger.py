@@ -874,3 +874,24 @@ class ParamGradLogger(Logger):
                 )
 
         return [(self.periods, log_param_grads)]
+
+    def finalize(self):
+        """Create videos from parameter diagnostic plots using ffmpeg."""
+        if self._save_dir is None:
+            return
+
+        from biocomptools.toollib.video_utils import create_videos_from_subdirs
+
+        logger.info("ParamGradLogger: Creating videos from diagnostic plots...")
+
+        videos_created = create_videos_from_subdirs(
+            base_dir=self._save_dir,
+            subdir_pattern="replicate*",
+            plot_pattern=f"*.{self.file_format}",
+            video_name="param_diagnostics_video.mp4",
+        )
+
+        if videos_created > 0:
+            logger.info(f"ParamGradLogger: Created {videos_created} diagnostic videos")
+        else:
+            logger.debug("ParamGradLogger: No videos created (insufficient plots or errors)")

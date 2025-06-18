@@ -562,12 +562,16 @@ class NetworkFilter(NetworkSet):
 
     source_set: NetworkSet
 
+    _size_diff: int = 0
+
     def update_name(self):
         if self.name is not None:
             return
         if self.source_set.name is None:
             return
         self.name = self.source_set.name
+        if self._size_diff != 0:
+            self.name += f"(- {self._size_diff})"
 
     def run_selectors(self, session=None):
         try:
@@ -575,6 +579,7 @@ class NetworkFilter(NetworkSet):
             self.content = [
                 net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
             ]
+            self._size_diff = len(self.source_set.content) - len(self.content)
             self.update_name()
         except Exception as e:
             logger.error(f"Error running filter on {len(self.source_set.content)} items.")

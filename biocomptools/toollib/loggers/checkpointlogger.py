@@ -38,40 +38,55 @@ class CheckpointLogger(Logger):
         def save_checkpoint(
             step: int, training_config, step_history: Optional[dict] = None, **kwargs
         ):
-            if step == 0 or step_history is None:
-                return
+            try:
+                if step == 0 or step_history is None:
+                    return
 
-            if 'latest_params' not in step_history:
-                logger.warning("No 'latest_params' in step_history for CheckpointLogger.")
-                return
+                if 'latest_params' not in step_history:
+                    logger.warning("No 'latest_params' in step_history for CheckpointLogger.")
+                    return
 
-            params = step_history['latest_params']
-            opt_state = step_history.get('opt_state')
-            n_replicates = training_config.n_replicates
+                params = step_history['latest_params']
+                opt_state = step_history.get('opt_state')
+                losses = step_history.get('loss', [])
+                n_replicates = training_config.n_replicates
 
-            logger.info(f"Saving checkpoint for step {step}...")
+                logger.info(f"Saving checkpoint for step {step}...")
 
-            for i in range(n_replicates):
-                rep_params = tree_get(params, i)
-                if rep_params is None:
-                    continue
+                for i in range(n_replicates):
+                    rep_params = tree_get(params, i)
+                    # safe check for None - avoid "truth value of array" error
+                    if rep_params is None:
+                        continue
 
-                # save the full BiocompModel
-                model = self._replicate_model_factory(all_params=params, replicate_id=i)
-                if model:
-                    model_path = self._save_dir / f"step_{step:06d}_rep_{i}.model.pickle"
-                    model.save(model_path)
+                    # save the full BiocompModel
+                    assert self._replicate_model_factory is not None, (
+                        "CheckpointLogger._replicate_model_factory is not set. "
+                        "Ensure that the training program provides a model factory."
+                    )
+                    model = self._replicate_model_factory(
+                        all_params=params, all_losses=losses, replicate_id=i
+                    )
+                    # safe boolean check for model existence
+                    if model is not None:
+                        model_path = self._save_dir / f"step_{step:06d}_rep_{i}.model.pickle"
+                        model.save(model_path)
+                    else:
+                        logger.warning(f"Failed to create model for replicate {i} at step {step}")
 
-                # save the raw training state for resuming
-                if self.save_optimizer_state and opt_state:
-                    rep_opt_state = tree_get(opt_state, i)
-                    state_dict = {
-                        'params': rep_params,
-                        'opt_state': rep_opt_state,
-                        'step': step,
-                    }
-                    state_path = self._save_dir / f"step_{step:06d}_rep_{i}.state.pickle"
-                    with open(state_path, 'wb') as f:
-                        pickle.dump(jax.device_get(state_dict), f)
+                    # save the raw training state for resuming
+                    if self.save_optimizer_state and opt_state is not None:
+                        rep_opt_state = tree_get(opt_state, i)
+                        state_dict = {
+                            'params': rep_params,
+                            'opt_state': rep_opt_state,
+                            'step': step,
+                        }
+                        state_path = self._save_dir / f"step_{step:06d}_rep_{i}.state.pickle"
+                        with open(state_path, 'wb') as f:
+                            pickle.dump(jax.device_get(state_dict), f)
+            except Exception as e:
+                logger.error(f"Error saving checkpoint at step {step}: {e}")
+                logger.exception(e)
 
         return [(self.periods, save_checkpoint)]
