@@ -461,11 +461,31 @@ class TrainedModel(BiocompDB, table=True):
             "secondaryjoin": "and_(NetworkDataPair.network_name == TrainingSetLink.network_name, NetworkDataPair.datafile_path == TrainingSetLink.datafile_path)",
         },
     )
+    
+    metrics: List["Metric"] = Relationship(back_populates="trained_model")
 
-    prediction_plots: List["Plot"] = Relationship(
-        back_populates="trained_model",
-        sa_relationship_kwargs={"foreign_keys": "[Plot.prediction_trained_model_name]"},
-    )
+
+
+class Metric(BiocompDB, table=True):
+    # composite primary key: model + metric_type + metric_name
+    trained_model_name: str = Field(foreign_key="trainedmodel.name", primary_key=True)
+    metric_type: str = Field(primary_key=True)  # e.g., "training_loss", "validation_loss", "gradient_norm"
+    metric_name: str = Field(primary_key=True)  # e.g., "step_1000", "final", "epoch_5"
+    
+    # flexible value storage - can be numeric, string, or JSON
+    numeric_value: Optional[float] = None
+    string_value: Optional[str] = None
+    json_value: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    
+    # metadata
+    timestamp: Optional[str] = None  # when the metric was recorded
+    meta: dict = Field(default_factory=dict, sa_column=Column(JSON))  # additional metadata
+    
+    # optional link to plot/figure that generated this metric
+    plot_source: Optional[str] = None  # can be figure file path or other identifier
+    
+    # relationships
+    trained_model: TrainedModel = Relationship(back_populates="metrics")
 
 
 class AxPosition(BaseModel):
@@ -487,31 +507,9 @@ class Plot(BiocompDB, table=True):
     datasource_type: Optional[str] = None
     meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
-    # prediction data embedded directly in plot
-    prediction_network_name: Optional[str] = None
-    prediction_datafile_path: Optional[str] = None  # data used to query the model
-    prediction_trained_model_name: Optional[str] = Field(
-        foreign_key="trainedmodel.name", default=None
-    )
-    prediction_mse: Optional[float] = None
-    prediction_grid_mse: Optional[float] = None
-    prediction_normalized_grid_mse: Optional[float] = None
-    prediction_n_points: Optional[int] = None
-    prediction_extra_stats: dict = Field(default_factory=dict, sa_column=Column(JSON))
-
     # relationships
     datafile: Optional[DataFile] = Relationship(back_populates="plotted_in")
-    trained_model: Optional["TrainedModel"] = Relationship(
-        back_populates="prediction_plots",
-        sa_relationship_kwargs={"foreign_keys": "[Plot.prediction_trained_model_name]"},
-    )
 
-    @property
-    def has_prediction(self) -> bool:
-        return (
-            self.prediction_network_name is not None
-            and self.prediction_trained_model_name is not None
-        )
 
 
 class Figure(BiocompDB, table=True):

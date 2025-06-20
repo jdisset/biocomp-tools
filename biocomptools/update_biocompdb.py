@@ -36,7 +36,9 @@ from biocomptools.toollib.common import config
 from dracon.commandline import make_program, Arg
 
 ProcessDatafileResult: TypeAlias = Tuple[md.DataFile, str, Dict[str, Any]]
-FigureProcessorResult: TypeAlias = Tuple[Optional[md.Figure], List[md.Plot]]
+
+ModelLoadResult: TypeAlias = Tuple[md.TrainedModel, List[md.Metric]]
+FigureProcessorResult: TypeAlias = Tuple[Optional[md.Figure], List[md.Plot], List[md.Metric]]
 ExperimentWorkerResult: TypeAlias = Tuple[
     str, Optional[md.Experiment], List[Dict[str, Any]], List[Tuple[str, str]]
 ]
@@ -82,7 +84,7 @@ class ExperimentWorkerArgs(BaseModel):
     model_config = {'arbitrary_types_allowed': True}
 
 
-def _w_load_model(args: Tuple[str, str]) -> md.TrainedModel:
+def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
     mpath_s, base_dir_s = args
     mpath, base_dir = Path(mpath_s), Path(base_dir_s)
     try:
@@ -94,8 +96,10 @@ def _w_load_model(args: Tuple[str, str]) -> md.TrainedModel:
             for e in metadata.get('training_set', [])
             if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
         ]
-        return md.TrainedModel(
-            name=getattr(biocomp_model, 'signature', mpath.stem),
+        
+        model_name = getattr(biocomp_model, 'signature', mpath.stem)
+        trained_model = md.TrainedModel(
+            name=model_name,
             path_to_model=mpath.relative_to(base_dir).as_posix(),
             run_name=metadata.get('run_name', None),
             experiment_name=metadata.get('experiment_name', None),
@@ -103,8 +107,97 @@ def _w_load_model(args: Tuple[str, str]) -> md.TrainedModel:
             training_config=metadata,
             training_set=training_set,
         )
+        
+        # Extract metrics from metadata
+        metrics = []
+        
+        # Add end_loss as a training loss metric if it exists
+        if metadata.get('end_loss') is not None:
+            metrics.append(md.Metric(
+                trained_model_name=model_name,
+                metric_type="training_loss",
+                metric_name="final",
+                numeric_value=float(metadata['end_loss']),
+                timestamp=metadata.get('end_time'),
+                meta={"source": "training_completion"}
+            ))
+        
+        # Extract logger metrics
+        logger_metrics = metadata.get('logger_metrics', [])
+        for logger_data in logger_metrics:
+            if not isinstance(logger_data, dict):
+                continue
+                
+            for logger_name, logger_values in logger_data.items():
+                if not isinstance(logger_values, dict):
+                    continue
+                    
+                # Handle validation loss loggers
+                if "validation_loss" in logger_name:
+                    # Extract validation set info from loggers metadata
+                    validation_set_name = None
+                    loggers_meta = metadata.get('loggers', [])
+                    for logger_meta in loggers_meta:
+                        if (isinstance(logger_meta, dict) and 
+                            logger_meta.get('validation_name') == logger_name.split('_validation_loss')[0]):
+                            validation_set_name = logger_meta.get('validation_set', {}).get('name')
+                            break
+                    
+                    # Add RMSE metric
+                    if 'RMSE' in logger_values:
+                        metrics.append(md.Metric(
+                            trained_model_name=model_name,
+                            metric_type="validation_loss",
+                            metric_name=logger_name,
+                            numeric_value=float(logger_values['RMSE']),
+                            meta={
+                                "validation_set": validation_set_name,
+                                "logger_name": logger_name.split('_validation_loss')[0]
+                            }
+                        ))
+                    
+                    # Add per-network metrics
+                    if 'per_network' in logger_values:
+                        for network_name, network_metrics in logger_values['per_network'].items():
+                            if 'RMSE' in network_metrics:
+                                metrics.append(md.Metric(
+                                    trained_model_name=model_name,
+                                    metric_type="validation_loss_per_network",
+                                    metric_name=f"{logger_name}_{network_name}",
+                                    numeric_value=float(network_metrics['RMSE']),
+                                    meta={
+                                        "validation_set": validation_set_name,
+                                        "logger_name": logger_name.split('_validation_loss')[0],
+                                        "network_name": network_name
+                                    }
+                                ))
+                
+                # Handle other logger types (training loss, gradient norms, etc.)
+                else:
+                    # For other numeric metrics
+                    if isinstance(logger_values, (int, float)):
+                        metrics.append(md.Metric(
+                            trained_model_name=model_name,
+                            metric_type="logger_metric",
+                            metric_name=logger_name,
+                            numeric_value=float(logger_values),
+                            meta={"logger_name": logger_name}
+                        ))
+                    elif isinstance(logger_values, dict):
+                        # Store complex logger data as JSON
+                        metrics.append(md.Metric(
+                            trained_model_name=model_name,
+                            metric_type="logger_metric",
+                            metric_name=logger_name,
+                            json_value=logger_values,
+                            meta={"logger_name": logger_name}
+                        ))
+        
+        return trained_model, metrics
+        
     except Exception as e:
         raise ModelLoadError(f"failed to load model: {e}", path_info=mpath) from e
+
 
 
 def _w_parse_xp_file(args: Tuple[str, str]) -> Tuple[str, Optional[md.Experiment]]:
@@ -247,9 +340,10 @@ def clean_dict(data: Any, patterns: List[str], cur_path: str = '') -> Any:
 
 def _proc_plot_task(
     task: dict, fig_file: str, task_idx: int, patterns: List[str]
-) -> Optional[md.Plot]:
+) -> Tuple[Optional[md.Plot], List[md.Metric]]:
     ds_type = task.get('datasource_type')
     net_name = task.get('network_name') or task.get('network', {}).get('name')
+    metrics = []
 
     # base plot args
     plot_args = {
@@ -264,30 +358,91 @@ def _proc_plot_task(
     }
 
     if ds_type == 'database' and (df_path := task.get('datafile', {}).get('file')):
-        return md.Plot(from_datafile=df_path, **plot_args)
+        return md.Plot(from_datafile=df_path, **plot_args), metrics
 
     elif ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
         pred_stats = task.get('prediction_stats', {})
-        # embed prediction data directly in plot
-        plot_args.update(
-            {
-                'prediction_network_name': net_name,
-                'prediction_datafile_path': task.get('extra_prediction_info', {})
-                .get('datafile', {})
-                .get('file'),
-                'prediction_trained_model_name': model_sig,
-                'prediction_mse': pred_stats.get('mse'),
-                'prediction_grid_mse': pred_stats.get('grid_mse'),
-                'prediction_normalized_grid_mse': pred_stats.get(
-                    'normalized_grid_mse', pred_stats.get('grid_mse')
-                ),
-                'prediction_n_points': pred_stats.get('eval_npoints'),
-                'prediction_extra_stats': pred_stats,
-            }
-        )
-        return md.Plot(**plot_args)
+        
+        # Extract metrics from prediction stats and create Metric objects
+        plot_source = f"{fig_file}:{task_idx}"
+        
+        if 'mse' in pred_stats:
+            metrics.append(md.Metric(
+                trained_model_name=model_sig,
+                metric_type="prediction_mse",
+                metric_name=f"plot_{net_name}",
+                numeric_value=float(pred_stats['mse']),
+                plot_source=plot_source,
+                meta={
+                    "network_name": net_name,
+                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+                    "plot_method": task.get('plot_method')
+                }
+            ))
+        
+        if 'grid_mse' in pred_stats:
+            metrics.append(md.Metric(
+                trained_model_name=model_sig,
+                metric_type="prediction_grid_mse", 
+                metric_name=f"plot_{net_name}",
+                numeric_value=float(pred_stats['grid_mse']),
+                plot_source=plot_source,
+                meta={
+                    "network_name": net_name,
+                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+                    "plot_method": task.get('plot_method')
+                }
+            ))
+        
+        normalized_grid_mse = pred_stats.get('normalized_grid_mse', pred_stats.get('grid_mse'))
+        if normalized_grid_mse is not None:
+            metrics.append(md.Metric(
+                trained_model_name=model_sig,
+                metric_type="prediction_normalized_grid_mse",
+                metric_name=f"plot_{net_name}",
+                numeric_value=float(normalized_grid_mse),
+                plot_source=plot_source,
+                meta={
+                    "network_name": net_name,
+                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+                    "plot_method": task.get('plot_method')
+                }
+            ))
+            
+        if 'eval_npoints' in pred_stats:
+            metrics.append(md.Metric(
+                trained_model_name=model_sig,
+                metric_type="prediction_n_points",
+                metric_name=f"plot_{net_name}",
+                numeric_value=float(pred_stats['eval_npoints']),
+                plot_source=plot_source,
+                meta={
+                    "network_name": net_name,
+                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+                    "plot_method": task.get('plot_method')
+                }
+            ))
+        
+        # Store any extra stats as JSON metric
+        if pred_stats:
+            metrics.append(md.Metric(
+                trained_model_name=model_sig,
+                metric_type="prediction_extra_stats",
+                metric_name=f"plot_{net_name}",
+                json_value=pred_stats,
+                plot_source=plot_source,
+                meta={
+                    "network_name": net_name,
+                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
+                    "plot_method": task.get('plot_method')
+                }
+            ))
 
-    return None
+        # Create simplified plot without prediction fields
+        return md.Plot(**plot_args), metrics
+
+    return None, metrics
+
 
 
 def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorResult:
@@ -296,7 +451,7 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
     try:
         metadata = _extract_file_meta(fig_path)
         if not metadata:
-            return None, []
+            return None, [], []
 
         rel_path = fig_path.relative_to(base_dir).as_posix()
         fig_meta_content = metadata.get('FigureMetadata', {})
@@ -308,6 +463,7 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
 
         figure = md.Figure(file=rel_path, meta=cleaned_fig_meta)
         plots = []
+        all_metrics = []
         ptasks = fig_meta_content.get('plot_tasks', [])
         should_debug = False
 
@@ -323,20 +479,23 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
             should_debug = True
 
         for i, task_data in enumerate(ptasks):
-            if plot := _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns):
+            plot, task_metrics = _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns)
+            if plot:
                 plots.append(plot)
+                all_metrics.extend(task_metrics)
                 if should_debug:
                     print(f"Processed plot {i + 1}/{len(ptasks)}: {plot}")
-                    print(f"Plot has prediction: {plot.has_prediction}")
+                    print(f"Plot extracted {len(task_metrics)} metrics")
 
         if should_debug:
-            print(f"Processed {len(plots)} plots from {fig_path.name}.")
+            print(f"Processed {len(plots)} plots and {len(all_metrics)} metrics from {fig_path.name}.")
 
-        return figure, plots
+        return figure, plots, all_metrics
     except Exception as e:
         if isinstance(e, FigureProcessingError):
             raise
         raise FigureProcessingError(f"generic error: {e}", path_info=fig_path) from e
+
 
 
 def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
@@ -594,75 +753,85 @@ class BiocompDBUpdater(BaseModel):
             new_bkp_f.unlink(missing_ok=True)
             return False
 
-    def _load_models(self, progress: Progress) -> List[md.TrainedModel]:
-        self._logger.info("loading models...")
-        if not self.models_dir.is_dir():
-            self._logger.info(f"Models dir {self.models_dir} not found")
-            return []
-        mpaths = [
-            p for p in self.models_dir.rglob('*model.p*kl*') if '__archive' not in p.as_posix()
-        ]
-        self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
-        if not mpaths:
-            return []
-
-        models: List[md.TrainedModel] = []
-        tid = progress.add_task("[magenta]Loading models...", total=len(mpaths))
-        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
-            futures = {exe.submit(_w_load_model, (str(p), str(self.base_dir))): p for p in mpaths}
-            for fut in as_completed(futures):
-                try:
-                    models.append(fut.result())
-                except ModelLoadError as e:
-                    self._logger.error(f"Error loading model: {e}")  # e already has path
-                except Exception as e:
-                    self._logger.error(
-                        f"Critical error getting result for model {futures[fut]}", exc_info=e
-                    )
-                progress.update(tid, advance=1)
-        progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
-        return models
-
-    def _load_figs(self, progress: Progress) -> Tuple[List[md.Figure], List[md.Plot]]:
-        self._logger.info("loading figures...")
-        figs, plots = [], []
-        if not self.plots_dir.is_dir():
-            self._logger.warning(f"Plots dir {self.plots_dir} not found")
-            return figs, plots
-
-        fig_paths = [
-            p
-            for pat in ['**/*.pdf', '**/*.png']
-            for p in self.plots_dir.rglob(pat)
-            if '__archive' not in p.as_posix()
-        ]
-        self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
-        if not fig_paths:
-            return figs, plots
-
-        tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
-        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
-            args_list = [
-                (str(fp), str(self.base_dir), self._metadata_exclusion_patterns) for fp in fig_paths
+    def _load_models(self, progress: Progress) -> Tuple[List[md.TrainedModel], List[md.Metric]]:
+            self._logger.info("loading models...")
+            if not self.models_dir.is_dir():
+                self._logger.info(f"Models dir {self.models_dir} not found")
+                return [], []
+            mpaths = [
+                p for p in self.models_dir.rglob('*model.p*kl*') if 'checkpoints/' not in p.as_posix()
             ]
-            futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
-            for fut in as_completed(futures):
-                try:
-                    fig_obj, plots_list = fut.result()
-                    if fig_obj:
-                        figs.append(fig_obj)
-                        plots.extend(plots_list)
-                except FigureProcessingError as e:
-                    self._logger.warning(f"Error processing figure: {e}")
-                    self._logger.exception(e)
-                except Exception as e:
-                    self._logger.error(
-                        f"Critical error processing figure future for {futures[fut]}"
-                    )
-                    self._logger.exception(e)
-                progress.update(tid, advance=1)
-        progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
-        return figs, plots
+            self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
+            if not mpaths:
+                return [], []
+    
+            models: List[md.TrainedModel] = []
+            all_metrics: List[md.Metric] = []
+            tid = progress.add_task("[magenta]Loading models...", total=len(mpaths))
+            with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+                futures = {exe.submit(_w_load_model, (str(p), str(self.base_dir))): p for p in mpaths}
+                for fut in as_completed(futures):
+                    try:
+                        model, metrics = fut.result()
+                        models.append(model)
+                        all_metrics.extend(metrics)
+                    except ModelLoadError as e:
+                        self._logger.error(f"Error loading model: {e}")  # e already has path
+                    except Exception as e:
+                        self._logger.error(
+                            f"Critical error getting result for model {futures[fut]}", exc_info=e
+                        )
+                    progress.update(tid, advance=1)
+            progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
+            self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(models)} models")
+            return models, all_metrics
+
+
+
+    def _load_figs(self, progress: Progress) -> Tuple[List[md.Figure], List[md.Plot], List[md.Metric]]:
+            self._logger.info("loading figures...")
+            figs, plots, all_metrics = [], [], []
+            if not self.plots_dir.is_dir():
+                self._logger.warning(f"Plots dir {self.plots_dir} not found")
+                return figs, plots, all_metrics
+    
+            fig_paths = [
+                p
+                for pat in ['**/*.pdf', '**/*.png']
+                for p in self.plots_dir.rglob(pat)
+                if '__archive' not in p.as_posix()
+            ]
+            self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
+            if not fig_paths:
+                return figs, plots, all_metrics
+    
+            tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
+            with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+                args_list = [
+                    (str(fp), str(self.base_dir), self._metadata_exclusion_patterns) for fp in fig_paths
+                ]
+                futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
+                for fut in as_completed(futures):
+                    try:
+                        fig_obj, plots_list, metrics_list = fut.result()
+                        if fig_obj:
+                            figs.append(fig_obj)
+                            plots.extend(plots_list)
+                            all_metrics.extend(metrics_list)
+                    except FigureProcessingError as e:
+                        self._logger.warning(f"Error processing figure: {e}")
+                        self._logger.exception(e)
+                    except Exception as e:
+                        self._logger.error(
+                            f"Critical error processing figure future for {futures[fut]}"
+                        )
+                        self._logger.exception(e)
+                    progress.update(tid, advance=1)
+            progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
+            self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(figs)} figures")
+            return figs, plots, all_metrics
+
+
 
     def _build_nets_task_tpe(
         self, recipe: md.Recipe, lib: Any, cache_path: Path
@@ -738,10 +907,12 @@ class BiocompDBUpdater(BaseModel):
             self._logger.warning("nothing to process.")
             return
 
-        lib, xps_map, cals_map, models_list, figs_list, plots_list = (
+        lib, xps_map, cals_map, models_list, model_metrics_list, figs_list, plots_list, fig_metrics_list = (
             ut.load_lib(),
             {},
             {},
+            [],
+            [],
             [],
             [],
             [],
@@ -875,9 +1046,9 @@ class BiocompDBUpdater(BaseModel):
                     self._logger.warning("no experiments loaded to process.")
 
             if self.process_models:
-                models_list = self._load_models(progress)
+                models_list, model_metrics_list = self._load_models(progress)
             if self.process_figures:
-                figs_list, plots_list = self._load_figs(progress)
+                figs_list, plots_list, fig_metrics_list = self._load_figs(progress)
 
             items_commit = [
                 i
@@ -885,8 +1056,10 @@ class BiocompDBUpdater(BaseModel):
                     list(xps_map.values()),
                     list(cals_map.values()),
                     models_list,
+                    model_metrics_list,
                     figs_list,
                     plots_list,
+                    fig_metrics_list,
                 ]
                 for i in grp
                 if i
