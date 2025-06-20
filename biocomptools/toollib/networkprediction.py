@@ -45,11 +45,12 @@ def validate_predict_at(v: Any) -> List[NdArray]:
 def validate_ground_truth(v: Any) -> Optional[List[Optional[NdArray]]]:
     """convert single numpy array to list of arrays or none to list of none"""
     if v is None:
+        logger.warning("ground_truth is None, will not compare predictions to ground truth")
         return None
     if isinstance(v, NdArray):
-        return [np.asarray(v, dtype=np.float32)]
-    if isinstance(v, list) and all(isinstance(x, (NdArray, type(None))) for x in v):
-        return [np.asarray(x, dtype=np.float32) if x is not None else None for x in v]
+        logger.warning(f"ground_truth is a single array of shape {v.shape}, converting to list")
+        aslist = [np.asarray(v, dtype=np.float32)]
+        logger.info(f"ground_truth converted to list of shapes {[x.shape for x in aslist]}")
     return v
 
 
@@ -68,7 +69,7 @@ def _calculate_single_network_stats(
     yhat: NdArray,
     gt: Optional[NdArray],
     x: NdArray,
-    output_pos: Union[int, List[int]],
+    dependent_output_pos: Union[int, List[int]],
     nb_points_in_eval: int,
     rescaler,
     gridstats_params: Dict[str, Any],
@@ -77,7 +78,10 @@ def _calculate_single_network_stats(
 ) -> Dict[str, Any]:
     """calculate statistics for a single network (used in parallel processing)"""
     latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
-    latent_yhat = latent_yhats[:, output_pos]
+    # ensure dependent_output_pos is always a list for consistent indexing
+    if isinstance(dependent_output_pos, int):
+        dependent_output_pos = [dependent_output_pos]
+    latent_yhat = latent_yhats[:, dependent_output_pos]
 
     # check for empty output - this can happen if output_pos selects invalid columns
     if latent_yhat.size == 0:
@@ -93,7 +97,7 @@ def _calculate_single_network_stats(
             'latent_std': np.nan,
             'latent_min': np.nan,
             'latent_max': np.nan,
-            'error': 'Empty output array - invalid output_pos selection',
+            'error': 'Empty output array - invalid dependent_output_pos selection',
         }
 
     network_stats = {
@@ -114,76 +118,14 @@ def _calculate_single_network_stats(
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
+        assert latent_gt.shape[1] == latent_yhats.shape[1]
 
-        # handle different ground truth formats
-        if latent_gt.ndim > 1:
-            # Check if ground truth has same width as predictions (all proteins)
-            if latent_gt.shape[1] == latent_yhats.shape[1]:
-                # Ground truth has all proteins, apply output_pos selection
-                latent_gt_selected = latent_gt[:, output_pos]
-            elif latent_gt.shape[1] == network_info.get('n_dependent_outputs', 1):
-                # Ground truth is already filtered to dependent outputs only
-                if latent_gt.shape[1] == 1:
-                    # Single dependent output - use it directly
-                    latent_gt_selected = latent_gt[:, 0]
-                else:
-                    # Multiple dependent outputs - need to map output_pos to the filtered space
-                    # This is a complex case that might need more information about which output is which
-                    # For now, if we can't determine the mapping, use all available outputs
-                    latent_gt_selected = latent_gt
-                    logger.warning(
-                        f"Ground truth has {latent_gt.shape[1]} columns (matching n_dependent_outputs), "
-                        f"but output_pos={output_pos}. Using all columns for comparison."
-                    )
-            else:
-                # Unexpected shape - try to handle gracefully
-                if isinstance(output_pos, int) and output_pos < latent_gt.shape[1]:
-                    latent_gt_selected = latent_gt[:, output_pos]
-                else:
-                    latent_gt_selected = latent_gt[:, 0] if latent_gt.shape[1] >= 1 else latent_gt
-                    logger.warning(
-                        f"Ground truth shape {latent_gt.shape} doesn't match expected patterns. "
-                        f"Expected either {latent_yhats.shape[1]} (all proteins) or "
-                        f"{network_info.get('n_dependent_outputs', 1)} (dependent outputs only). "
-                        f"Using column 0 for comparison."
-                    )
-        else:
-            latent_gt_selected = latent_gt
-
-        if latent_gt_selected.size == 0:
-            network_stats['error'] = 'Empty ground truth array - invalid output_pos selection'
-            return network_stats
-
-        # Ensure shapes are compatible for comparison
-        if latent_gt_selected.ndim == 1 and latent_yhat.ndim == 1:
-            # Both are 1D - compatible
-            pass
-        elif latent_gt_selected.ndim == 2 and latent_yhat.ndim == 1:
-            # Ground truth is 2D but we expect 1D - flatten if single column
-            if latent_gt_selected.shape[1] == 1:
-                latent_gt_selected = latent_gt_selected[:, 0]
-            else:
-                logger.error(
-                    f"Shape mismatch: latent_yhat is 1D but latent_gt_selected has shape {latent_gt_selected.shape}"
-                )
-                network_stats['error'] = f'Shape mismatch for comparison: yhat is 1D, gt is {latent_gt_selected.shape}'
-                return network_stats
-        elif latent_gt_selected.shape != latent_yhat.shape:
-            logger.error(
-                f"Shape mismatch: latent_yhat has shape {latent_yhat.shape}, "
-                f"latent_gt_selected has shape {latent_gt_selected.shape}"
-            )
-            network_stats['error'] = f'Shape mismatch: yhat {latent_yhat.shape} vs gt {latent_gt_selected.shape}'
-            return network_stats
-
-        mse = float(np.mean((latent_yhat - latent_gt_selected) ** 2))
+        mse = float(np.mean((latent_yhat - latent_gt) ** 2))
         network_stats['mse'] = float(mse)
         network_stats['rmse'] = float(np.sqrt(mse))
 
         if enable_gridstats:
-            grid_stats = _calculate_grid_stats(
-                latent_yhat, latent_gt_selected, latent_x, gridstats_params
-            )
+            grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
             network_stats.update(grid_stats)
 
     return network_stats
@@ -299,6 +241,7 @@ class NetworkPrediction(DataSource):
     use_output_as_input: bool = False
     z_value: Union[Literal['uniform'], float] = 'uniform'
     disable_variational: bool = True
+    device: Literal['cpu', 'gpu'] = 'cpu'  # device preference for predictions
 
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
@@ -340,7 +283,6 @@ class NetworkPrediction(DataSource):
                 f"does not match number of networks ({len(self.network_model.network)})"
             )
 
-        # normalize ground truth
         if self.ground_truth is None:
             self.ground_truth = [None] * len(self.predict_at)
         else:
@@ -374,6 +316,10 @@ class NetworkPrediction(DataSource):
     def with_csv_output_path(self, path: str) -> 'NetworkPrediction':
         """set path to save prediction statistics to a CSV file"""
         return self.model_copy(update={'save_csv_to': path})
+
+    def with_device(self, device: Literal['cpu', 'gpu']) -> 'NetworkPrediction':
+        """set device preference for predictions"""
+        return self.model_copy(update={'device': device})
 
     def _shuffle_inputs(self):
         """shuffle inputs and ground truth with the same random order"""
@@ -441,6 +387,8 @@ class NetworkPrediction(DataSource):
         with_shared_params: Optional[pr.ParameterTree] = None,
     ):
         """compute predictions for all networks"""
+        
+        start_time = time.time()
 
         # stack inputs from all networks
         assert isinstance(self._aligned_x, list)
@@ -457,7 +405,7 @@ class NetworkPrediction(DataSource):
         if self.verbose:
             logger.debug(f"computing predictions with model {self.network_model.signature}")
             logger.debug(
-                f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}"
+                f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}, device={self.device}"
             )
             logger.debug(f"effective_max_evals: {effective_max_evals}")
 
@@ -488,7 +436,11 @@ class NetworkPrediction(DataSource):
             collect_out_indices=np.concatenate(collect_out_idx).flatten()
             if collect_out_idx
             else None,
+            device=self.device,
         )
+        
+        prediction_time = time.time() - start_time
+        logger.info(f"Network predictions completed in {prediction_time:.2f} seconds")
 
         # split the outputs by network
         network_outputs = self.network_model.split_outputs_per_network(
@@ -496,8 +448,11 @@ class NetworkPrediction(DataSource):
         )
 
         self._process_prediction_results(network_outputs, effective_max_evals)
-
+        
+        stats_start_time = time.time()
         self._network_stats = self._calculate_all_network_stats()
+        stats_time = time.time() - stats_start_time
+        logger.info(f"Network statistics calculated in {stats_time:.2f} seconds")
 
     def _process_prediction_results(self, network_outputs: List[NdArray], max_evals: int):
         """process and store prediction results"""
@@ -564,10 +519,10 @@ class NetworkPrediction(DataSource):
             network = self.network_model.network[network_idx]
 
             # get output position for this network
-            _, output_pos, _, _ = get_reordered_protein_names(network)
-            assert isinstance(output_pos, int)
+            _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
+            assert isinstance(dependent_output_pos, int)
             if self.verbose:
-                logger.debug(f"output_pos: {output_pos}")
+                logger.debug(f"dep_output_pos: {dependent_output_pos}")
 
             stats = self.get_network_stats()
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
@@ -644,8 +599,8 @@ class NetworkPrediction(DataSource):
             gt = self._gtruths[i]
             x = self._x[i]
 
-            _, output_pos, _, _ = get_reordered_protein_names(network)
-            
+            _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
+
             # Calculate dependent outputs for validation
             all_outputs = set(network.get_output_proteins())
             input_proteins = set(network.get_inverted_input_proteins())
@@ -672,7 +627,7 @@ class NetworkPrediction(DataSource):
                     'yhat': yhat,
                     'gt': gt,
                     'x': x,
-                    'output_pos': output_pos,
+                    'dependent_output_pos': dependent_output_pos,
                     'nb_points_in_eval': nb_points_in_eval,
                     'rescaler': self.network_model.model.rescaler
                     if not self.already_latent
@@ -697,9 +652,35 @@ class NetworkPrediction(DataSource):
                 'task_yhat_shape': task['yhat'].shape,
                 'task_gt_shape': None if task['gt'] is None else task['gt'].shape,
                 'task_x_shape': task['x'].shape,
-                'task_output_pos': task['output_pos'],
+                'task_output_pos': task['dependent_output_pos'],
                 'task_nb_points_in_eval': task['nb_points_in_eval'],
             }
+
+        def process_and_log_stats(idx, task, result):
+            all_stats[idx] = result
+            if task.get('gt') is not None:
+                rescaler = task['rescaler']
+                latent_gt = rescaler.fwd(task['gt'])
+                latent_yhat = rescaler.fwd(task['yhat'])
+                if latent_gt.shape < latent_yhat.shape:
+                    logger.debug(
+                        f"ground truth shape {latent_gt.shape} is smaller than yhat shape {latent_yhat.shape}, "
+                        "Assuming gt is only the dependent outputs."
+                    )
+                    # ensure dependent_output_pos is always a list for consistent indexing
+                    output_pos = task['dependent_output_pos']
+                    if isinstance(output_pos, int):
+                        output_pos = [output_pos]
+                    latent_yhat = latent_yhat[:, output_pos]
+                latent_x = rescaler.fwd(task['x'])
+                self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
+
+        def handle_exception(idx, task, e):
+            net_name = task['network_info'].get('network_name', f"Network_{idx}")
+            logger.error(f"Error calculating stats for network {net_name}: {e}")
+            logger.error(f"Task info: {get_info_dump(task, idx)}")
+            logger.exception(e)
+            all_stats[idx] = {'error': str(e)}
 
         if self.n_stats_workers > 1 and len(tasks) > 1:
             logger.info(
@@ -713,27 +694,12 @@ class NetworkPrediction(DataSource):
 
                 for future in as_completed(future_to_idx):
                     idx = future_to_idx[future]
+                    task = tasks[idx]
                     try:
                         result = future.result()
-                        all_stats[idx] = result
-
-                        if tasks[idx].get('gt') is not None:
-                            rescaler = tasks[idx]['rescaler']
-                            latent_gt = rescaler.fwd(tasks[idx]['gt'])
-                            latent_yhat = rescaler.fwd(tasks[idx]['yhat'])[
-                                :, tasks[idx]['output_pos']
-                            ]
-                            latent_x = rescaler.fwd(tasks[idx]['x'])
-                            self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
-
+                        process_and_log_stats(idx, task, result)
                     except Exception as e:
-                        net_name = tasks[idx]['network_info'].get('network_name', f"Network_{idx}")
-                        logger.error(
-                            f"Error calculating stats for network {net_name} in parallel worker: {e}"
-                        )
-                        logger.error(f"Task info: {get_info_dump(tasks[idx], idx)}")
-                        logger.exception(e)
-                        all_stats[idx] = {'error': str(e)}
+                        handle_exception(idx, task, e)
 
         else:
             if len(tasks) > 0:
@@ -745,23 +711,9 @@ class NetworkPrediction(DataSource):
                 idx = task['network_idx']
                 try:
                     result = _calculate_single_network_stats(**task)
-                    all_stats[idx] = result
-
-                    if task.get('gt') is not None:
-                        rescaler = task['rescaler']
-                        latent_gt = rescaler.fwd(task['gt'])
-                        latent_yhat = rescaler.fwd(task['yhat'])[:, task['output_pos']]
-                        latent_x = rescaler.fwd(task['x'])
-                        self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
-
+                    process_and_log_stats(idx, task, result)
                 except Exception as e:
-                    net_name = task['network_info'].get('network_name', f"Network_{idx}")
-                    logger.error(
-                        f"Error calculating stats for network {net_name} in sequential processing: {e}"
-                    )
-                    logger.error(f"Task info: {get_info_dump(tasks[idx], idx)}")
-                    logger.exception(e)
-                    all_stats[idx] = {'error': str(e)}
+                    handle_exception(idx, task, e)
 
         return all_stats
 

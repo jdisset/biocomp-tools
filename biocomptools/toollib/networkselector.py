@@ -746,7 +746,7 @@ class UorfFilter(NetworkFilter):
         # network_info['uorf_values'] should be list[tuple[int, int]]
         # we want single ERN networks
         if len(network_info['uorf_values']) != 1:
-            logger.warning(
+            logger.debug(
                 f"Unexpected uORF values for {netdata.network}: {network_info['uorf_values']}. Is it a single ERN?"
             )
             return False
@@ -766,6 +766,7 @@ def build_data_manager(
     dataset: NetworkSet,
     data_conf: DataConfig = DEFAULT_DATA_CONFIG,
     data_cache=config.paths.cache.data,
+    jax_sampling: bool = True,
 ) -> DataManager:
     assert all([isinstance(n, NetworkDataPair) for n in dataset.content]), (
         "By now, dataset should only contain NetworkDataPair objects"
@@ -794,4 +795,11 @@ def build_data_manager(
 
     X, Y = zip(*data)
 
-    return DataManager(X, Y, actual_networks, data_cfg=data_conf, cache_location=data_cache)
+    return DataManager(
+        X,
+        Y,
+        actual_networks,
+        data_cfg=data_conf,
+        cache_location=data_cache,
+        jax_sampling=jax_sampling,
+    )
