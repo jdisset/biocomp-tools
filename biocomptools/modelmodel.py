@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, model_validator, BeforeValidator, Field
 from dracon.utils import ser_debug
-from typing import Optional, List, Union, Tuple, Callable, Type, TypeVar
+from typing import Optional, List, Union, Tuple, Callable, Type, TypeVar, Literal
 import numpy as np
 from pathlib import Path
 import pickle
@@ -209,6 +209,8 @@ class NetworkModel(BaseModel):
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
     _batch_apply: Optional[Callable] = None
+    _batch_apply_cpu: Optional[Callable] = None
+    _batch_apply_gpu: Optional[Callable] = None
 
     def model_post_init(self, *args, **kwargs):
         """initialize model after validation"""
@@ -230,9 +232,26 @@ class NetworkModel(BaseModel):
 
             self._stack = cmp.ComputeStack(networks=self.network)
             self._stack.build(self.model.compute_config)
-            self._batch_apply = jax.jit(
-                jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
-            )
+
+            # create a general batch apply function
+            batch_apply_fn = jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
+
+            # JIT compile for both CPU and GPU devices
+            cpu_device = jax.devices('cpu')[0] if jax.devices('cpu') else None
+            gpu_devices = jax.devices('gpu') if jax.devices('gpu') else []
+
+            if cpu_device:
+                self._batch_apply_cpu = jax.jit(batch_apply_fn, device=cpu_device)
+            else:
+                self._batch_apply_cpu = jax.jit(batch_apply_fn)
+
+            if gpu_devices:
+                self._batch_apply_gpu = jax.jit(batch_apply_fn, device=gpu_devices[0])
+            else:
+                self._batch_apply_gpu = self._batch_apply_cpu
+
+            # default batch apply (for backward compatibility)
+            self._batch_apply = self._batch_apply_cpu
         except Exception as e:
             logger.error(f"error building stack: {e}")
             raise e
@@ -337,6 +356,7 @@ class NetworkModel(BaseModel):
         with_shared_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
+        device: Literal['cpu', 'gpu'] = 'cpu',
     ) -> np.ndarray:
         """
         predict but rescale input data to latent space before prediction
@@ -358,6 +378,7 @@ class NetworkModel(BaseModel):
             with_shared_params=with_shared_params,
             collect_in_indices=collect_in_indices,
             collect_out_indices=collect_out_indices,
+            device=device,
         )
         scaled_yhat = self.model.rescaler.inv(scaled_result)
         return scaled_yhat, collections
@@ -372,6 +393,7 @@ class NetworkModel(BaseModel):
         with_shared_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
+        device: Literal['cpu', 'gpu'] = 'cpu',
     ):
         """
         make predictions using the model
@@ -435,6 +457,14 @@ class NetworkModel(BaseModel):
         else:
             X_padded = X
 
+        # select the appropriate batch apply function based on device
+        if device == 'gpu' and self._batch_apply_gpu is not None:
+            batch_apply = self._batch_apply_gpu
+            logger.debug("Using GPU for predictions")
+        else:
+            batch_apply = self._batch_apply_cpu or self._batch_apply
+            logger.debug("Using CPU for predictions")
+
         # make predictions in batches
         all_yhats = []
         all_collected_in = []
@@ -452,8 +482,8 @@ class NetworkModel(BaseModel):
 
             keys_batch = jax.random.split(batch_key, batch_size)
 
-            assert self._batch_apply is not None
-            out, (_, fullout) = self._batch_apply(
+            assert batch_apply is not None
+            out, (_, fullout) = batch_apply(
                 params,
                 X_padded[start_idx:end_idx],
                 Z_batch,
