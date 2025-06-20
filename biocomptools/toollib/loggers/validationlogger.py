@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from biocomptools.trainutils import ffill
 from biocomptools.toollib.loggers.paramgradlogger import get_plot_rows_and_columns
+import time
 
 logger = get_logger(__name__)
 
@@ -40,8 +41,10 @@ class ValidationLossLogger(Logger):
     n_evals: int = 2048
     enable_gridstats: bool = False
     seed: int = 42
-    predictor_n_stats_workers: int = 8
+    predictor_n_stats_workers: int = 1
     plot_training_losses: bool = False
+
+    update_xynetworks: bool = True
 
     # Plotting configuration
     save_plots: bool = True
@@ -53,6 +56,7 @@ class ValidationLossLogger(Logger):
     n_replicates: int = 1
 
     # Internal state
+    _dman: Optional[DataManager] = None
     _training_program: Optional[TrainingProgram] = None
     _console: Optional[Console] = None
     _history: List[Dict[str, Any]] = []
@@ -94,33 +98,39 @@ class ValidationLossLogger(Logger):
         elif self.compute_conf is None or self.data_conf is None:
             raise ValueError("In standalone mode, compute_conf and data_conf must be provided.")
 
-        self._initialize_predictor()
-
-    def _initialize_predictor(self):
-        if self._xynetworks is None:
+    def _initialize_predictor(self, force_reinit: bool = False):
+        if self._predictor is not None and not force_reinit and self._xynetworks is not None:
+            logger.debug(f"ValidationLossLogger {self.name} already initialized.")
+            return
+        if self._dman is None:
             assert isinstance(self.validation_set, NetworkSet)
             db_path = Path(config.db.sqlite.path).expanduser().resolve()
             engine = md.get_biocompdb_sqlite_engine(db_path)
             with md.Session(bind=engine) as session:
                 self.validation_set.run_selectors(session)
-                dman = build_data_manager(
+                self._dman = build_data_manager(
                     lib=load_lib(),
                     db_session=session,
                     path_prefix=Path(config.paths.root).expanduser().resolve(),
                     data_conf=self.data_conf,
                     dataset=self.validation_set,
+                    jax_sampling=False,
                 )
-                self._xynetworks = dman.get_per_network_xy_samples(self.n_evals)
-                xs, ys, networks = self._xynetworks
-                # print network names for debugging:
-                logger.debug(
-                    f"ValidationLossLogger {self.name} has {len(networks)} networks: {networks}"
-                )
+            self._xynetworks = self._dman.get_per_network_xy_samples(self.n_evals)
 
+        assert self._xynetworks is not None, "No xynetworks available for validation."
         xs, ys, networks = self._xynetworks
+        xshapes = [x.shape for x in xs]
+        yshapes = [y.shape for y in ys]
+        logger.info(
+            f"ValidationLossLogger {self.name} initialized with {len(networks)} networks, "
+            f"input shapes: {xshapes}, output shapes: {yshapes}"
+        )
+
         assert isinstance(self.compute_conf, ComputeConfig) and isinstance(
             self.data_conf, DataConfig
         )
+
         model = BiocompModel(compute_config=self.compute_conf, rescaler=self.data_conf.rescaler)
         network_model = NetworkModel(model=model, network=networks)
 
@@ -190,8 +200,12 @@ class ValidationLossLogger(Logger):
         assert self._predictor is not None
         all_metrics = []
         t0 = time()
+        
         for i in range(self.n_replicates):
+            replicate_start = time()
             stats = self._predictor.get_network_stats(with_shared_params=tree_get(params, i))
+            replicate_time = time() - replicate_start
+            
             valid_stats = [s for s in stats if s.get('rmse') is not None]
             if not valid_stats:
                 logger.warning(f"No valid statistics computed for replicate {i}")
@@ -209,8 +223,11 @@ class ValidationLossLogger(Logger):
                 if grid_rmses:
                     metrics['avg_grid_rmse'] = float(np.mean(grid_rmses))
             all_metrics.append(metrics)
+            
+            logger.info(f"ValidationLossLogger {self.name}: Replicate {i} validation completed in {replicate_time:.2f} seconds")
 
         eval_time = time() - t0
+        logger.info(f"ValidationLossLogger {self.name}: Total validation time: {eval_time:.2f} seconds for {self.n_replicates} replicates")
         return (all_metrics, eval_time) if all_metrics else (None, eval_time)
 
     def _print_validation_stats(self, step: int, metrics_list: List[Dict], eval_time: float):
@@ -245,6 +262,9 @@ class ValidationLossLogger(Logger):
     def _plot_history(self, step: int):
         if not self._history or self._plot_save_dir is None:
             return
+        
+        from time import time
+        plot_start_time = time()
 
         steps = [h['step'] for h in self._history]
         all_net_names = sorted(
@@ -284,16 +304,19 @@ class ValidationLossLogger(Logger):
                 continue
             self._plot_single_metric(ax, loss_data[i + 1], steps, all_net_names[i])
 
-        # plt.tight_layout(rect=[0, 0, 1, 0.96])
-        fig.savefig(self._plot_save_dir / f"history_step_{step:05d}.png")
+        fig.savefig(self._plot_save_dir / f"val_{self.name}_{step:05d}.png")
         plt.close(fig)
+        
+        plot_time = time() - plot_start_time
+        logger.info(f"ValidationLossLogger {self.name}: Plot generation completed in {plot_time:.2f} seconds")
 
     def _plot_single_metric(
         self, ax, data, steps, title, is_main=False, training_steps=None, training_history=None
     ):
         filled_data = ffill(data)
         cmap = plt.cm.get_cmap('tab10')
-
+        plt.minorticks_off()
+        ax.minorticks_off()
         # Plot validation loss lines (colored)
         for i in range(self.n_replicates):
             ax.plot(
@@ -331,12 +354,12 @@ class ValidationLossLogger(Logger):
                     alpha=0.7,
                     label='Training Loss',
                 )
-
         ax.set_title(title, fontsize=11 if is_main else 7)
         ax.set_yscale('log')
         ax.set_xlabel('Step')
         ax.set_ylabel('RMSE (log scale)')
-        ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
+
+        # ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
         if is_main and (self.n_replicates > 1 or training_history is not None):
             ax.legend(fontsize='small')
 
@@ -344,6 +367,13 @@ class ValidationLossLogger(Logger):
         self.initialize(training_program)
 
         def log_validation_loss(step, training_config, step_history=None, **kwargs):
+            total_start_time = time.time()
+            
+            init_start = time.time()
+            self._initialize_predictor()
+            init_time = time.time() - init_start
+            logger.info(f"ValidationLossLogger {self.name}: Initialization took {init_time:.2f} seconds")
+            
             if step_history is None or 'latest_params' not in step_history:
                 if step == 0:
                     logger.debug("No latest params available for validation at step 0 (expected)")
@@ -351,10 +381,14 @@ class ValidationLossLogger(Logger):
                     logger.warning(f"No latest params available for validation at step {step}")
                 return
 
-            logger.info(f"Computing {self.name} loss at step {step}...")
+            logger.info(f"ValidationLossLogger {self.name}: Computing validation loss at step {step}...")
+            
+            eval_start = time.time()
             metrics_list, eval_time = self._compute_validation_metrics(
                 step_history['latest_params']
             )
+            eval_total_time = time.time() - eval_start
+            logger.info(f"ValidationLossLogger {self.name}: Evaluation phase took {eval_total_time:.2f} seconds")
 
             if metrics_list is None:
                 logger.warning(f"Could not compute {self.name} metrics")
@@ -365,9 +399,20 @@ class ValidationLossLogger(Logger):
             self._history.append(
                 {'step': step, 'metrics': metrics_list, 'training_loss': training_loss}
             )
+            
+            print_start = time.time()
             self._print_validation_stats(step, metrics_list, eval_time)
+            print_time = time.time() - print_start
+            logger.info(f"ValidationLossLogger {self.name}: Stats printing took {print_time:.2f} seconds")
+            
             if self.save_plots:
+                plot_start = time.time()
                 self._plot_history(step)
+                plot_time = time.time() - plot_start
+                logger.info(f"ValidationLossLogger {self.name}: Plot generation took {plot_time:.2f} seconds")
+            
+            total_time = time.time() - total_start_time
+            logger.info(f"ValidationLossLogger {self.name}: Total callback time {total_time:.2f} seconds")
 
         return [(self.periods, log_validation_loss)]
 

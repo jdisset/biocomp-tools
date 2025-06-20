@@ -20,6 +20,7 @@ class EnhancedConsoleLogger(Logger):
 
     plot_height: int = 22
     plot_width: int = 100
+    async_ok: bool = False  # fast console logger doesn't need async
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -109,6 +110,8 @@ class EnhancedConsoleLogger(Logger):
 
 class ConsoleLogger(Logger):
     """Logs the training loss to console"""
+
+    async_ok: bool = False  # fast console logger doesn't need async
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
