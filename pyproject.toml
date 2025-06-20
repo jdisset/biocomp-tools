@@ -23,6 +23,7 @@ dependencies = [
 	"rich",
 	"plotext",
 	"pynvml",
+	"psutil",
 ]
 
 

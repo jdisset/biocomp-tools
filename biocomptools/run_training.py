@@ -126,6 +126,9 @@ class TrainingProgram(BaseModel):
     run_name_suffix: str = ''
 
     use_jax_sampling: bool = True
+    async_logging: bool = True
+    use_ray: bool = False
+    n_workers: int = 8
 
     # Private
     _lib: Optional[PartsLibrary] = None
@@ -279,19 +282,64 @@ class TrainingProgram(BaseModel):
         log_file = self._training_dir / 'output.log.txt'
         log_file.parent.mkdir(exist_ok=True, parents=True)
 
-        # Collect logger callbacks
-        logger_callbacks = []
+        # Collect and separate sync/async logger callbacks
+        all_callbacks = []
         for logger_obj in self.loggers:
             callbacks = logger_obj.get_callbacks(self)
-            logger_callbacks.extend(callbacks)
+            # add logger reference to each callback for async_ok check
+            all_callbacks.extend([(period, callback, logger_obj) for period, callback in callbacks])
+
+        # Separate sync and async callbacks
+        sync_callbacks = [(period, callback) for period, callback, logger_obj in all_callbacks 
+                         if not logger_obj.async_ok]
+        async_callbacks = [(period, callback) for period, callback, logger_obj in all_callbacks 
+                          if logger_obj.async_ok]
+        
+        logger_callbacks = sync_callbacks.copy()  # start with sync callbacks
+
+        # Handle async logging if enabled and we have async-capable loggers
+        async_handler = None
+        if self.async_logging and async_callbacks:
+            from biocomptools.async_logger_handler import AsyncLoggerHandler
+
+            # find minimum period for async callbacks only
+            async_periods = [period for period, _ in async_callbacks if period and period > 0]
+            min_period = min(async_periods) if async_periods else 1
+
+            # create async handler for async callbacks only
+            async_handler = AsyncLoggerHandler(
+                async_callbacks, min_period, use_ray=self.use_ray, n_workers=self.n_workers
+            )
+
+            # add single async callback to logger_callbacks
+            logger_callbacks.append((min_period, async_handler.create_callback()))
+
+            mode = "Ray" if self.use_ray else "Thread"
+            logger.info(
+                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async ({mode}, min_period={min_period})"
+            )
+        elif self.async_logging:
+            logger.info("Async logging enabled but no async-capable loggers found")
+        else:
+            logger_callbacks = [(period, callback) for period, callback, _ in all_callbacks]
 
         # Start training
-        all_params, all_losses, step_history = await start(
+        all_params, all_losses, step_history = start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
             loggers=logger_callbacks,
+            async_handler=async_handler,
         )
+
+        if self.async_logging and async_handler:
+            async_handler.process_end_loggers(
+                step=len(all_losses) if all_losses else 0,
+                training_config=self.training_conf,
+                step_history=step_history,
+                stack=None,
+            )
+            async_handler.shutdown()
 
         self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.save_outputs(all_params, all_losses, self._training_dir)
