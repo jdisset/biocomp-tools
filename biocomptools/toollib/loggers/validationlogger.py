@@ -23,6 +23,7 @@ from collections import defaultdict
 from biocomptools.trainutils import ffill
 from biocomptools.toollib.loggers.paramgradlogger import get_plot_rows_and_columns
 import time
+import jax.numpy as jnp
 
 logger = get_logger(__name__)
 
@@ -79,14 +80,14 @@ class ValidationLossLogger(Logger):
 
     def initialize(self, training_program):
         """Initialize from training program or standalone configuration."""
-
+    
         if self.name is None:
             if training_program:
                 idx = self.find_myself(training_program)
                 self.name = f"loss_{idx}"
             else:
                 self.name = "loss"
-
+    
         if training_program:
             self._training_program = training_program
             self.compute_conf = training_program.compute_conf
@@ -97,6 +98,14 @@ class ValidationLossLogger(Logger):
                 self._plot_save_dir.mkdir(exist_ok=True, parents=True)
         elif self.compute_conf is None or self.data_conf is None:
             raise ValueError("In standalone mode, compute_conf and data_conf must be provided.")
+        
+        # Initialize predictor during async initialization phase
+        logger.info(f"ValidationLossLogger {self.name}: Starting async initialization of predictor and NetworkModel")
+        start_time = time.time()
+        self._initialize_predictor()
+        init_time = time.time() - start_time
+        logger.info(f"ValidationLossLogger {self.name}: Completed async initialization in {init_time:.2f} seconds")
+
 
     def _initialize_predictor(self, force_reinit: bool = False):
         if self._predictor is not None and not force_reinit and self._xynetworks is not None:
@@ -134,6 +143,18 @@ class ValidationLossLogger(Logger):
         model = BiocompModel(compute_config=self.compute_conf, rescaler=self.data_conf.rescaler)
         network_model = NetworkModel(model=model, network=networks)
 
+        # prepare per_prediction_info with networkdatapair information
+        per_prediction_info = []
+        for i, network in enumerate(networks):
+            network_info = {
+                'network_name': network.name,
+                'networkdatapair': {
+                    'network_name': network.name,
+                    'datafile_path': network.metadata.get('data_file', 'unknown'),
+                },
+            }
+            per_prediction_info.append(network_info)
+
         self._predictor = NetworkPrediction(
             predict_at=xs,
             network_model=network_model,
@@ -144,6 +165,7 @@ class ValidationLossLogger(Logger):
             already_latent=True,
             n_stats_workers=self.predictor_n_stats_workers,
             enable_gridstats=self.enable_gridstats,
+            per_prediction_info=per_prediction_info,
         )
 
         self.metadata = {
@@ -160,11 +182,20 @@ class ValidationLossLogger(Logger):
         if self.enable_gridstats and 'avg_grid_rmse' in metrics_dict:
             result['grid_RMSE'] = float(metrics_dict['avg_grid_rmse'])
 
-        per_network_data = metrics_dict.get('per_network', {})
+        per_network_data = metrics_dict.get('per_network', [])
         if per_network_data:
-            result['per_network'] = {
-                name: {'RMSE': stats['rmse']} for name, stats in per_network_data.items()
-            }
+            # convert to list format with networkdatapair info
+            result['per_network'] = []
+            for network_data in per_network_data:
+                network_metric = {
+                    'network_name': network_data['network_name'],
+                    'RMSE': network_data['rmse'],
+                }
+                if 'networkdatapair' in network_data:
+                    network_metric['networkdatapair'] = network_data['networkdatapair']
+                if self.enable_gridstats and 'grid_rmse' in network_data:
+                    network_metric['grid_RMSE'] = network_data['grid_rmse']
+                result['per_network'].append(network_metric)
         return result
 
     def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -200,34 +231,66 @@ class ValidationLossLogger(Logger):
         assert self._predictor is not None
         all_metrics = []
         t0 = time()
-        
+
         for i in range(self.n_replicates):
             replicate_start = time()
             stats = self._predictor.get_network_stats(with_shared_params=tree_get(params, i))
             replicate_time = time() - replicate_start
-            
+
             valid_stats = [s for s in stats if s.get('rmse') is not None]
             if not valid_stats:
                 logger.warning(f"No valid statistics computed for replicate {i}")
                 continue
 
+            # overall metrics
             metrics = {
                 'avg_rmse': float(np.mean([s['rmse'] for s in valid_stats])),
-                'per_network': {s['network_name']: {'rmse': s['rmse']} for s in valid_stats},
                 'n_evaluated': len(valid_stats),
             }
+
+            # per-network list with networkdatapair info
+            per_network_list = []
+            for s in valid_stats:
+                network_metric = {
+                    'rmse': s['rmse'],
+                    'network_name': s['network_name'],
+                }
+
+                # add networkdatapair info from extra_prediction_info
+                if 'extra_prediction_info' in s and 'networkdatapair' in s['extra_prediction_info']:
+                    network_metric['networkdatapair'] = s['extra_prediction_info'][
+                        'networkdatapair'
+                    ]
+                    # assertion to verify network_name consistency
+                    assert network_metric['networkdatapair']['network_name'] == s['network_name'], (
+                        f"Network name mismatch: {network_metric['networkdatapair']['network_name']} != {s['network_name']}"
+                    )
+
+                per_network_list.append(network_metric)
+
+            metrics['per_network'] = per_network_list
+
             if self.enable_gridstats:
                 grid_rmses = [
                     s.get('grid_rmse') for s in valid_stats if s.get('grid_rmse') is not None
                 ]
                 if grid_rmses:
                     metrics['avg_grid_rmse'] = float(np.mean(grid_rmses))
+                    # also add grid_rmse to per_network_list
+                    for j, s in enumerate(valid_stats):
+                        if s.get('grid_rmse') is not None and j < len(per_network_list):
+                            per_network_list[j]['grid_rmse'] = s['grid_rmse']
+
             all_metrics.append(metrics)
-            
-            logger.info(f"ValidationLossLogger {self.name}: Replicate {i} validation completed in {replicate_time:.2f} seconds")
+
+            logger.info(
+                f"ValidationLossLogger {self.name}: Replicate {i} validation completed in {replicate_time:.2f} seconds"
+            )
 
         eval_time = time() - t0
-        logger.info(f"ValidationLossLogger {self.name}: Total validation time: {eval_time:.2f} seconds for {self.n_replicates} replicates")
+        logger.info(
+            f"ValidationLossLogger {self.name}: Total validation time: {eval_time:.2f} seconds for {self.n_replicates} replicates"
+        )
         return (all_metrics, eval_time) if all_metrics else (None, eval_time)
 
     def _print_validation_stats(self, step: int, metrics_list: List[Dict], eval_time: float):
@@ -262,8 +325,9 @@ class ValidationLossLogger(Logger):
     def _plot_history(self, step: int):
         if not self._history or self._plot_save_dir is None:
             return
-        
+
         from time import time
+
         plot_start_time = time()
 
         steps = [h['step'] for h in self._history]
@@ -306,9 +370,11 @@ class ValidationLossLogger(Logger):
 
         fig.savefig(self._plot_save_dir / f"val_{self.name}_{step:05d}.png")
         plt.close(fig)
-        
+
         plot_time = time() - plot_start_time
-        logger.info(f"ValidationLossLogger {self.name}: Plot generation completed in {plot_time:.2f} seconds")
+        logger.info(
+            f"ValidationLossLogger {self.name}: Plot generation completed in {plot_time:.2f} seconds"
+        )
 
     def _plot_single_metric(
         self, ax, data, steps, title, is_main=False, training_steps=None, training_history=None
@@ -368,12 +434,18 @@ class ValidationLossLogger(Logger):
 
         def log_validation_loss(step, training_config, step_history=None, **kwargs):
             total_start_time = time.time()
-            
-            init_start = time.time()
-            self._initialize_predictor()
-            init_time = time.time() - init_start
-            logger.info(f"ValidationLossLogger {self.name}: Initialization took {init_time:.2f} seconds")
-            
+
+            # Check if predictor was already initialized during async phase
+            if self._predictor is None:
+                init_start = time.time()
+                self._initialize_predictor()
+                init_time = time.time() - init_start
+                logger.info(
+                    f"ValidationLossLogger {self.name}: Late initialization took {init_time:.2f} seconds"
+                )
+            else:
+                logger.debug(f"ValidationLossLogger {self.name}: Using predictor initialized during async phase")
+
             if step_history is None or 'latest_params' not in step_history:
                 if step == 0:
                     logger.debug("No latest params available for validation at step 0 (expected)")
@@ -381,14 +453,18 @@ class ValidationLossLogger(Logger):
                     logger.warning(f"No latest params available for validation at step {step}")
                 return
 
-            logger.info(f"ValidationLossLogger {self.name}: Computing validation loss at step {step}...")
-            
+            logger.info(
+                f"ValidationLossLogger {self.name}: Computing validation loss at step {step}..."
+            )
+
             eval_start = time.time()
             metrics_list, eval_time = self._compute_validation_metrics(
                 step_history['latest_params']
             )
             eval_total_time = time.time() - eval_start
-            logger.info(f"ValidationLossLogger {self.name}: Evaluation phase took {eval_total_time:.2f} seconds")
+            logger.info(
+                f"ValidationLossLogger {self.name}: Evaluation phase took {eval_total_time:.2f} seconds"
+            )
 
             if metrics_list is None:
                 logger.warning(f"Could not compute {self.name} metrics")
@@ -399,20 +475,26 @@ class ValidationLossLogger(Logger):
             self._history.append(
                 {'step': step, 'metrics': metrics_list, 'training_loss': training_loss}
             )
-            
+
             print_start = time.time()
             self._print_validation_stats(step, metrics_list, eval_time)
             print_time = time.time() - print_start
-            logger.info(f"ValidationLossLogger {self.name}: Stats printing took {print_time:.2f} seconds")
-            
+            logger.info(
+                f"ValidationLossLogger {self.name}: Stats printing took {print_time:.2f} seconds"
+            )
+
             if self.save_plots:
                 plot_start = time.time()
                 self._plot_history(step)
                 plot_time = time.time() - plot_start
-                logger.info(f"ValidationLossLogger {self.name}: Plot generation took {plot_time:.2f} seconds")
-            
+                logger.info(
+                    f"ValidationLossLogger {self.name}: Plot generation took {plot_time:.2f} seconds"
+                )
+
             total_time = time.time() - total_start_time
-            logger.info(f"ValidationLossLogger {self.name}: Total callback time {total_time:.2f} seconds")
+            logger.info(
+                f"ValidationLossLogger {self.name}: Total callback time {total_time:.2f} seconds"
+            )
 
         return [(self.periods, log_validation_loss)]
 
@@ -436,3 +518,4 @@ class ValidationLossLogger(Logger):
             logger.info(f"ValidationLossLogger: Created validation video: {video_path}")
         else:
             logger.debug("ValidationLossLogger: No video created (insufficient plots or errors)")
+
