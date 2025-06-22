@@ -3,7 +3,7 @@ import time
 import tempfile
 import os
 from pathlib import Path
-from typing import List, Tuple, Callable, Any, Dict
+from typing import List, Tuple, Callable, Any, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 from threading import Thread
@@ -84,8 +84,10 @@ class AsyncLoggerHandler:
         min_period: int,
         use_ray: bool = False,
         n_workers: int = 8,
+        logger_objects: Optional[List] = None,  # added for async init
     ):
         self.logger_callbacks = logger_callbacks
+        self.logger_objects = logger_objects or []
         self.use_ray = use_ray
         self.tmpdir = Path(tempfile.mkdtemp(prefix="biocomp_async_log_"))
         self.step_queue = queue.Queue()
@@ -96,14 +98,16 @@ class AsyncLoggerHandler:
         self.ray_initialized = False
         self.executor = None
         self.processing_thread = None
-
+        self.init_futures = []  # track async initialization
+    
         if use_ray:
             self._register_callbacks()
         self._initialize()
         atexit.register(self.cleanup)
-
+    
         mode = "Ray" if use_ray else "Thread"
         logger.info(f"AsyncLoggerHandler: {mode} mode, tmpdir: {self.tmpdir}")
+
 
     def _extract_logger_info(self, callback):
         """Extract logger name and type from callback function"""
@@ -196,7 +200,60 @@ class AsyncLoggerHandler:
         )
         self.processing_thread = Thread(target=self._process_queue, daemon=True)
         self.processing_thread.start()
-
+    
+    def initialize_loggers_async(self, training_program):
+        """Initialize async_ok loggers asynchronously"""
+        if not self.logger_objects:
+            return
+        
+        logger.info(f"Starting async initialization of {len(self.logger_objects)} loggers")
+        
+        if self.use_ray:
+            # for ray mode, we need special handling since loggers aren't picklable
+            logger.warning("Ray mode for logger initialization not yet implemented, falling back to sync")
+            for logger_obj in self.logger_objects:
+                logger_obj.initialize(training_program)
+        else:
+            # thread mode
+            def init_logger(logger_obj, prog):
+                try:
+                    start_time = time.time()
+                    logger_name = getattr(logger_obj, 'name', logger_obj.__class__.__name__)
+                    logger.info(f"AsyncLoggerHandler: Initializing {logger_name} asynchronously")
+                    logger_obj.initialize(prog)
+                    elapsed = time.time() - start_time
+                    logger.info(f"AsyncLoggerHandler: {logger_name} initialized in {elapsed:.2f} seconds")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to initialize logger {logger_obj}: {e}")
+                    logger.exception(e)
+                    return False
+            
+            for logger_obj in self.logger_objects:
+                future = self.executor.submit(init_logger, logger_obj, training_program)
+                self.init_futures.append(future)
+    
+    def wait_for_initialization(self):
+        """Wait for all async logger initializations to complete"""
+        if not self.init_futures:
+            return
+        
+        logger.info("Waiting for async logger initialization to complete...")
+        success_count = 0
+        fail_count = 0
+        
+        for future in concurrent.futures.as_completed(self.init_futures):
+            try:
+                if future.result():
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                logger.error(f"Logger initialization failed with exception: {e}")
+                fail_count += 1
+        
+        self.init_futures.clear()
+        logger.info(f"Async logger initialization complete: {success_count} succeeded, {fail_count} failed")
     def process_start_loggers(self, training_config, stack):
         logger.info("Processing start loggers...")
         self._process_loggers(0, training_config, {}, stack, lambda p, c: p == 0)

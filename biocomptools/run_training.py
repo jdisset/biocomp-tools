@@ -267,8 +267,16 @@ class TrainingProgram(BaseModel):
         logger.debug(
             f"Initializing {len(self.loggers)} loggers of types {[type(l) for l in self.loggers]}"
         )
-        for logger_obj in self.loggers:
+        
+        # separate sync and async loggers for initialization
+        sync_loggers = [l for l in self.loggers if not l.async_ok]
+        async_loggers = [l for l in self.loggers if l.async_ok]
+        
+        # initialize sync loggers immediately
+        for logger_obj in sync_loggers:
             logger_obj.initialize(self)
+        
+        # async logger initialization will be handled by AsyncLoggerHandler if enabled
 
         self._yamldump = dr.dump(self)
         self._modeldump = self.model_dump()
@@ -308,8 +316,15 @@ class TrainingProgram(BaseModel):
 
             # create async handler for async callbacks only
             async_handler = AsyncLoggerHandler(
-                async_callbacks, min_period, use_ray=self.use_ray, n_workers=self.n_workers
+                async_callbacks, min_period, use_ray=self.use_ray, n_workers=self.n_workers,
+                logger_objects=async_loggers
             )
+            
+            # initialize async loggers asynchronously
+            async_handler.initialize_loggers_async(self)
+            
+            # wait for initialization to complete before starting training
+            async_handler.wait_for_initialization()
 
             # add single async callback to logger_callbacks
             logger_callbacks.append((min_period, async_handler.create_callback()))

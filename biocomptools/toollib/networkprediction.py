@@ -85,7 +85,7 @@ def _calculate_single_network_stats(
 
     # check for empty output - this can happen if output_pos selects invalid columns
     if latent_yhat.size == 0:
-        return {
+        result = {
             'xp_name': network_info.get('xp_name'),
             'recipe_name': network_info.get('recipe_name'),
             'network_name': network_info.get('network_name', f"Network_{network_idx}"),
@@ -99,6 +99,10 @@ def _calculate_single_network_stats(
             'latent_max': np.nan,
             'error': 'Empty output array - invalid dependent_output_pos selection',
         }
+        # include extra_prediction_info if available
+        if 'extra_prediction_info' in network_info:
+            result['extra_prediction_info'] = network_info['extra_prediction_info']
+        return result
 
     network_stats = {
         'xp_name': network_info.get('xp_name'),
@@ -113,6 +117,10 @@ def _calculate_single_network_stats(
         'latent_min': float(latent_yhat.min()),
         'latent_max': float(latent_yhat.max()),
     }
+
+    # include extra_prediction_info if available
+    if 'extra_prediction_info' in network_info:
+        network_stats['extra_prediction_info'] = network_info['extra_prediction_info']
 
     # add comparison stats if ground truth available
     if gt is not None:
@@ -387,7 +395,7 @@ class NetworkPrediction(DataSource):
         with_shared_params: Optional[pr.ParameterTree] = None,
     ):
         """compute predictions for all networks"""
-        
+
         start_time = time.time()
 
         # stack inputs from all networks
@@ -438,7 +446,7 @@ class NetworkPrediction(DataSource):
             else None,
             device=self.device,
         )
-        
+
         prediction_time = time.time() - start_time
         logger.info(f"Network predictions completed in {prediction_time:.2f} seconds")
 
@@ -448,7 +456,7 @@ class NetworkPrediction(DataSource):
         )
 
         self._process_prediction_results(network_outputs, effective_max_evals)
-        
+
         stats_start_time = time.time()
         self._network_stats = self._calculate_all_network_stats()
         stats_time = time.time() - stats_start_time
@@ -611,6 +619,10 @@ class NetworkPrediction(DataSource):
                 'network_name': network_name,
                 'n_dependent_outputs': n_dependent_outputs,
             }
+
+            # add extra_prediction_info if available
+            if self.per_prediction_info is not None and i < len(self.per_prediction_info):
+                network_info['extra_prediction_info'] = self.per_prediction_info[i]
 
             gridstats_params = {
                 'hypercube_res': self.gridstats_hypercube_res,
@@ -941,6 +953,12 @@ class NetworkPrediction(DataSource):
         if self.per_prediction_info is not None:
             assert len(self.per_prediction_info) >= network_idx
             metadata['extra_prediction_info'] = self.per_prediction_info[network_idx]
+            if 'network_name' in metadata['extra_prediction_info']:
+                assert (
+                    metadata['extra_prediction_info']['network_name'] == metadata['network_name']
+                ), (
+                    f"network name mismatch: {metadata['extra_prediction_info']['network_name']} != {metadata['network_name']}"
+                )
 
         return metadata
 
