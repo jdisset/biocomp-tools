@@ -2,15 +2,10 @@
 protein_aliases: { "EBFP": "EBFP2", "L0.G_MNEONGREEN": "MNEONGREEN" }
 
 db:
-  postgre:
-    name: ${getenv('BIOCOMP_DB_NAME', 'biocomp')}
-    user: ${getenv('BIOCOMP_DB_USER', 'biocomp')}
-    port: ${getenv('BIOCOMP_DB_PORT', 5432)}
-    pass: ${getenv('BIOCOMP_DB_PASS')}
-    host: ${getenv('BIOCOMP_DB_HOST')}
-
   sqlite:
-    path: ${getenv('BIOCOMP_SQLITE_DB_PATH', '${&/paths.root}/biocompdb.sqlite')}
+    name: ${getenv('BIOCOMP_SQLITE_DB_NAME', 'biocompdb.sqlite')}
+    root: ${getenv('BIOCOMP_SQLITE_DB_ROOT', '${&/paths.root}')}
+    path: ${getenv('BIOCOMP_SQLITE_DB_PATH', '${&/paths.root}/${&.name}')}
     backup:
       dir: ${getenv('BIOCOMP_SQLITE_DB_BACKUP_DIR', '${&/paths.root}/db_backups/')}
       keep_n: ${getenv('BIOCOMP_SQLITE_DB_BACKUP_KEEP_N', 50)}
