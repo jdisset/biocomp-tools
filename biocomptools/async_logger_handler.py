@@ -3,7 +3,7 @@ import time
 import tempfile
 import os
 from pathlib import Path
-from typing import List, Tuple, Callable, Any, Dict, Optional
+from typing import List, Tuple, Callable, Any, Dict, Optional, Union
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 from threading import Thread
@@ -11,254 +11,149 @@ import queue
 import atexit
 import shutil
 
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Global registry for callback functions (avoids pickling issues)
-_CALLBACK_REGISTRY = {}
 
+class AsyncLoggerHandler(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-# Ray remote function for executing logger callbacks
-def _setup_jax_cpu():
-    os.environ.update(
-        {"JAX_PLATFORM_NAME": "cpu", "CUDA_VISIBLE_DEVICES": "", "JAX_PLATFORMS": "cpu"}
-    )
-    try:
-        import jax
+    logger_callbacks: List[Tuple[int, Callable]]
+    min_period: int
+    n_workers: int = Field(default=8, gt=0, le=32)
+    logger_objects: List[Any] = Field(default_factory=list)
+    async_store_location: Optional[Path] = None
+    base_dir: Optional[Path] = None
+    keep_history_on_disk: bool = False
+    save_all_steps: bool = False
+    replay_mode: bool = False
+    replay_base_dir: Optional[Path] = None
 
-        jax.config.update('jax_platform_name', 'cpu')
-        jax.config.update('jax_enable_x64', False)
-    except:
-        pass
+    # Private execution state
+    tmpdir: Path = Field(exclude=True, default=None)
+    cleanup_tmpdir: bool = Field(exclude=True, default=True)
+    step_queue: Any = Field(exclude=True, default=None)
+    should_stop: bool = Field(exclude=True, default=False)
+    executor: Any = Field(exclude=True, default=None)
+    processing_thread: Any = Field(exclude=True, default=None)
+    initialization_futures: List[Any] = Field(exclude=True, default_factory=list)
+    finalization_futures: List[Any] = Field(exclude=True, default_factory=list)
 
+    @field_validator('async_store_location', 'base_dir', 'replay_base_dir', mode='before')
+    @classmethod
+    def convert_paths(cls, v):
+        return Path(v) if v is not None else None
 
-def _ray_logger_worker(callback_id, step_file_path, period, step, logger_name=None, logger_type=None):
-    _setup_jax_cpu()
-    start_time = time.time()
-    try:
-        callback = _CALLBACK_REGISTRY.get(callback_id)
-        if not callback:
-            return {"success": False, "step": step, "error": f"Callback {callback_id} not found"}
+    @field_validator('replay_base_dir')
+    @classmethod
+    def validate_replay_base_dir(cls, v, info):
+        replay_mode = info.data.get('replay_mode', False)
+        v = Path(v).expanduser().resolve() if v else None
+        if replay_mode and v and not v.exists():
+            raise ValueError(f"Replay directory {v} does not exist")
+        return v
 
-        step_file = Path(step_file_path)
-        if not step_file.exists():
-            return {"success": False, "step": step, "error": f"Step file not found"}
+    @model_validator(mode='after')
+    def validate_replay_mode_consistency(self):
+        if self.replay_mode and not self.replay_base_dir:
+            raise ValueError("replay_base_dir is required when replay_mode=True")
+        return self
 
-        with open(step_file, 'rb') as f:
-            data = dill.load(f)
+    def model_post_init(self, __context):
+        self._setup_directories_and_infrastructure()
+        if not self.replay_mode:
+            self._initialize()
+            atexit.register(self.cleanup)
+        save_info = " (saving all steps)" if self.save_all_steps else ""
+        logger.info(f"AsyncLoggerHandler: Thread mode{save_info}, tmpdir: {self.tmpdir}")
 
-        callback(
-            data['step'],
-            data['training_config'],
-            step_history=data.get('step_history'),
-            stack=data.get('stack'),
-        )
-        elapsed_time = time.time() - start_time
-        return {
-            "success": True, 
-            "step": step, 
-            "period": period, 
-            "callback_id": callback_id, 
-            "elapsed_time": elapsed_time,
-            "logger_name": logger_name,
-            "logger_type": logger_type
-        }
-    except Exception as e:
-        elapsed_time = time.time() - start_time
-        return {
-            "success": False, 
-            "step": step, 
-            "error": str(e), 
-            "callback_id": callback_id, 
-            "elapsed_time": elapsed_time,
-            "logger_name": logger_name,
-            "logger_type": logger_type
-        }
+    def _setup_directories_and_infrastructure(self):
+        if self.async_store_location:
+            self.tmpdir = (
+                self.async_store_location
+                if self.async_store_location.is_absolute()
+                else (self.base_dir or Path()) / self.async_store_location
+            )
+            self.tmpdir.mkdir(parents=True, exist_ok=True)
+            self.cleanup_tmpdir = False
+        elif self.replay_mode:
+            self.tmpdir = self.replay_base_dir
+            self.cleanup_tmpdir = False
+        else:
+            self.tmpdir = Path(tempfile.mkdtemp(prefix="biocomp_async_log_"))
+            self.cleanup_tmpdir = not self.keep_history_on_disk
 
+        import queue
 
-class AsyncLoggerHandler:
-    def __init__(
-        self,
-        logger_callbacks: List[Tuple[int, Callable]],
-        min_period: int,
-        use_ray: bool = False,
-        n_workers: int = 8,
-        logger_objects: Optional[List] = None,  # added for async init
-    ):
-        self.logger_callbacks = logger_callbacks
-        self.logger_objects = logger_objects or []
-        self.use_ray = use_ray
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="biocomp_async_log_"))
         self.step_queue = queue.Queue()
         self.should_stop = False
-        self.callback_ids = {}
-        self.n_workers = n_workers
-        self.ray_remote_worker = None
-        self.ray_initialized = False
         self.executor = None
         self.processing_thread = None
-        self.init_futures = []  # track async initialization
-    
-        if use_ray:
-            self._register_callbacks()
-        self._initialize()
-        atexit.register(self.cleanup)
-    
-        mode = "Ray" if use_ray else "Thread"
-        logger.info(f"AsyncLoggerHandler: {mode} mode, tmpdir: {self.tmpdir}")
+        self.initialization_futures = []
+        self.finalization_futures = []
 
-
-    def _extract_logger_info(self, callback):
-        """Extract logger name and type from callback function"""
-        logger_info = {'name': 'unknown', 'type': 'unknown'}
-        
-        # Try to get information from closure variables
-        if hasattr(callback, '__closure__') and callback.__closure__:
-            for cell in callback.__closure__:
-                if hasattr(cell.cell_contents, '__class__'):
-                    obj = cell.cell_contents
-                    class_name = obj.__class__.__name__
-                    
-                    # Check if it's a logger instance
-                    if hasattr(obj, 'name') and hasattr(obj, '__class__'):
-                        logger_info['type'] = class_name
-                        logger_info['name'] = getattr(obj, 'name', class_name)
-                        break
-                    
-        # Fallback to function name analysis
-        if logger_info['name'] == 'unknown' and hasattr(callback, '__name__'):
-            func_name = callback.__name__
-            if 'validation' in func_name.lower():
-                logger_info['type'] = 'ValidationLogger'
-            elif 'checkpoint' in func_name.lower():
-                logger_info['type'] = 'CheckpointLogger'
-            elif 'plot' in func_name.lower():
-                logger_info['type'] = 'PlotLogger'
-            logger_info['name'] = func_name
-            
-        return logger_info
-
-    def _register_callbacks(self):
-        for i, (period, callback) in enumerate(self.logger_callbacks):
-            callback_id = f"async_{id(self)}_{i}_{id(callback)}"
-            _CALLBACK_REGISTRY[callback_id] = callback
-            
-            # Try to extract logger information
-            logger_info = self._extract_logger_info(callback)
-            callback_name = logger_info.get('name', f'callback_{i}')
-            logger_type = logger_info.get('type', 'unknown')
-            
-            self.callback_ids[(period, callback)] = {
-                'id': callback_id,
-                'name': callback_name,
-                'type': logger_type,
-                'period': period
-            }
-    
-    def _get_callback_info(self, period, callback):
-        """Get callback info, creating it if needed for thread mode"""
-        if (period, callback) not in self.callback_ids:
-            # For thread mode, create callback info on demand
-            logger_info = self._extract_logger_info(callback)
-            callback_name = logger_info.get('name', f'callback_{hash(callback)}')
-            logger_type = logger_info.get('type', 'unknown')
-            
-            self.callback_ids[(period, callback)] = {
-                'id': f"thread_{id(self)}_{id(callback)}",
-                'name': callback_name,
-                'type': logger_type,
-                'period': period
-            }
-        
-        return self.callback_ids[(period, callback)]
-
-    def _initialize(self):
-        if self.use_ray:
-            self._init_ray()
-        else:
-            self._init_threads()
-
-    def _init_ray(self):
-        try:
-            import ray
-
-            if not ray.is_initialized():
-                ray.init(ignore_reinit_error=True, log_to_driver=False)
-                self.ray_initialized = True
-            self.ray_remote_worker = ray.remote(_ray_logger_worker)
-            self.processing_thread = Thread(target=self._process_queue, daemon=True)
-            self.processing_thread.start()
-        except ImportError:
-            logger.error("Ray not available, falling back to threads")
-            self.use_ray = False
-            self._init_threads()
-
-    def _init_threads(self):
-        self.executor = ThreadPoolExecutor(
-            max_workers=self.n_workers, thread_name_prefix="async_logger"
+    def _save_step_data(self, step: int, data: dict, event_type: str = "regular") -> Path:
+        step_file = self.tmpdir / (
+            f"step_{step:06d}.pkl"
+            if event_type == "regular"
+            else f"step_{step:06d}_{event_type}_{time.time()}.pkl"
         )
-        self.processing_thread = Thread(target=self._process_queue, daemon=True)
-        self.processing_thread.start()
-    
-    def initialize_loggers_async(self, training_program):
-        """Initialize async_ok loggers asynchronously"""
-        if not self.logger_objects:
-            return
-        
-        logger.info(f"Starting async initialization of {len(self.logger_objects)} loggers")
-        
-        if self.use_ray:
-            # for ray mode, we need special handling since loggers aren't picklable
-            logger.warning("Ray mode for logger initialization not yet implemented, falling back to sync")
-            for logger_obj in self.logger_objects:
-                logger_obj.initialize(training_program)
-        else:
-            # thread mode
-            def init_logger(logger_obj, prog):
-                try:
-                    start_time = time.time()
-                    logger_name = getattr(logger_obj, 'name', logger_obj.__class__.__name__)
-                    logger.info(f"AsyncLoggerHandler: Initializing {logger_name} asynchronously")
-                    logger_obj.initialize(prog)
-                    elapsed = time.time() - start_time
-                    logger.info(f"AsyncLoggerHandler: {logger_name} initialized in {elapsed:.2f} seconds")
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to initialize logger {logger_obj}: {e}")
-                    logger.exception(e)
-                    return False
-            
-            for logger_obj in self.logger_objects:
-                future = self.executor.submit(init_logger, logger_obj, training_program)
-                self.init_futures.append(future)
-    
-    def wait_for_initialization(self):
-        """Wait for all async logger initializations to complete"""
-        if not self.init_futures:
-            return
-        
-        logger.info("Waiting for async logger initialization to complete...")
-        success_count = 0
-        fail_count = 0
-        
-        for future in concurrent.futures.as_completed(self.init_futures):
-            try:
-                if future.result():
-                    success_count += 1
-                else:
-                    fail_count += 1
-            except Exception as e:
-                logger.error(f"Logger initialization failed with exception: {e}")
-                fail_count += 1
-        
-        self.init_futures.clear()
-        logger.info(f"Async logger initialization complete: {success_count} succeeded, {fail_count} failed")
-    def process_start_loggers(self, training_config, stack):
-        logger.info("Processing start loggers...")
-        self._process_loggers(0, training_config, {}, stack, lambda p, c: p == 0)
+        with open(step_file, 'wb') as f:
+            dill.dump(data, f)
+        return step_file
 
-    def _process_loggers(self, step, training_config, step_history, stack, filter_fn):
+    def _load_step_data(self, step_file: Path) -> dict:
+        with open(step_file, 'rb') as f:
+            return dill.load(f)
+
+    def _cleanup_step_file(self, step_file: Path):
+        if not self.keep_history_on_disk:
+            step_file.unlink(missing_ok=True)
+
+    def _execute_callbacks(self, step_file: Path, step: int, filter_func: Callable):
+        data = self._load_step_data(step_file)
+        callbacks_to_run = [(p, c) for p, c in self.logger_callbacks if filter_func(p, c, step)]
+
+        if not callbacks_to_run:
+            return
+
+        futures = [self.executor.submit(self._safe_call, c, data) for _, c in callbacks_to_run]
+        [f.result(timeout=300) for f in futures]
+
+    def _safe_call(self, callback, data):
+        start_time = time.time()
+        try:
+            callback(
+                data['step'],
+                data['training_config'],
+                step_history=data.get('step_history'),
+                stack=data.get('stack'),
+            )
+            logger.info(
+                f"Logger completed in {time.time() - start_time:.2f}s (step={data['step']})"
+            )
+        except Exception as e:
+            logger.error(f"Logger failed after {time.time() - start_time:.2f}s: {e}")
+
+    def _should_run_start_loggers(
+        self, period: Optional[int], callback: Callable, step: int
+    ) -> bool:
+        return period == 0 and step == 0
+
+    def _should_run_regular_loggers(
+        self, period: Optional[int], callback: Callable, step: int
+    ) -> bool:
+        return period is not None and period > 0 and step > 0 and step % period == 0
+
+    def _should_run_end_loggers(self, period: Optional[int], callback: Callable, step: int) -> bool:
+        return period is None or period == -1
+
+    def _process_step_unified(
+        self, step: int, training_config, step_history, stack, event_type: str = "regular"
+    ):
         data = {
             'step': step,
             'training_config': training_config,
@@ -266,49 +161,25 @@ class AsyncLoggerHandler:
             'stack': stack,
             'timestamp': time.time(),
         }
+        step_file = self._save_step_data(step, data, event_type)
 
-        step_file = self.tmpdir / f"temp_{step}_{time.time()}.pkl"
-        with open(step_file, 'wb') as f:
-            dill.dump(data, f)
+        filter_func = {
+            'start': self._should_run_start_loggers,
+            'end': self._should_run_end_loggers,
+        }.get(event_type, self._should_run_regular_loggers)
 
-        futures = []
-        for period, callback in self.logger_callbacks:
-            if filter_fn(period, callback):
-                if self.use_ray:
-                    callback_info = self._get_callback_info(period, callback)
-                    future = self.ray_remote_worker.remote(
-                        callback_info['id'], str(step_file), period or -1, step,
-                        callback_info['name'], callback_info['type']
-                    )
-                else:
-                    future = self.executor.submit(self._safe_call, callback, data, self._get_callback_info(period, callback))
-                futures.append(future)
+        try:
+            self._execute_callbacks(step_file, step, filter_func)
+        finally:
+            self._cleanup_step_file(step_file)
 
-        if futures:
-            if self.use_ray:
-                import ray
+    def process_start_loggers(self, training_config, stack):
+        logger.info("Processing start loggers...")
+        self._process_step_unified(0, training_config, {}, stack, "start")
 
-                remaining = set(futures)
-                while remaining:
-                    done, remaining = ray.wait(list(remaining), num_returns=1, timeout=None)
-                    for obj_ref in done:
-                        result = ray.get(obj_ref)
-                        if not result.get("success", True):
-                            logger.error(f"Logger failed: {result.get('error')}")
-                        else:
-                            elapsed = result.get('elapsed_time', 0)
-                            logger_name = result.get('logger_name', 'unknown')
-                            logger_type = result.get('logger_type', 'unknown')
-                            logger.info(f"AsyncLoggerHandler: {logger_type} '{logger_name}' completed in {elapsed:.2f} seconds (step={result.get('step')})")
-            else:
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        logger.error(f"Logger failed: {e}")
-                        logger.exception(e)
-
-        step_file.unlink(missing_ok=True)
+    def process_end_loggers(self, step, training_config, step_history, stack):
+        logger.info("Processing end loggers...")
+        self._process_step_unified(step, training_config, step_history, stack, "end")
 
     def create_callback(self):
         def async_callback(step, training_config, step_history=None, stack=None):
@@ -320,14 +191,10 @@ class AsyncLoggerHandler:
                     'stack': stack,
                     'timestamp': time.time(),
                 }
-                step_file = self.tmpdir / f"step_{step:06d}.pkl"
-                with open(step_file, 'wb') as f:
-                    dill.dump(data, f)
+                self._save_step_data(step, data, "regular")
                 self.step_queue.put(step)
             except Exception as e:
                 logger.error(f"Failed to save step data: {e}")
-                logger.exception(e)
-                return
 
         return async_callback
 
@@ -337,125 +204,206 @@ class AsyncLoggerHandler:
                 step = self.step_queue.get(timeout=1.0)
                 if step is None:
                     break
-                self._process_step(step)
+                step_file = self.tmpdir / f"step_{step:06d}.pkl"
+                if step_file.exists():
+                    self._execute_callbacks(step_file, step, self._should_run_regular_loggers)
+                    self._cleanup_step_file(step_file)
                 self.step_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"Queue processing error: {e}")
-                logger.exception(e)
-                return
 
-    def _process_step(self, step: int):
-        step_file = self.tmpdir / f"step_{step:06d}.pkl"
-        if not step_file.exists():
-            logger.warning(f"Step file {step_file} not found")
-            return
-
-        try:
-            with open(step_file, 'rb') as f:
-                data = dill.load(f)
-
-            futures = []
-            for period, callback in self.logger_callbacks:
-                should_call = (
-                    (period == 0 and step == 0)
-                    or (period is None or period == -1)  # skip end loggers here
-                    or (period and period > 0 and step % period == 0)
-                )
-                if should_call and not (period is None or period == -1):
-                    if self.use_ray:
-                        callback_info = self._get_callback_info(period, callback)
-                        future = self.ray_remote_worker.remote(
-                            callback_info['id'], str(step_file), period, step,
-                            callback_info['name'], callback_info['type']
-                        )
-                    else:
-                        future = self.executor.submit(self._safe_call, callback, data, self._get_callback_info(period, callback))
-                    futures.append(future)
-
-            if futures:
-                if self.use_ray:
-                    import ray
-
-                    results = ray.get(futures)
-                    for result in results:
-                        if not result.get("success", True):
-                            logger.error(f"Ray logger failed: {result.get('error')}")
-                        else:
-                            elapsed = result.get('elapsed_time', 0)
-                            logger_name = result.get('logger_name', 'unknown')
-                            logger_type = result.get('logger_type', 'unknown')
-                            logger.info(f"AsyncLoggerHandler: {logger_type} '{logger_name}' completed in {elapsed:.2f} seconds (step={step})")
-                else:
-                    for future in futures:
-                        try:
-                            future.result(timeout=300)
-                        except Exception as e:
-                            logger.error(f"Logger failed: {e}")
-
-            step_file.unlink(missing_ok=True)
-        except Exception as e:
-            logger.error(f"Step {step} processing failed: {e}")
-            logger.exception(e)
-            return
-
-    def _safe_call(self, callback, data, callback_info):
-        start_time = time.time()
-        logger_name = callback_info.get('name', 'unknown')
-        logger_type = callback_info.get('type', 'unknown')
-        try:
-            callback(
-                data['step'],
-                data['training_config'],
-                step_history=data.get('step_history'),
-                stack=data.get('stack'),
-            )
-            elapsed_time = time.time() - start_time
-            logger.info(f"AsyncLoggerHandler: {logger_type} '{logger_name}' completed in {elapsed_time:.2f} seconds (step={data['step']}, thread mode)")
-            return {"success": True, "elapsed_time": elapsed_time, "logger_name": logger_name, "logger_type": logger_type}
-        except Exception as e:
-            elapsed_time = time.time() - start_time
-            logger.error(f"AsyncLoggerHandler: {logger_type} '{logger_name}' failed after {elapsed_time:.2f} seconds: {e}")
-            logger.exception(e)
-            return {"success": False, "elapsed_time": elapsed_time, "logger_name": logger_name, "logger_type": logger_type}
-
-    def process_end_loggers(self, step, training_config, step_history, stack):
-        logger.info("Processing end loggers...")
-        self._process_loggers(
-            step, training_config, step_history, stack, lambda p, c: p is None or p == -1
+    def _initialize(self):
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.n_workers, thread_name_prefix="async_logger"
         )
+        self.processing_thread = Thread(target=self._process_queue, daemon=True)
+        self.processing_thread.start()
+
+    def initialize_loggers_async(self, training_program):
+        if not self.logger_objects:
+            return
+
+        def init_logger(logger_obj):
+            try:
+                logger_obj.initialize(training_program)
+                logger.info(f"Initialized logger {type(logger_obj).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to initialize logger {type(logger_obj).__name__}: {e}")
+
+        # Submit initialization jobs asynchronously
+        self.initialization_futures = [
+            self.executor.submit(init_logger, obj) for obj in self.logger_objects
+        ]
+        logger.info(f"Started async initialization of {len(self.initialization_futures)} loggers")
+
+    def wait_for_initialization(self):
+        if not self.initialization_futures:
+            return
+
+        logger.info("Waiting for logger initialization to complete...")
+        # Wait for all initialization futures to complete
+        for future in concurrent.futures.as_completed(self.initialization_futures):
+            try:
+                future.result()  # This will raise any exceptions that occurred
+            except Exception as e:
+                logger.error(f"Logger initialization failed: {e}")
+
+        logger.info("All logger initialization completed")
+        self.initialization_futures.clear()
+
+    def finalize_loggers_async(self):
+        if not self.logger_objects:
+            return
+
+        def finalize_logger(logger_obj):
+            try:
+                logger_obj.finalize()
+                logger.info(f"Finalized logger {type(logger_obj).__name__}")
+            except Exception as e:
+                logger.error(f"Failed to finalize logger {type(logger_obj).__name__}: {e}")
+
+        # Submit finalization jobs asynchronously
+        self.finalization_futures = [
+            self.executor.submit(finalize_logger, obj) for obj in self.logger_objects
+        ]
+        logger.info(f"Started async finalization of {len(self.finalization_futures)} loggers")
+
+    def wait_for_finalization(self):
+        if not self.finalization_futures:
+            return
+
+        logger.info("Waiting for logger finalization to complete...")
+        # Wait for all finalization futures to complete
+        for future in concurrent.futures.as_completed(self.finalization_futures):
+            try:
+                future.result()  # This will raise any exceptions that occurred
+            except Exception as e:
+                logger.error(f"Logger finalization failed: {e}")
+
+        logger.info("All logger finalization completed")
+        self.finalization_futures.clear()
 
     def shutdown(self):
-        logger.info("Shutting down AsyncLoggerHandler...")
+        # Start async finalization first
+        self.finalize_loggers_async()
+
+        # Shutdown queue processing
         self.step_queue.join()
         self.should_stop = True
         self.step_queue.put(None)
         if self.processing_thread:
             self.processing_thread.join(timeout=10)
 
-        if self.use_ray:
-            try:
-                for callback_info in self.callback_ids.values():
-                    if isinstance(callback_info, dict):
-                        _CALLBACK_REGISTRY.pop(callback_info['id'], None)
-                    else:
-                        # backward compatibility
-                        _CALLBACK_REGISTRY.pop(callback_info, None)
-                if self.ray_initialized:
-                    import ray
+        # Wait for finalization to complete before shutting down executor
+        self.wait_for_finalization()
 
-                    ray.shutdown()
-            except Exception as e:
-                logger.warning(f"Ray shutdown error: {e}")
-        elif self.executor:
+        if self.executor:
             self.executor.shutdown(wait=True)
-
         self.cleanup()
 
     def cleanup(self):
-        if self.tmpdir.exists():
+        if self.tmpdir.exists() and self.cleanup_tmpdir:
             try:
                 shutil.rmtree(self.tmpdir)
+                logger.info(f"Cleaned up async logger temp directory: {self.tmpdir}")
             except Exception as e:
                 logger.warning(f"Cleanup failed: {e}")
+        elif self.keep_history_on_disk and self.tmpdir.exists():
+            logger.info(f"Keeping step history on disk at: {self.tmpdir}")
+
+    @classmethod
+    def replay_from_disk(
+        cls,
+        logger_callbacks: List[Tuple[int, Callable]],
+        replay_base_dir: Union[str, Path],
+        n_workers: int = 8,
+        logger_objects: Optional[List] = None,
+        step_filter: Optional[Callable[[int], bool]] = None,
+    ) -> 'AsyncLoggerHandler':
+        """
+        Create an AsyncLoggerHandler in replay mode to process previously saved step history.
+
+        Args:
+            logger_callbacks: List of (period, callback) tuples for loggers to replay
+            replay_base_dir: Directory containing saved step history files
+            n_workers: Number of workers for parallel processing
+            logger_objects: Logger objects for initialization (if needed)
+            step_filter: Optional function to filter which steps to replay (lambda step: bool)
+
+        Returns:
+            AsyncLoggerHandler instance configured for replay mode
+        """
+        return cls(
+            logger_callbacks=logger_callbacks,
+            min_period=1,
+            n_workers=n_workers,
+            logger_objects=logger_objects or [],
+            replay_mode=True,
+            replay_base_dir=replay_base_dir,
+        )
+
+    def replay_steps(self, step_filter: Optional[Callable[[int], bool]] = None):
+        if not self.replay_mode:
+            raise ValueError("Handler not in replay mode")
+
+        all_files = sorted(self.tmpdir.glob("step_*.pkl"))
+        if not all_files:
+            logger.warning(f"No step history files found in {self.tmpdir}")
+            return
+
+        logger.info(f"Found {len(all_files)} step history files for replay")
+
+        # initialize loggers with simple mock
+        if self.logger_objects and all_files:
+            sample_data = self._load_step_data(all_files[0])
+            mock_program = type(
+                'MockTrainingProgram',
+                (),
+                {'training_conf': sample_data.get('training_config'), '_save_dir': self.tmpdir},
+            )()
+            for logger_obj in self.logger_objects:
+                try:
+                    logger_obj.initialize(mock_program)
+                except Exception as e:
+                    logger.error(f"Failed to initialize logger {logger_obj}: {e}")
+
+        if not self.executor:
+            self._initialize()
+
+        processed_count = 0
+        for step_file in all_files:
+            try:
+                parts = step_file.stem.split('_')
+                step = int(parts[1])
+                if step_filter and not step_filter(step):
+                    continue
+
+                # determine filter function
+                event_type = parts[2] if len(parts) > 2 else "regular"
+                filter_func = {
+                    'start': self._should_run_start_loggers,
+                    'end': self._should_run_end_loggers,
+                }.get(event_type, self._should_run_regular_loggers)
+
+                self._execute_callbacks(step_file, step, filter_func)
+                processed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to replay step from {step_file}: {e}")
+
+        logger.info(f"Replay completed: processed {processed_count} steps")
+
+        # Use async finalization for replay as well
+        self.finalize_loggers_async()
+        self.wait_for_finalization()
+
+        # Clean shutdown (without additional finalization since we just did it)
+        self.step_queue.join()
+        self.should_stop = True
+        self.step_queue.put(None)
+        if self.processing_thread:
+            self.processing_thread.join(timeout=10)
+        if self.executor:
+            self.executor.shutdown(wait=True)
+        self.cleanup()
