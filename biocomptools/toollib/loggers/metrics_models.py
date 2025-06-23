@@ -10,7 +10,7 @@ import numpy as np
 class NetworkDataPairMetrics(BaseModel):
     """Metrics for a single network-datafile pair."""
     network_name: str
-    networkdatapair: Dict[str, str]
+    networkdatapair: Dict[str, Any]
     RMSE: float
     MSE: float
     n_samples: int
@@ -27,6 +27,7 @@ class ReplicateMetrics(BaseModel):
     per_networkdatapair: List[NetworkDataPairMetrics] = Field(default_factory=list)
     avg_grid_rmse: Optional[float] = None
     avg_grid_mse: Optional[float] = None
+    sublosses: Optional[Dict[str, float]] = None
 
 
 class StepMetrics(BaseModel):

@@ -309,6 +309,21 @@ class ValidationLossLogger(Logger):
             table.add_row(*row)
         self._console.print(table)
 
+        # Debug: print per-network validation details for first replicate
+        if metrics_list and metrics_list[0].get('per_network'):
+            per_net = metrics_list[0]['per_network']
+            net_table = Table(title=f"Per-Network Validation (Replicate 0) - Step {step}")
+            net_table.add_column("Network", style="cyan")
+            net_table.add_column("RMSE", style="green", justify="right")
+
+            for net_metrics in per_net:
+                net_table.add_row(
+                    net_metrics['network_name'][:50] + "..." if len(net_metrics['network_name']) > 50 else net_metrics['network_name'],
+                    f"{net_metrics['rmse']:.6f}",
+                )
+
+            self._console.print(net_table)
+
         if len(self._history) > 1:
             prev_item = self._history[-2]
             curr_avg = np.nanmean([m['avg_rmse'] for m in metrics_list])
@@ -323,111 +338,35 @@ class ValidationLossLogger(Logger):
                     )
 
     def _plot_history(self, step: int):
+        """Plot validation history using improved plotting functionality."""
         if not self._history or self._plot_save_dir is None:
             return
-
+    
         from time import time
-
+        from biocomptools.toollib.loggers.plotting_utils import MetricsPlotter
+    
         plot_start_time = time()
-
-        steps = [h['step'] for h in self._history]
-        all_net_names = sorted(
-            {name for h in self._history for r in h['metrics'] for name in r.get('per_network', {})}
+    
+        # Use the improved MetricsPlotter for consistent styling
+        output_path = self._plot_save_dir / f"val_{self.name}_{step:05d}.png"
+        
+        # Get training_id from training program if available
+        training_id = getattr(self._training_program, 'training_id', None) if self._training_program else None
+        
+        MetricsPlotter.plot_validation_history(
+            self._history,
+            f"Validation Loss ({self.name.title()})",
+            output_path, 
+            self.name,
+            training_id=training_id
         )
-        n_nets = len(all_net_names)
-        loss_data = np.full((n_nets + 1, self.n_replicates, len(steps)), np.nan)
-
-        for s_idx, h in enumerate(self._history):
-            for r_idx, r_metrics in enumerate(h['metrics']):
-                loss_data[0, r_idx, s_idx] = r_metrics.get('avg_rmse')
-                for n_idx, n_name in enumerate(all_net_names):
-                    loss_data[n_idx + 1, r_idx, s_idx] = (
-                        r_metrics.get('per_network', {}).get(n_name, {}).get('rmse')
-                    )
-
-        n_rows, n_cols = get_plot_rows_and_columns(n_nets, ideal_ratio=1.0)
-        fig = plt.figure(figsize=(5 * n_cols, 2.5 * (n_rows + 2)), dpi=self.plot_dpi)
-        gs = fig.add_gridspec(n_rows + 2, n_cols, hspace=0.5, wspace=0.5)
-        fig.suptitle(f'{self.name.title()} Loss History - Step {step}', fontsize=14)
-
-        ax_main = fig.add_subplot(gs[0:2, 0:2])
-        self._plot_single_metric(
-            ax_main,
-            loss_data[0],
-            steps,
-            'Overall Average RMSE',
-            is_main=True,
-            training_steps=steps,
-            training_history=self._history,
-        )
-
-        axes_flat = [fig.add_subplot(gs[r + 2, c]) for r in range(n_rows) for c in range(n_cols)]
-        for i, ax in enumerate(axes_flat):
-            if i >= n_nets:
-                ax.set_visible(False)
-                continue
-            self._plot_single_metric(ax, loss_data[i + 1], steps, all_net_names[i])
-
-        fig.savefig(self._plot_save_dir / f"val_{self.name}_{step:05d}.png")
-        plt.close(fig)
-
+    
         plot_time = time() - plot_start_time
         logger.info(
             f"ValidationLossLogger {self.name}: Plot generation completed in {plot_time:.2f} seconds"
         )
 
-    def _plot_single_metric(
-        self, ax, data, steps, title, is_main=False, training_steps=None, training_history=None
-    ):
-        filled_data = ffill(data)
-        cmap = plt.cm.get_cmap('tab10')
-        plt.minorticks_off()
-        ax.minorticks_off()
-        # Plot validation loss lines (colored)
-        for i in range(self.n_replicates):
-            ax.plot(
-                steps,
-                data[i, :],
-                color=cmap(i % 10),
-                linestyle='-',
-                linewidth=1.5 if is_main else 0.5,
-                alpha=1.0,
-                label=f'Val Rep {i}' if is_main else None,
-            )
 
-        # Add training loss line for main plot (grey)
-        if is_main and training_history is not None and self.plot_training_losses:
-            training_losses = []
-            train_steps = []
-            for h in training_history:
-                if h.get('training_loss') is not None:
-                    train_steps.append(h['step'])
-                    # Average training loss across replicates
-                    loss_array = h['training_loss']
-                    if hasattr(loss_array, 'mean'):
-                        avg_loss = float(loss_array.mean())
-                    else:
-                        avg_loss = float(np.mean(loss_array))
-                    training_losses.append(avg_loss)
-
-            if training_losses:
-                ax.plot(
-                    train_steps,
-                    training_losses,
-                    color='grey',
-                    linestyle='-',
-                    linewidth=1.0,
-                    alpha=0.7,
-                    label='Training Loss',
-                )
-        ax.set_title(title, fontsize=11 if is_main else 7)
-        ax.set_yscale('log')
-        ax.set_xlabel('Step')
-        ax.set_ylabel('RMSE (log scale)')
-
-        # ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
-        if is_main and (self.n_replicates > 1 or training_history is not None):
-            ax.legend(fontsize='small')
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         self.initialize(training_program)

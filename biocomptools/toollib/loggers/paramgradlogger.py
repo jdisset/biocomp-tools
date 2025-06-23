@@ -24,6 +24,8 @@ IDEAL_RATIO = 0.65
 
 
 def get_plot_rows_and_columns(num_plots: int, ideal_ratio: float = IDEAL_RATIO):
+    if num_plots == 0:
+        return 1, 1
     n_cols = int(ceil(sqrt(num_plots / ideal_ratio)))
     n_rows = int(ceil(num_plots / n_cols))
     if n_rows == 0:
