@@ -507,6 +507,32 @@ def create_replicate_model(
 
 def get_best_model(all_params, all_losses, model_factory: Callable):
     """Finds the best replicate and uses the model_factory to create its model."""
+    import numpy as np
+    
+    # Handle case where all_losses is not a list (single loss array)
+    if not isinstance(all_losses, list):
+        all_losses = [all_losses]
+    
+    # Check dimensions match parameter tree structure
+    if all_params is not None and len(all_losses) > 0:
+        try:
+            # Get expected number of replicates from parameter structure
+            first_loss = all_losses[0]
+            if hasattr(first_loss, 'shape') and len(first_loss.shape) > 0:
+                n_replicates_from_loss = first_loss.shape[0]
+                
+                # Check if params structure matches
+                if hasattr(all_params, 'iter_leaves'):
+                    # Get a sample parameter to check replicate dimension
+                    for path, param in all_params.iter_leaves():
+                        if hasattr(param, 'shape') and len(param.shape) > 0:
+                            n_replicates_from_params = param.shape[0]
+                            if n_replicates_from_params != n_replicates_from_loss:
+                                logger.warning(f"Dimension mismatch: params have {n_replicates_from_params} replicates, losses have {n_replicates_from_loss}")
+                            break
+        except Exception as e:
+            logger.debug(f"Could not check parameter dimensions: {e}")
+    
     best_model_id, _, _ = get_best_smoothed_loss_replicate_id(all_losses)
     if best_model_id == -1:
         logger.warning("Could not determine best model.")
