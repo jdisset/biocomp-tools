@@ -137,6 +137,7 @@ class AsyncLoggerHandler(BaseModel):
             )
         except Exception as e:
             logger.error(f"Logger failed after {time.time() - start_time:.2f}s: {e}")
+            logger.exception(e)
 
     def _should_run_start_loggers(
         self, period: Optional[int], callback: Callable, step: int
@@ -195,6 +196,7 @@ class AsyncLoggerHandler(BaseModel):
                 self.step_queue.put(step)
             except Exception as e:
                 logger.error(f"Failed to save step data: {e}")
+                logger.exception(e)
 
         return async_callback
 
@@ -213,6 +215,7 @@ class AsyncLoggerHandler(BaseModel):
                 continue
             except Exception as e:
                 logger.error(f"Queue processing error: {e}")
+                logger.exception(e)
 
     def _initialize(self):
         self.executor = ThreadPoolExecutor(
@@ -231,6 +234,7 @@ class AsyncLoggerHandler(BaseModel):
                 logger.info(f"Initialized logger {type(logger_obj).__name__}")
             except Exception as e:
                 logger.error(f"Failed to initialize logger {type(logger_obj).__name__}: {e}")
+                logger.exception(e)
 
         # Submit initialization jobs asynchronously
         self.initialization_futures = [
@@ -249,6 +253,7 @@ class AsyncLoggerHandler(BaseModel):
                 future.result()  # This will raise any exceptions that occurred
             except Exception as e:
                 logger.error(f"Logger initialization failed: {e}")
+                logger.exception(e)
 
         logger.info("All logger initialization completed")
         self.initialization_futures.clear()
@@ -263,6 +268,7 @@ class AsyncLoggerHandler(BaseModel):
                 logger.info(f"Finalized logger {type(logger_obj).__name__}")
             except Exception as e:
                 logger.error(f"Failed to finalize logger {type(logger_obj).__name__}: {e}")
+                logger.exception(e)
 
         # Submit finalization jobs asynchronously
         self.finalization_futures = [
@@ -281,6 +287,7 @@ class AsyncLoggerHandler(BaseModel):
                 future.result()  # This will raise any exceptions that occurred
             except Exception as e:
                 logger.error(f"Logger finalization failed: {e}")
+                logger.exception(e)
 
         logger.info("All logger finalization completed")
         self.finalization_futures.clear()
@@ -368,6 +375,7 @@ class AsyncLoggerHandler(BaseModel):
                     logger_obj.initialize(mock_program)
                 except Exception as e:
                     logger.error(f"Failed to initialize logger {logger_obj}: {e}")
+                    logger.exception(e)
 
         if not self.executor:
             self._initialize()
@@ -391,6 +399,7 @@ class AsyncLoggerHandler(BaseModel):
                 processed_count += 1
             except Exception as e:
                 logger.error(f"Failed to replay step from {step_file}: {e}")
+                logger.exception(e)
 
         logger.info(f"Replay completed: processed {processed_count} steps")
 
