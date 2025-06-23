@@ -126,8 +126,21 @@ class TrainingProgram(BaseModel):
     run_name_suffix: str = ''
 
     use_jax_sampling: bool = True
+
+    # logging configuration
     async_logging: bool = True
-    use_ray: bool = False
+    async_store_location: Optional[Path] = Field(
+        default_factory=lambda: Path('step_history_data'),
+        description='Location to store async logger data. If None, uses a temporary directory.',
+    )
+    keep_history_on_disk: bool = Field(
+        default=True,
+        description='Whether to keep step history files on disk indefinitely for replay mode.',
+    )
+    save_all_steps: bool = Field(
+        default=True,
+        description='Whether to save step history for every training step, regardless of logger periods.',
+    )
     n_workers: int = 8
 
     # Private
@@ -137,6 +150,15 @@ class TrainingProgram(BaseModel):
     _save_dir: Path = Path('.')
     _run_name: Optional[str] = None
     _training_dman: Optional[Any] = None
+    _training_id: Optional[str] = None
+
+    @property
+    def training_id(self) -> str:
+        """Unique identifier for this training run."""
+        if self._training_id is None:
+            import uuid
+            self._training_id = str(uuid.uuid4())
+        return self._training_id
 
     @property
     def _engine(self):
@@ -204,6 +226,7 @@ class TrainingProgram(BaseModel):
         hashes = get_package_git_hashes(['dracon', 'biocomp', 'biocomptools'])
 
         self._metadata = {
+            'training_id': self.training_id,
             'start_time': starttime,
             'host': f"{os.environ.get('USER')}@{socket.gethostname()}",
             'biocomp_hash': hashes.get('biocomp', 'unknown'),
@@ -267,15 +290,15 @@ class TrainingProgram(BaseModel):
         logger.debug(
             f"Initializing {len(self.loggers)} loggers of types {[type(l) for l in self.loggers]}"
         )
-        
+
         # separate sync and async loggers for initialization
         sync_loggers = [l for l in self.loggers if not l.async_ok]
         async_loggers = [l for l in self.loggers if l.async_ok]
-        
+
         # initialize sync loggers immediately
         for logger_obj in sync_loggers:
             logger_obj.initialize(self)
-        
+
         # async logger initialization will be handled by AsyncLoggerHandler if enabled
 
         self._yamldump = dr.dump(self)
@@ -298,11 +321,17 @@ class TrainingProgram(BaseModel):
             all_callbacks.extend([(period, callback, logger_obj) for period, callback in callbacks])
 
         # Separate sync and async callbacks
-        sync_callbacks = [(period, callback) for period, callback, logger_obj in all_callbacks 
-                         if not logger_obj.async_ok]
-        async_callbacks = [(period, callback) for period, callback, logger_obj in all_callbacks 
-                          if logger_obj.async_ok]
-        
+        sync_callbacks = [
+            (period, callback)
+            for period, callback, logger_obj in all_callbacks
+            if not logger_obj.async_ok
+        ]
+        async_callbacks = [
+            (period, callback)
+            for period, callback, logger_obj in all_callbacks
+            if logger_obj.async_ok
+        ]
+
         logger_callbacks = sync_callbacks.copy()  # start with sync callbacks
 
         # Handle async logging if enabled and we have async-capable loggers
@@ -314,24 +343,34 @@ class TrainingProgram(BaseModel):
             async_periods = [period for period, _ in async_callbacks if period and period > 0]
             min_period = min(async_periods) if async_periods else 1
 
+            # If save_all_steps is enabled, force min_period to 1 to save every step
+            if self.save_all_steps:
+                min_period = 1
+
             # create async handler for async callbacks only
             async_handler = AsyncLoggerHandler(
-                async_callbacks, min_period, use_ray=self.use_ray, n_workers=self.n_workers,
-                logger_objects=async_loggers
+                logger_callbacks=async_callbacks,
+                min_period=min_period,
+                n_workers=self.n_workers,
+                logger_objects=async_loggers,
+                async_store_location=self.async_store_location,
+                base_dir=self._save_dir,
+                keep_history_on_disk=self.keep_history_on_disk,
+                save_all_steps=self.save_all_steps,
             )
-            
+
             # initialize async loggers asynchronously
             async_handler.initialize_loggers_async(self)
-            
+
             # wait for initialization to complete before starting training
             async_handler.wait_for_initialization()
 
             # add single async callback to logger_callbacks
             logger_callbacks.append((min_period, async_handler.create_callback()))
 
-            mode = "Ray" if self.use_ray else "Thread"
+            save_info = f", saving all steps" if self.save_all_steps else ""
             logger.info(
-                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async ({mode}, min_period={min_period})"
+                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool, min_period={min_period}{save_info})"
             )
         elif self.async_logging:
             logger.info("Async logging enabled but no async-capable loggers found")
@@ -422,6 +461,7 @@ class TrainingProgram(BaseModel):
             json.dump(make_json_ready(self._metadata), f, indent=2)
 
         logger.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
