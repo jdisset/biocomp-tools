@@ -237,7 +237,8 @@ class NetworkModel(BaseModel):
             self._stack.build(self.model.compute_config)
     
             # create a general batch apply function
-            batch_apply_fn = jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0, 0, None))
+            # using same signature as training code: (params, inputs, quantiles, keys)
+            batch_apply_fn = jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0))
     
             # JIT compile for both CPU and GPU devices
             cpu_device = jax.devices('cpu')[0] if jax.devices('cpu') else None
@@ -316,10 +317,11 @@ class NetworkModel(BaseModel):
             
             # create dummy inputs for precompilation with correct batch size
             dummy_x = jnp.zeros((effective_batch_size, self._stack.total_nb_of_inputs))
-            dummy_conds = jnp.zeros((effective_batch_size, self._stack.total_nb_of_inputs))  # Assume same as inputs
             dummy_z = jnp.zeros((effective_batch_size, self._params["global/number_of_quantile_variables"]))
             dummy_key = jax.random.PRNGKey(0)
             dummy_keys = jax.random.split(dummy_key, effective_batch_size)
+            
+            logger.debug(f"Precompilation: dummy_keys shape: {dummy_keys.shape}, effective_batch_size: {effective_batch_size}")
             
             # use the actual params that will be used during prediction
             dummy_params = self._params
@@ -329,7 +331,7 @@ class NetworkModel(BaseModel):
                 try:
                     start_time = time()
                     _ = self._batch_apply_cpu(
-                        dummy_params, dummy_x, dummy_conds, dummy_z, dummy_keys, None
+                        dummy_params, dummy_x, dummy_z, dummy_keys
                     ).block_until_ready()
                     cpu_compile_time = time() - start_time
                     logger.info(f"CPU batch_apply precompiled in {cpu_compile_time:.2f} seconds")
@@ -341,7 +343,7 @@ class NetworkModel(BaseModel):
                 try:
                     start_time = time()
                     _ = self._batch_apply_gpu(
-                        dummy_params, dummy_x, dummy_conds, dummy_z, dummy_keys, None
+                        dummy_params, dummy_x, dummy_z, dummy_keys
                     ).block_until_ready()
                     gpu_compile_time = time() - start_time
                     logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")
@@ -558,10 +560,8 @@ class NetworkModel(BaseModel):
             out, (_, fullout) = batch_apply(
                 params,
                 X_padded[start_idx:end_idx],
-                jnp.zeros_like(X_padded[start_idx:end_idx]),  # conds same shape as inputs
                 Z_batch,
                 keys_batch,
-                None,
             )
             # ensure computation is complete
             out.block_until_ready()
