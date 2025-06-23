@@ -92,6 +92,7 @@ def get_best_smoothed_loss_replicate_id(
     max_window: int = 64,
 ) -> Tuple[int, np.ndarray, float]:
     """Determines the best replicate based on the average loss in the final window."""
+    assert isinstance(all_losses, list), "all_losses must be a list of ndarrays"
     if not all_losses:
         return -1, np.array([]), np.inf
 

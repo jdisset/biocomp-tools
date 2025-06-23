@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 TRUNCATE_START_LEN = 10
 TRUNCATE_END_LEN = 25
 TRUNCATE_MIN_LEN = TRUNCATE_START_LEN + TRUNCATE_END_LEN + 3
-MAX_NETWORK_FOR_LEGEND = 60
+MAX_NETWORK_FOR_LEGEND = 120
 
 
 def truncate_network_name(name: str) -> str:
@@ -143,10 +143,12 @@ class MetricsPlotter:
         n_networks = len(all_networks)
 
         # Check if sublosses are available
-        has_sublosses = (metrics_history and 
-                        metrics_history[0].metrics and 
-                        metrics_history[0].metrics[0].sublosses is not None)
-        
+        has_sublosses = (
+            metrics_history
+            and metrics_history[0].metrics
+            and metrics_history[0].metrics[0].sublosses is not None
+        )
+
         # Adjust layout based on sublosses availability
         if has_sublosses and not single_timepoint:
             n_rows = 3 + n_replicates  # barplot + overall + sublosses + per-replicate panels
@@ -154,19 +156,17 @@ class MetricsPlotter:
         else:
             n_rows = 2 + n_replicates  # barplot + overall + per-replicate panels
             height_ratios = [1.2, 2] + [3] * n_replicates
-            
+
         fig_height = min(40, 15 + 3 * (n_replicates + (1 if has_sublosses else 0) + 1))
         fig = plt.figure(figsize=(30, fig_height))
-        gs = fig.add_gridspec(
-            n_rows, 2, height_ratios=height_ratios, hspace=0.3, wspace=0.3
-        )
+        gs = fig.add_gridspec(n_rows, 2, height_ratios=height_ratios, hspace=0.3, wspace=0.3)
         ax_bar = fig.add_subplot(gs[0, :])
         _plot_rmse_bars(ax_bar, metrics_history[-1], n_replicates, all_networks, vmin, vmax)
 
         if not single_timepoint:
             ax_overall = fig.add_subplot(gs[1, :])
             _plot_overall_rmse_over_time(ax_overall, metrics_history, n_replicates, vmin, vmax)
-            
+
             # Add sublosses plot if available
             if has_sublosses:
                 ax_sublosses = fig.add_subplot(gs[2, :])
@@ -174,7 +174,7 @@ class MetricsPlotter:
                 per_rep_start_idx = 3
             else:
                 per_rep_start_idx = 2
-            
+
             for rep_idx in range(n_replicates):
                 row_idx = per_rep_start_idx + rep_idx
                 ax_rep = fig.add_subplot(gs[row_idx, :])
@@ -352,7 +352,7 @@ def _plot_networks_rmse_single_replicate(
             legend_labels.append(truncated_name)
 
         if len(legend_handles) <= MAX_NETWORK_FOR_LEGEND:
-            ncol = 2 if len(legend_handles) > 13 else 1
+            ncol = 3 if len(legend_handles) > 40 else 2 if len(legend_handles) > 20 else 1
             ax.legend(
                 legend_handles,
                 legend_labels,
@@ -362,8 +362,8 @@ def _plot_networks_rmse_single_replicate(
                 ncol=ncol,
             )
         else:
-            top_handles = legend_handles[:MAX_NETWORK_FOR_LEGEND]
-            top_labels = legend_labels[:MAX_NETWORK_FOR_LEGEND]
+            top_handles = legend_handles[-MAX_NETWORK_FOR_LEGEND:]
+            top_labels = legend_labels[-MAX_NETWORK_FOR_LEGEND:]
             ax.legend(
                 top_handles,
                 top_labels,
@@ -555,56 +555,69 @@ def _plot_sublosses_over_time(ax, metrics_history: List[StepMetrics], n_replicat
     """Plot average sublosses over time with Set3 colormap and different markers per replicate."""
     import matplotlib.pyplot as plt
     import numpy as np
-    
+
     if not metrics_history or not metrics_history[0].metrics[0].sublosses:
         return
-    
+
     steps = [metric.step for metric in metrics_history]
-    
+
     # Get all subloss names from first replicate
     loss_names = list(metrics_history[0].metrics[0].sublosses.keys())
-    
+
     # Use Set3 colormap
     colors = plt.cm.Set3(np.linspace(0, 1, len(loss_names)))
-    
+
     # Different markers per replicate
     markers = ['o', '^', 's', 'D', 'v', '<', '>', 'p', '*', 'h']
-    
+
     for loss_idx, loss_name in enumerate(loss_names):
         color = colors[loss_idx]
-        
+
         for rep_idx in range(n_replicates):
             # Extract values for this loss and replicate over time
             values = []
             for metric in metrics_history:
-                if (rep_idx < len(metric.metrics) and 
-                    metric.metrics[rep_idx].sublosses and 
-                    loss_name in metric.metrics[rep_idx].sublosses):
+                if (
+                    rep_idx < len(metric.metrics)
+                    and metric.metrics[rep_idx].sublosses
+                    and loss_name in metric.metrics[rep_idx].sublosses
+                ):
                     values.append(metric.metrics[rep_idx].sublosses[loss_name])
                 else:
                     values.append(np.nan)
-            
+
             marker = markers[rep_idx % len(markers)]
             label = loss_name if rep_idx == 0 else None
-            
-            ax.plot(steps, values, 
-                   color=color, marker=marker, markersize=6, 
-                   linewidth=2, label=label, alpha=0.8)
-    
+
+            ax.plot(
+                steps,
+                values,
+                color=color,
+                marker=marker,
+                markersize=6,
+                linewidth=2,
+                label=label,
+                alpha=0.8,
+            )
+
     ax.set_xlabel('Training Step')
     ax.set_ylabel('Loss Value')
     ax.set_title('Average Sublosses over Time')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.grid(True, alpha=0.3)
-    
+
     # Set log scale if values vary widely
     all_values = []
     for metric in metrics_history:
         for rep in metric.metrics:
             if rep.sublosses:
                 all_values.extend([v for v in rep.sublosses.values() if not np.isnan(v)])
-    
+
     if all_values:
-        val_range = max(all_values) / min([v for v in all_values if v > 0]) if min([v for v in all_values if v > 0]) > 0 else 1
+        val_range = (
+            max(all_values) / min([v for v in all_values if v > 0])
+            if min([v for v in all_values if v > 0]) > 0
+            else 1
+        )
         if val_range > 100:  # Use log scale if range is > 100x
             ax.set_yscale('log')

@@ -16,6 +16,12 @@ logger = get_logger(__name__)
 
 class PlotLogger(Logger):
     jobs: List[DeferredNode[PlotJob]] = []
+    
+    def initialize(self, training_program):
+        """Store save_dir for later use in job construction."""
+        super().initialize(training_program)
+        # Store save_dir from training program for use in plot job contexts
+        self._save_dir = getattr(training_program, '_save_dir', None)
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         get_best_model = training_program.get_best_model_func()
@@ -38,7 +44,7 @@ class PlotLogger(Logger):
                 best_model = get_best_model(params, losses)
 
                 if best_model is not None:
-                    logger.debug(f"Got best model with signature: {best_model.signature()}")
+                    logger.debug(f"Got best model with signature: {best_model.signature}")
 
             logger.info(f'Plotting logger called at step {step}')
             logger.debug(f'Plotting logger has {len(self.jobs)} jobs')
@@ -55,6 +61,7 @@ class PlotLogger(Logger):
                                 **plot_extra_context,
                                 'best_model': best_model,
                                 'step': step,
+                                'save_dir': self._save_dir,  # Include save_dir in context
                                 # 'step_history': step_history,
                                 # 'stack': stack,
                                 # 'xbatches': xbatches,
