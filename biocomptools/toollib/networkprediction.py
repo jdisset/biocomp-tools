@@ -130,28 +130,41 @@ def _calculate_single_network_stats(
 
         # Debug traces for validation investigation
         from biocomptools.logging_config import get_logger
+
         debug_logger = get_logger(__name__)
-        
+
         debug_logger.debug(f"Network {network_info.get('network_name', f'Network_{network_idx}')}:")
         debug_logger.debug(f"  yhat shape: {yhat.shape}, gt shape: {gt.shape}")
-        debug_logger.debug(f"  latent_yhat shape: {latent_yhat.shape}, latent_gt shape: {latent_gt.shape}")
-        debug_logger.debug(f"  yhat stats: mean={yhat.mean():.6f}, std={yhat.std():.6f}, min={yhat.min():.6f}, max={yhat.max():.6f}")
-        debug_logger.debug(f"  gt stats: mean={gt.mean():.6f}, std={gt.std():.6f}, min={gt.min():.6f}, max={gt.max():.6f}")
-        debug_logger.debug(f"  latent_yhat stats: mean={latent_yhat.mean():.6f}, std={latent_yhat.std():.6f}")
-        debug_logger.debug(f"  latent_gt stats: mean={latent_gt.mean():.6f}, std={latent_gt.std():.6f}")
+        debug_logger.debug(
+            f"  latent_yhat shape: {latent_yhat.shape}, latent_gt shape: {latent_gt.shape}"
+        )
+        debug_logger.debug(
+            f"  yhat stats: mean={yhat.mean():.6f}, std={yhat.std():.6f}, min={yhat.min():.6f}, max={yhat.max():.6f}"
+        )
+        debug_logger.debug(
+            f"  gt stats: mean={gt.mean():.6f}, std={gt.std():.6f}, min={gt.min():.6f}, max={gt.max():.6f}"
+        )
+        debug_logger.debug(
+            f"  latent_yhat stats: mean={latent_yhat.mean():.6f}, std={latent_yhat.std():.6f}"
+        )
+        debug_logger.debug(
+            f"  latent_gt stats: mean={latent_gt.mean():.6f}, std={latent_gt.std():.6f}"
+        )
         debug_logger.debug(f"  dependent_output_pos: {dependent_output_pos}")
 
         # BUGFIX: Ensure gt and yhat have matching shapes by extracting same columns
         if latent_gt.shape[1] > latent_yhat.shape[1]:
-            debug_logger.debug(f"  gt has more columns ({latent_gt.shape[1]}) than yhat ({latent_yhat.shape[1]}), extracting dependent outputs from gt")
+            debug_logger.debug(
+                f"  gt has more columns ({latent_gt.shape[1]}) than yhat ({latent_yhat.shape[1]}), extracting dependent outputs from gt"
+            )
             latent_gt = latent_gt[:, dependent_output_pos]
             debug_logger.debug(f"  after extraction: latent_gt shape: {latent_gt.shape}")
-        
+
         mse = float(np.mean((latent_yhat - latent_gt) ** 2))
         rmse = float(np.sqrt(mse))
         network_stats['mse'] = float(mse)
         network_stats['rmse'] = rmse
-        
+
         debug_logger.debug(f"  computed MSE: {mse:.6f}, RMSE: {rmse:.6f}")
 
         if enable_gridstats:
@@ -914,7 +927,7 @@ class NetworkPrediction(DataSource):
                 pdata.metadata['full_x'] = x
                 pdata.metadata['full_y'] = y
 
-                return flatx, flaty[:, 0:1]
+                return flatx, flaty[:, :1]  # return only the first output for collection points
 
             output_name = f"Node {collection_point.network_id}:{collection_point.node_id}"
 
