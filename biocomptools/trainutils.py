@@ -46,7 +46,7 @@ def make_unique_dir(directory: Path | str, prefix: str = '', suffix: str = ''):
         dir_path = directory / candidate_name
 
         try:
-            dir_path.mkdir()
+            dir_path.mkdir(parents=True, exist_ok=False)
             return dir_path
 
         except FileExistsError:
