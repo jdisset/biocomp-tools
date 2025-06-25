@@ -72,6 +72,7 @@ logging:
         biocomptools.toollib.networkprediction: DEBUG
         biocomptools.toollib.models: DEBUG
         biocomptools.toollib.figuremakers.innernodes: DEBUG
+        biocomptools.toollib.loggers.plotlogger: DEBUG
         biocomptools.toollib.plot: DEBUG
         biocomptools.toollib.trainutils: DEBUG
         biocomptools.mlflowlogger: DEBUG
@@ -84,6 +85,7 @@ logging:
         biocomptools.toollib.networkprediction: INFO
         biocomptools.toollib.models: INFO
         biocomptools.toollib.figuremakers.innernodes: INFO
+        biocomptools.toollib.loggers.plotlogger: INFO
         biocomptools.toollib.plot: INFO
         biocomptools.toollib.trainutils: INFO
         biocomptools.mlflowlogger: INFO
