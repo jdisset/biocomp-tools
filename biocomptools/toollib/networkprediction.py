@@ -23,6 +23,17 @@ logger = get_logger(__name__)
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
 
+def reconstruct_from_flat(flat_values, shapes):
+    """reconstruct a list of arrays from flat values and shapes"""
+    result = []
+    offset = 0
+    for shape in shapes:
+        n = np.prod(shape)
+        result.append(flat_values[:, offset : offset + n].reshape(-1, *shape))
+        offset += n
+    return result
+
+
 def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> NdArray:
     """
     Create a hypercube grid of points in n dimensions.
@@ -200,7 +211,6 @@ def _calculate_grid_stats(
     valid_latent_gt = np.asarray(latent_gt[valid_x_mask])
 
     tree = build_tree(valid_latent_x)
-
     iw, gt_stdev, gt_mean = knn_stats(
         grid,
         valid_latent_gt,
@@ -534,7 +544,7 @@ class NetworkPrediction(DataSource):
 
         def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
             if self.verbose:
-                logger.debug(
+                print(
                     f"getting xy for network {network_idx} with model {self.network_model.signature}"
                 )
 
@@ -553,7 +563,7 @@ class NetworkPrediction(DataSource):
             gt = self._gtruths[network_idx]
 
             if self.verbose:
-                logger.debug(
+                print(
                     f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
                 )
 
@@ -565,7 +575,7 @@ class NetworkPrediction(DataSource):
             _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
             assert isinstance(dependent_output_pos, int)
             if self.verbose:
-                logger.debug(f"dep_output_pos: {dependent_output_pos}")
+                logger.info(f"dep_output_pos: {dependent_output_pos}")
 
             stats = self.get_network_stats()
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
@@ -574,11 +584,11 @@ class NetworkPrediction(DataSource):
 
             if self.use_output_as_input:
                 if self.verbose:
-                    logger.info("using output as input, returning yhat as both x and y")
+                    print("using output as input, returning yhat as both x and y")
                 return yhat, yhat
             else:
                 if self.verbose:
-                    logger.info("using original input, returning x and yhat")
+                    print("using original input, returning x and yhat")
                 return x, yhat
 
         return get_xy
@@ -895,9 +905,10 @@ class NetworkPrediction(DataSource):
 
             def get_xy_fn(
                 pdata: PlotData,
-                collection_point=collection_point,
+                collection_point_nodespec=collection_point,
                 input_shapes=self._input_shapes[i],
                 output_shapes=self._output_shapes[i],
+                i=i,
             ) -> Tuple[NdArray, NdArray]:
                 if not hasattr(self, '_collected_in') or self._collected_in is None:
                     self.compute_all_network_predictions()
@@ -906,28 +917,25 @@ class NetworkPrediction(DataSource):
 
                 flatx = self._collected_in[:, collect_in_idx[i]]
                 flaty = self._collected_out[:, collect_out_idx[i]]
-                logger.debug(f"collection input shapes: {input_shapes}")
-                logger.debug(f"collection output shapes: {output_shapes}")
-                logger.debug(f"flatx shape: {flatx.shape}")
-                logger.debug(f"flatx: {flatx}")
-                x = []
-                for s in input_shapes:
-                    n = np.prod(s)
-                    x.append(flatx[:, :n].reshape(-1, *s))
-                    flatx = flatx[:, n:]
-                logger.debug(f"x: {x}")
 
-                y = []
-                for s in output_shapes:
-                    n = np.prod(s)
-                    y.append(flaty[:, :n].reshape(-1, *s))
-                    flaty = flaty[:, n:]
+                pdata.metadata['collection_point_nodespec'] = collection_point_nodespec
+                pdata.metadata['input_shapes'] = input_shapes
+                pdata.metadata['output_shapes'] = output_shapes
 
-                pdata.metadata['collection_point'] = collection_point
-                pdata.metadata['full_x'] = x
-                pdata.metadata['full_y'] = y
+                if self.verbose:
+                    print(f"self._collected_in shape: {self._collected_in.shape}")
+                    print(f"self._collected_out shape: {self._collected_out.shape}")
+                    print(f"collection point = {collection_point_nodespec}")
+                    print(f"collection point {i} collected_in_idx: {collect_in_idx[i]}")
+                    print(f"collection point {i} collected_out_idx: {collect_out_idx[i]}")
+                    print(f"collected node input shapes: {input_shapes}")
+                    print(f"collected node output shapes: {output_shapes}")
+                    print(f"flatx shape: {flatx.shape}")
+                    print(f"flatx: {flatx}")
+                    print(f"flaty shape: {flaty.shape}")
+                    print(f"flaty: {flaty}")
 
-                return flatx, flaty[:, :1]  # return only the first output for collection points
+                return flatx, flaty
 
             output_name = f"Node {collection_point.network_id}:{collection_point.node_id}"
 
@@ -951,6 +959,7 @@ class NetworkPrediction(DataSource):
                 input_names=input_names,
                 output_name=output_name,
                 metadata=metadata,
+                disable_check_shapes=True,
             )
 
             plot_data_list.append(plot_data)
@@ -1029,3 +1038,6 @@ class NetworkPrediction(DataSource):
             data.set_xy()
 
         return lazy_data
+
+
+# 7.11 s
