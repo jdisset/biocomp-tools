@@ -65,6 +65,7 @@ class NodeSpec(BaseModel):
 
     network_id: int
     node_id: int
+    extra_info: Optional[dict] = None
 
 
 M = TypeVar('M', bound='BiocompModel')
@@ -232,14 +233,14 @@ class NetworkModel(BaseModel):
             import jax
             import jax.numpy as jnp
             from time import time
-    
+
             self._stack = cmp.ComputeStack(networks=self.network)
             self._stack.build(self.model.compute_config)
-    
+
             # create a general batch apply function
             # using same signature as training code: (params, inputs, quantiles, keys)
             batch_apply_fn = jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0))
-    
+
             # JIT compile for both CPU and GPU devices
             cpu_device = jax.devices('cpu')[0] if jax.devices('cpu') else None
             try:
@@ -247,24 +248,23 @@ class NetworkModel(BaseModel):
             except RuntimeError:
                 # No GPU backend available
                 gpu_devices = []
-    
+
             if cpu_device:
                 self._batch_apply_cpu = jax.jit(batch_apply_fn, device=cpu_device)
             else:
                 self._batch_apply_cpu = jax.jit(batch_apply_fn)
-    
+
             if gpu_devices:
                 self._batch_apply_gpu = jax.jit(batch_apply_fn, device=gpu_devices[0])
             else:
                 self._batch_apply_gpu = self._batch_apply_cpu
-    
+
             # default batch apply (for backward compatibility)
             self._batch_apply = self._batch_apply_cpu
-    
+
         except Exception as e:
             logger.error(f"error building stack: {e}")
             raise e
-
 
     def update_params(self):
         """update parameters from model and initialize local parameters"""
@@ -292,40 +292,44 @@ class NetworkModel(BaseModel):
             logger.error(f"error updating params: {e}")
             logger.error(f"networks: {self.network}")
             raise e
-    
+
     def _precompile_batch_apply(self):
         """Precompile batch_apply functions with the correct batch size"""
         if self._stack is None or self._params is None:
             logger.warning("Cannot precompile: stack or params not initialized")
             return
-            
+
         try:
             import jax
             import jax.numpy as jnp
             from time import time
-            
+
             logger.info("Precompiling batch_apply functions...")
-            
+
             # calculate the actual batch size that will be used during prediction
             outputs_per_sample = int(self._stack.total_nb_of_outputs)
             effective_batch_size = max(1, self.max_points_per_batch // outputs_per_sample)
-            
+
             logger.debug(
                 f"Precompiling with batch size {effective_batch_size} "
                 f"(max_points={self.max_points_per_batch}, outputs_per_sample={outputs_per_sample})"
             )
-            
+
             # create dummy inputs for precompilation with correct batch size
             dummy_x = jnp.zeros((effective_batch_size, self._stack.total_nb_of_inputs))
-            dummy_z = jnp.zeros((effective_batch_size, self._params["global/number_of_quantile_variables"]))
+            dummy_z = jnp.zeros(
+                (effective_batch_size, self._params["global/number_of_quantile_variables"])
+            )
             dummy_key = jax.random.PRNGKey(0)
             dummy_keys = jax.random.split(dummy_key, effective_batch_size)
-            
-            logger.debug(f"Precompilation: dummy_keys shape: {dummy_keys.shape}, effective_batch_size: {effective_batch_size}")
-            
+
+            logger.debug(
+                f"Precompilation: dummy_keys shape: {dummy_keys.shape}, effective_batch_size: {effective_batch_size}"
+            )
+
             # use the actual params that will be used during prediction
             dummy_params = self._params
-            
+
             # precompile CPU version
             if self._batch_apply_cpu is not None:
                 try:
@@ -337,7 +341,7 @@ class NetworkModel(BaseModel):
                     logger.info(f"CPU batch_apply precompiled in {cpu_compile_time:.2f} seconds")
                 except Exception as e:
                     logger.warning(f"Failed to precompile CPU batch_apply: {e}")
-            
+
             # precompile GPU version if different from CPU
             if self._batch_apply_gpu is not self._batch_apply_cpu:
                 try:
@@ -349,10 +353,10 @@ class NetworkModel(BaseModel):
                     logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")
                 except Exception as e:
                     logger.warning(f"Failed to precompile GPU batch_apply: {e}")
-                    
+
         except Exception as e:
             logger.warning(f"Precompilation failed: {e}")
-    
+
     def with_model(self, model: BiocompModel) -> 'NetworkModel':
         """create a new network model with a different biocomp model"""
         logger.debug(f"creating new network model with model {model.signature=}")
@@ -553,9 +557,10 @@ class NetworkModel(BaseModel):
             keys_batch = jax.random.split(batch_key, batch_size)
 
             assert batch_apply is not None
-            
+
             # track potential recompilation
             import time
+
             batch_start = time.time()
             out, (_, fullout) = batch_apply(
                 params,
@@ -566,7 +571,7 @@ class NetworkModel(BaseModel):
             # ensure computation is complete
             out.block_until_ready()
             batch_time = time.time() - batch_start
-            
+
             # warn if batch took suspiciously long (likely recompilation)
             if i == 0 and batch_time > 1.0:
                 logger.warning(
