@@ -1,8 +1,8 @@
 from biocomptools.toollib.plot import Figure, PlotConfig, load_default_plotconf
 from biocomptools.modelmodel import BiocompModel, NetworkModel, NodeSpec, load_model
-from biocomptools.toollib.networkprediction import NetworkPrediction
+from biocomptools.toollib.networkprediction import NetworkPrediction, reconstruct_from_flat
 from biocomptools.logging_config import get_logger
-from biocomp.plotutils import FigureSpec, FigureLayout, FigAx
+from biocomp.plotutils import FigureSpec, FigureLayout, FigAx, PlotData
 from biocomp.plotting.plotting_core import knn_stats, DEFAULT_CMAP_NAME, build_tree
 from biocomp.network import Network, CoTransfection, Unit
 
@@ -11,6 +11,7 @@ from pydantic import Field, ConfigDict, BaseModel, BeforeValidator
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from scipy.spatial import KDTree
 import jax.numpy as jnp
 
@@ -18,23 +19,70 @@ logger = get_logger(__name__)
 
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
+ERN_ASPECT_RATIO = 1.0  # square plots for ERN scatter plots
+OTHER_ASPECT_RATIO = 0.8  # slightly taller plots for everything else
+
+ERN_SAMPLE_SIZE = 50_000  # sample size for ERN scatter plots
+NODE_SAMPLE_SIZE = 20_000  # sample size for other node plots
+
+SHOW_INVERSE_NODES = True
+LABEL_FONT_SIZE = 12
+
+ERN_COLORBAR_HEIGHT_RATIO = 0.75
+ERN_EMBEDDINGS_HEIGHT_RATIO = 0.75
+ERN_COLORBAR_WIDTH = 0.1
+
+LABELS: Dict[str, Dict[str, str]] = {
+    "ERN": {"x2d": "Protein Amount", "y2d": "mRNA Amount", "out": "Surviving mRNA"},
+    "Translation": {
+        "x1d": "Input mRNA (latent)",
+        "y1d": "Output Protein (latent)",
+        "out": "Protein Level",
+    },
+    "Transcription": {
+        "x1d": "Input DNA (latent)",
+        "y1d": "Output mRNA (latent)",
+        "out": "mRNA Level",
+    },
+    "Source": {
+        "x1d": "Input (latent)",
+        "y1d": "Output DNA (latent)",
+        "out": "DNA Level",
+    },
+    "Output": {
+        "x1d": "Input Protein (latent)",
+        "y1d": "Fluorescence (latent)",
+        "out": "Fluorescence",
+    },
+}
+
+
+class NodeData(BaseModel):
+    node_name: str
+    node_type: str
+    plot_data: PlotData
+    embedding_name: str | None = None
+    embedding_value: float | None = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
 
 class RowSubFigureLayout(FigureLayout):
-    figsize: Tuple[int, int] = (25, 13)
-    nrows: int = 2
+    figsize: Tuple[int, int] = (20, 15)
+    nrows: int = 3
     ncols: int = 1
-    hspace: float = 0.4
+    hspace: float = 0.1
     wspace: float = 0.4
-    height_ratios: List[float] = [1.25, 1]
+    height_ratios: List[float] = [1, 1, 1]
 
     def make_figure(self):
-        fig = plt.figure(figsize=self.figsize)
+        fig = plt.figure(figsize=self.figsize, constrained_layout=False)
         subfigs = fig.subfigures(
             self.nrows,
             self.ncols,
             height_ratios=self.height_ratios,
             hspace=self.hspace,
-            wspace=self.wspace,
         )
         return FigAx(figure=fig, subfigs=subfigs)
 
@@ -61,48 +109,180 @@ class InnerNodesFigure(Figure):
     """
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
-    n_samples: int = 100000
+    n_samples: int = NODE_SAMPLE_SIZE
     figure_spec: FigureSpec = Field(default_factory=InnerNodesFigureSpec)
 
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
 
-    def extract_ern_embeddings(self) -> Dict[str, List[float]]:
-        """Extract ERN embeddings from model"""
-        ern_names = self.model.compute_config.node_functions['sequestron_ERN'].kwargs[
-            'affinity_names'
-        ]
-        ern_names = [n.split('::')[1].split('#')[0] for n in ern_names]
-        ern_embedding_values = self.model.shared_params["shared"]["ERN_5p"]["affinities"]
-        return {k: v for k, v in zip(ern_names, ern_embedding_values)}
+    def _cmap(self) -> mpl.colors.Colormap:
+        """Truncated colormap – keeps lower part light for readability."""
+        return mpl.colors.LinearSegmentedColormap.from_list(
+            f"trunc_{DEFAULT_CMAP_NAME}",
+            plt.colormaps.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(0.3, 1, 256)),
+            N=256,
+        )
 
-    def extract_uorf_embeddings(self) -> Dict[str, List[float]]:
-        """Extract uORF embeddings from model"""
-        uorf_names = self.model.compute_config.node_functions['translation'].kwargs[
-            'quantization_names'
+    def _set_plot_aspect(self, ax, ratio):
+        """Set a fixed aspect ratio on matplotlib plots regardless of axis units"""
+        xvals, yvals = ax.get_xlim(), ax.axes.get_ylim()
+        xrange = xvals[1] - xvals[0]
+        yrange = yvals[1] - yvals[0]
+        try:
+            ax.set_aspect(ratio * (xrange / yrange), adjustable='box')
+        except Exception as e:
+            ax.set_aspect(ratio, adjustable='box')
+
+    def _sample(self, x: np.ndarray, y: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Randomly subsample *n* rows (without replacement)."""
+        if y.shape[0] <= n:
+            return x, y
+        idx = np.random.choice(y.shape[0], n, replace=False)
+        return x[idx], y[idx]
+
+    def _trend(self, ax: mpl.axes.Axes, x: np.ndarray, y: np.ndarray, k: int = 500):
+        """Plot a dashed k‑NN smoothed trend line and return (xq, z)."""
+        xq = np.linspace(x.min(), x.max(), 200).reshape(-1, 1)
+        _, z = knn_stats(
+            xq,
+            y,
+            tree=build_tree(x),
+            stats=["std", "mean"],
+            k=k,
+            radius=0.1,
+            min_points=200,
+        )
+        ax.plot(xq, z, linewidth=1, color="black", linestyle="dashed")
+        return xq, z
+
+    def _plot(
+        self,
+        ax: mpl.axes.Axes,
+        x: np.ndarray,
+        y: np.ndarray,
+        labels: Dict[str, str],
+        size: int = NODE_SAMPLE_SIZE,
+        *,
+        add_colorbar: bool = False,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        color: Any | None = None,
+        add_trend: bool = True,
+    ) -> mpl.collections.PathCollection | None:
+        """Generic scatter / line plot helper – returns the scatter for colour‑bar handling."""
+        x, y = self._sample(x, y, size)
+
+        # 2‑D input – coloured by output value
+        if x.shape[1] == 2:
+            sc = ax.scatter(
+                x[:, 0],
+                x[:, 1],
+                c=y.flatten(),
+                cmap=self._cmap(),
+                s=10,
+                alpha=0.2,
+                linewidths=0,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            ax.set_xlabel(labels.get("x2d", "Input 1"))
+            ax.set_ylabel(labels.get("y2d", "Input 2"))
+
+            if add_colorbar:
+                cbar = plt.colorbar(sc, ax=ax)
+                cbar.set_label(labels.get("out", "Output"), fontsize=10)
+                # Force *opaque* colour bar
+                if hasattr(cbar, "solids"):
+                    cbar.solids.set(alpha=1)
+                for coll in cbar.ax.collections:
+                    coll.set_alpha(1)
+                for patch in cbar.ax.patches:
+                    patch.set_alpha(1)
+            return sc
+
+        # 1‑D input – optionally add trend
+        ax.scatter(
+            x.flatten(),
+            y.flatten(),
+            s=4,
+            alpha=0.05,
+            linewidth=0,
+            c=color if color is not None else "blue",
+        )
+        if add_trend:
+            self._trend(ax, x, y)
+        ax.set_xlabel(labels.get("x1d", "Input (latent)"))
+        ax.set_ylabel(labels.get("y1d", "Output (latent)"))
+        return None
+
+    def _bar(
+        self,
+        ax: mpl.axes.Axes,
+        data: Dict[str, float] | List[Tuple[str, float]],
+        title: str,
+        *,
+        orientation: str = "horizontal",
+        inset: bool = False,
+        labelsize: int = 6,
+        ratio=None,
+    ) -> None:
+        """Draw either a horizontal or vertical coloured bar chart."""
+        items = sorted(data.items(), key=lambda x: x[1]) if isinstance(data, dict) else list(data)
+        names, values = zip(*items)
+        colors = self._cmap()(np.linspace(0, 1, len(names)))
+
+        if orientation == "horizontal":
+            y_pos = np.arange(len(names))
+            ax.barh(y_pos, values, color=colors, height=0.7, edgecolor="black")
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(names, fontsize=labelsize if not inset else 6)
+            ax.invert_yaxis()
+        else:  # vertical
+            x_pos = np.arange(len(names))
+            ax.bar(x_pos, values, color=colors, width=0.7, edgecolor="black")
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(names, fontsize=labelsize if inset else labelsize, rotation=90)
+
+        if not inset:
+            ax.set_title(title, fontsize=11, fontweight="bold")
+
+        if ratio is not None:
+            self._set_plot_aspect(ax, ratio)
+
+    def extract_ern_embeddings(self) -> Dict[str, float]:
+        ern_names = self.model.compute_config.node_functions["sequestron_ERN"].kwargs[
+            "affinity_names"
+        ]
+        ern_names = [n.split("::")[1].split("#")[0] for n in ern_names]
+        ern_embedding_values = self.model.shared_params["shared"]["ERN_5p"]["affinities"]
+        return {k: float(v[0]) for k, v in zip(ern_names, ern_embedding_values)}
+
+    def extract_uorf_embeddings(self) -> Dict[str, float]:
+        uorf_names = self.model.compute_config.node_functions["translation"].kwargs[
+            "quantization_names"
         ]
         uorf_values = self.model.shared_params["shared"]["quantization"]["values"]["tl_rate"]
-
-        # Clean up uORF names for better display
-        cleaned_names = []
+        cleaned_names: List[str] = []
         for name in uorf_names:
-            name = name.strip('_uORF')
-            if name == '00_empty_tc':
-                name = 'none'
+            name = name.strip("_uORF")
+            if name == "00_empty_tc":
+                name = "none"
             cleaned_names.append(name)
+        return {k: float(v[0]) for k, v in zip(cleaned_names, uorf_values)}
 
-        return {k: v for k, v in zip(cleaned_names, uorf_values)}
+    def prepare_all_networks_and_specs(
+        self, *, n_samples: int = 50_000
+    ) -> Tuple[List[Network], List[NodeSpec], List[np.ndarray]]:
+        all_networks: List[Network] = []
+        all_node_specs: List[NodeSpec] = []
+        all_inputs: List[np.ndarray] = []
 
-    def create_ern_networks(self, ern_names: List[str]) -> List[Network]:
-        """Create networks for ERN visualization"""
-        networks = []
-        for name in ern_names:
+        # ERN nodes ----------------------------------------------------------------
+        ern_embeddings = self.extract_ern_embeddings()
+        for name in ern_embeddings.keys():
             net = Network(
                 cotx=[
                     CoTransfection(
-                        units=[
-                            Unit(slots=["hEF1a", name]),
-                            Unit(slots=["hEF1a", "mKO2"]),
-                        ]
+                        units=[Unit(slots=["hEF1a", name]), Unit(slots=["hEF1a", "mKO2"])]
                     ),
                     CoTransfection(
                         units=[
@@ -113,521 +293,431 @@ class InnerNodesFigure(Figure):
                 ],
                 invert_on_build=True,
             )
-            networks.append(net)
-        return networks
+            all_networks.append(net)
+            all_node_specs.append(
+                NodeSpec(
+                    node_id=1,
+                    network_id=len(all_networks) - 1,
+                    extra_info={
+                        "node_type": "ERN",
+                        "node_name": name,
+                        "embedding_name": "affinity",
+                        "embedding_value": ern_embeddings[name],
+                        "display_name": name,
+                    },
+                )
+            )
+            all_inputs.append(np.random.uniform(0.01, 0.8, (n_samples, 2)))
 
-    def create_uorf_networks(self, uorf_names: List[str]) -> List[Network]:
-        """Create networks for uORF visualization"""
-        uorf_nets = [
-            Network(
+        # uORF translation nodes ----------------------------------------------------
+        uorf_embeddings = self.extract_uorf_embeddings()
+        uorf_names_raw = self.model.compute_config.node_functions["translation"].kwargs[
+            "quantization_names"
+        ]
+        uorf_names_clean = list(uorf_embeddings.keys())
+        for name_raw, name_clean in zip(uorf_names_raw, uorf_names_clean):
+            net = Network(
                 cotx=[
                     CoTransfection(
-                        units=[
-                            Unit(slots=["hEF1a", uorf, "eBFP2"], source='plsmd0'),
-                            Unit(slots=["hEF1a", "mKO2"], source='plsmd0'),
-                        ]
-                    ),
+                        units=[Unit(slots=["hEF1a", name_raw]), Unit(slots=["hEF1a", "mKO2"])]
+                    )
                 ],
                 invert_on_build=True,
             )
-            for uorf in uorf_names
-        ]
-        return uorf_nets
-
-    def collect_node_data(self) -> Dict:
-        """Collect data from all interesting nodes"""
-        result_data = {}
-
-        # --- ERN NETWORKS ---
-        try:
-            ern_embeddings = self.extract_ern_embeddings()
-        except Exception as e:
-            logger.warning(f"Couldn't get ERN embeddings from model: {e}")
-            ern_embeddings = {}
-
-        if ern_embeddings:
-            logger.info(f"Extracted {len(ern_embeddings)} ERN embeddings")
-            ern_names = list(ern_embeddings.keys())
-            ern_networks = self.create_ern_networks(ern_names)
-            ern_nmod = NetworkModel(model=self.model, network=ern_networks)
-
-            # Create collection points for ERN nodes
-            ern_nodes = [
+            all_networks.append(net)
+            all_node_specs.append(
                 NodeSpec(
-                    node_id=1,
-                    network_id=i,
+                    node_id=2,
+                    network_id=len(all_networks) - 1,
+                    extra_info={
+                        "node_type": "Translation",
+                        "node_name": name_clean,
+                        "embedding_name": "tl_rate",
+                        "embedding_value": uorf_embeddings[name_clean],
+                        "display_name": name_clean,
+                    },
                 )
-                for i in range(len(ern_networks))
-            ]
+            )
+            all_inputs.append(np.random.uniform(0.01, 0.8, (n_samples, 1)))
 
-            # Generate random inputs for ERN networks
-            ern_inputs = np.random.uniform(0.01, 0.8, (self.n_samples, 2))
-            inputs = [ern_inputs] * len(ern_networks)
+        # Core source/transcription/output nodes -----------------------------------
+        basic_network = Network(
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(slots=["hEF1a", "eYFP"], source="plsmd0"),
+                        Unit(slots=["hEF1a", "eBFP2"], source="plsmd0"),
+                    ]
+                )
+            ],
+            invert_on_build=True,
+        )
+        basic_node_configs: List[Dict[str, Any]] = [
+            {"name": "Source", "node_id": 7, "display_name": "DNA → DNA"},
+            {"name": "Transcription", "node_id": 3, "display_name": "DNA → mRNA"},
+            {"name": "Output", "node_id": 0, "display_name": "PRT → fluo"},
+        ]
+        basic_network.build()
 
-            ern_pred = NetworkPrediction(
-                predict_at=inputs,
-                network_model=ern_nmod,
-                collection_points=ern_nodes,
-                max_evals=self.n_samples,
-                disable_variational=True,
-                already_latent=True,
-                z_value=0.5,
+        # Add inverse nodes when requested ----------------------------------------
+        if SHOW_INVERSE_NODES:
+            for row_id, row in basic_network.compute_graph.iterrows():
+                if getattr(row, "is_inverse_of", None) is not None:
+                    type_map = {
+                        "inv_source": "DNA ← DNA",
+                        "inv_transcription": "mRNA ← DNA",
+                        "inv_translation": "mRNA ← PRT",
+                    }
+                    display_name = type_map.get(row.type, f"Inverse {row.type}")
+                    basic_node_configs.append(
+                        {
+                            "name": row.type.title().replace("_", " "),
+                            "node_id": row_id,
+                            "display_name": display_name,
+                        }
+                    )
+
+        basic_network_id = len(all_networks)
+        all_networks.append(basic_network)
+        all_inputs.append(np.random.uniform(0.01, 0.8, (n_samples, 1)))
+        for cfg in basic_node_configs:
+            all_node_specs.append(
+                NodeSpec(
+                    node_id=cfg["node_id"],
+                    network_id=basic_network_id,
+                    extra_info={
+                        "node_type": cfg["name"],
+                        "node_name": cfg["display_name"],
+                        "embedding_name": None,
+                        "embedding_value": None,
+                        "display_name": cfg["display_name"],
+                    },
+                )
             )
 
-            # Get ERN node data
-            ern_data = ern_pred.get_data()
-            result_data['ern_data'] = ern_data
-            result_data['ern_names'] = ern_names
-            result_data['ern_embeddings'] = ern_embeddings
+        return all_networks, all_node_specs, all_inputs
 
-        # --- UORF NETWORKS ---
-
-        uorf_embeddings = self.extract_uorf_embeddings()
-        uorf_names_raw = self.model.compute_config.node_functions['translation'].kwargs[
-            'quantization_names'
-        ]
-        uorf_names = list(uorf_embeddings.keys())
-        uorf_networks = self.create_uorf_networks(uorf_names_raw)
-        logger.debug(f"Created {len(uorf_networks)} uORF networks")
-        logger.debug(f"UORF embeddings: {uorf_embeddings}")
-
-        import pandas as pd
-
-        with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-            logger.debug(f"uorf network comp g:\n{uorf_networks[2].compute_graph}")
-            logger.debug(f"uorf network cdg:\n{uorf_networks[2].central_dogma_graph}")
-
-        uorf_nmod = NetworkModel(model=self.model, network=uorf_networks)
-
-        logger.info(f"Created {len(uorf_networks)} uORF networks")
-
-        translation_node_id = 1
-        translation_nodes = [
-            NodeSpec(network_id=i, node_id=translation_node_id) for i in range(len(uorf_networks))
-        ]
-        logger.info(
-            f"Created {len(translation_nodes)} translation nodes specs: {translation_nodes}"
-        )
-
-        uorf_inputs = np.random.uniform(0.0, 0.8, (self.n_samples, 1))
-        uorf_inputs = [uorf_inputs.copy() for _ in range(len(uorf_networks))]
-
-        basic_node_ids = {
-            "Source\n$\\mathrm{a.k.a. plasmid, DNA \\rightarrow DNA}$": 7,
-            "Transcription\n$\\mathrm{DNA \\rightarrow mRNA}$": 3,
-            "Output\n$\\mathrm{PRT \\rightarrow fluo}$": 0,
-        }
-
-        basic_nodes = [
-            NodeSpec(network_id=0, node_id=node_id) for node_type, node_id in basic_node_ids.items()
-        ]
-
-        uorf_pred = NetworkPrediction(
-            predict_at=uorf_inputs,
-            network_model=uorf_nmod,
-            max_evals=self.n_samples,
-            collection_points=translation_nodes + basic_nodes,
+    def get_all_node_data_unified(self, *, n_samples: int = 50_000) -> List[NodeData]:
+        """Get all node data using a single, unified NetworkPrediction call."""
+        networks, node_specs, inputs = self.prepare_all_networks_and_specs(n_samples=n_samples)
+        nmod = NetworkModel(model=self.model, network=networks)
+        pred = NetworkPrediction(
+            predict_at=inputs,
+            network_model=nmod,
+            collection_points=node_specs,
             disable_variational=True,
+            z_value="uniform",
             already_latent=True,
-            z_value='uniform',
+        )
+        all_plot_data = pred.get_data()
+        node_data_list: List[NodeData] = []
+        for plot_data in all_plot_data:
+            extra_info = plot_data.metadata["collection_point_nodespec"].extra_info
+            node_data_list.append(
+                NodeData(
+                    node_name=extra_info["node_name"],
+                    node_type=extra_info["node_type"],
+                    plot_data=plot_data,
+                    embedding_name=extra_info["embedding_name"],
+                    embedding_value=extra_info["embedding_value"],
+                )
+            )
+        return node_data_list
+
+    def plot_node_data(
+        self, ax: mpl.axes.Axes, node: NodeData, *, size: int = NODE_SAMPLE_SIZE
+    ) -> None:
+        """Dispatch plotting by node type and manage aspect ratio."""
+        labels = LABELS.get(node.node_type, {})
+        aspect_ratio = ERN_ASPECT_RATIO if node.node_type == "ERN" else OTHER_ASPECT_RATIO
+
+        plot_data = node.plot_data
+        x, y = plot_data.x, plot_data.y
+
+        title = (
+            f"{node.node_type}\n({node.node_name})"
+            if node.embedding_name
+            else (
+                f"{node.node_type}\n{node.node_name}"
+                if node.node_name != node.node_type
+                else node.node_type
+            )
         )
 
-        vnodes = [
-            uorf_pred.network_model._stack.get_node_from_net_and_compute_id(i, translation_node_id)
-            for i in range(len(uorf_networks))
-        ]
-        signatures = [vnode.type_signature for vnode in vnodes]
-        assert all([s == "translation_1_1" for s in signatures]), f"Signatures: {signatures}"
-        logger.info(f"Extracted {len(uorf_networks)} translation nodes: {vnodes}")
+        if "input_shapes" in plot_data.metadata:
+            # Reconstruct flattened inputs/outputs when needed
+            x_r = reconstruct_from_flat(x, plot_data.metadata["input_shapes"])
+            y_r = reconstruct_from_flat(y, plot_data.metadata["output_shapes"])
+            n_in, n_out = len(x_r), len(y_r)
 
-        # print all signature of basic plotted nodes:
-        for k, node_id in basic_node_ids.items():
-            vnode = uorf_pred.network_model._stack.get_node_from_net_and_compute_id(0, node_id)
-            logger.debug(f"Node {node_id} signature ({k}): {vnode.type_signature}")
+            # 1 input ‑> many outputs or vice‑versa
+            if n_in > 1 and n_out == 1:
+                self._plot(
+                    ax,
+                    np.column_stack(x_r),
+                    y_r[0],
+                    labels,
+                    size,
+                )
+                self._set_plot_aspect(ax, aspect_ratio)
+                ax.set_title(title, fontweight="bold", fontsize=LABEL_FONT_SIZE)
+                return
 
-        all_data = uorf_pred.get_data()
-        translation_data = all_data[: len(uorf_networks)]
-        basic_data = all_data[len(uorf_networks) :]
-
-        logger.info(f"Extracted {len(translation_data)} translation nodes: {translation_data}")
-
-        result_data['translation_data'] = translation_data
-        result_data['uorf_names'] = uorf_names
-        result_data['uorf_embeddings'] = uorf_embeddings
-        result_data['basic_data'] = basic_data
-        result_data['basic_node_types'] = list(basic_node_ids.keys())
-
-        return result_data
-
-    def add_subplot_letter(self, ax, letter, xpos=-0.0, ypos=1.22):
-        """Add a letter annotation to the top-left of a subplot."""
-        ax.text(
-            xpos,
-            ypos,
-            letter,
-            transform=ax.transAxes,
-            fontsize=14,
-            fontweight='bold',
-            va='top',
-            ha='right',
-        )
-
-    def create_visualization(self, data, figax):
-        """Create a visualization with organized subfigures layout."""
-        pconf = self.plot_config
-
-        with mpl.rc_context(pconf.rc_context):
-            # Create truncated colormap for embeddings and translation plot
-            base_cmap = plt.cm.get_cmap(DEFAULT_CMAP_NAME)
-            truncated_cmap = mpl.colors.LinearSegmentedColormap.from_list(
-                f'trunc_{DEFAULT_CMAP_NAME}', base_cmap(np.linspace(0.3, 1, 256)), N=256
+            # General case – overlay plots with unique colours
+            allX = [x_r[0]] * n_out if n_out > 1 and n_in == 1 else x_r if n_in > 1 else [x_r[0]]
+            allY = y_r if n_out > 1 else [y_r[0]] * n_in if n_in > 1 else y_r
+            legends = (
+                [f"out {i}" for i in range(n_out)]
+                if n_out > 1
+                else ([f"in {i}" for i in range(n_in)] if n_in > 1 else [""])
             )
-
-            fig = figax.figure
-            subfigs = figax.subfigs
-
-            # Row 1: ERN nodes and embeddings
-            row1_fig = subfigs[0]
-
-            ern_data = data.get('ern_data', [])
-            ern_names = data.get('ern_names', [])
-            ern_embeddings = data.get('ern_embeddings', {})
-            num_ern_to_show = min(4, len(ern_names))
-
-            if len(ern_data) > 0:
-                # create equal columns for all plots in row 1 (ERN nodes + embeddings)
-                row1_gs = row1_fig.add_gridspec(
-                    1, num_ern_to_show + 2, width_ratios=[1] * num_ern_to_show + [0.1, 0.5]
-                )
-
-                assert len(ern_data) == len(ern_names)
-                assert isinstance(ern_data[0].metadata['full_y'], list)
-
-                vlims = [
-                    np.min([np.min(data.metadata['full_y'][0]) for data in ern_data]),
-                    np.max([np.max(data.metadata['full_y'][0]) for data in ern_data]),
-                ]
-
-                sc = None
-                for i in range(num_ern_to_show):
-                    ax = row1_fig.add_subplot(row1_gs[0, i])
-                    name = ern_names[i]
-                    ern_data_item = ern_data[i]
-
-                    X = ern_data_item.metadata['full_x']
-                    assert isinstance(X, list)
-
-                    x0 = X[0]
-                    assert isinstance(x0, np.ndarray)
-                    assert x0.shape[1] == 1, f'First ERN input is not 1D: {x0.shape}'
-
-                    x1 = X[1]
-                    assert isinstance(x1, np.ndarray)
-                    assert x1.shape[1] == 1, f'Second ERN input is not 1D: {x1.shape}'
-
-                    Y = ern_data_item.metadata['full_y']
-                    assert isinstance(Y, list)
-                    assert len(Y) == 1, f'ERN has more than one output: {len(Y)}'
-                    y = Y[0]
-                    assert isinstance(y, np.ndarray)
-                    assert y.shape[1] == 1, f'ERN output is not 1D: {y.shape}'
-                    assert y.shape == x0.shape, (
-                        f'ERN output shape mismatch: {y.shape} != {x0.shape}'
-                    )
-
-                    self.add_subplot_letter(ax, chr(65 + i))
-
-                    sc = ax.scatter(
-                        x0.flatten(),
-                        x1.flatten(),
-                        c=y.flatten(),
-                        cmap=DEFAULT_CMAP_NAME,
-                        s=10,
-                        alpha=0.2,
-                        linewidths=0,
-                        vmin=vlims[0],
-                        vmax=vlims[1],
-                    )
-
-                    ax.set_title(f'ERN: {name}', fontsize=12, fontweight='bold')
-                    ax.set_xlabel('Protein Amount', fontsize=10)
-                    ax.set_ylabel('mRNA Amount', fontsize=10)
-
-                    for spine in ax.spines.values():
-                        spine.set_linewidth(0.8)
-                        spine.set_color('gray')
-                    ax.tick_params(width=0.8, length=4, color='gray')
-
-                wspace = self.figure_spec.layout.wspace
-                row1_fig.subplots_adjust(wspace=wspace, right=0.9)
-                if sc is not None:
-                    cbar_ax = row1_fig.add_subplot(row1_gs[0, num_ern_to_show])
-                    cbar = plt.colorbar(sc, cax=cbar_ax)
-                    cbar.solids.set(alpha=1)
-                    cbar.set_label('Surviving mRNA', fontsize=10, labelpad=-60)
-
-                # ERN embeddings plot
-                ax_ern_emb = row1_fig.add_subplot(row1_gs[0, -1])
-                self.add_subplot_letter(ax_ern_emb, chr(65 + num_ern_to_show))
-
-                # Sort by embedding value
-                sorted_ern = sorted(ern_embeddings.items(), key=lambda x: x[1][0])
-                names = [item[0] for item in sorted_ern]
-                values = [item[1][0] for item in sorted_ern]
-
-                norm = mpl.colors.Normalize(vmin=min(values), vmax=max(values))
-
-                y_pos = np.arange(len(names))
-                bars = ax_ern_emb.barh(
-                    y_pos,
-                    values,
-                    color=[truncated_cmap(norm(val)) for val in values],
-                    edgecolor='black',
-                    height=0.7,
-                )
-
-                ax_ern_emb.set_yticks(y_pos)
-                ax_ern_emb.set_yticklabels(names, fontsize=8)
-                ax_ern_emb.set_title('ERN embeddings', fontsize=11, fontweight='bold')
-                ax_ern_emb.set_xlabel('Value', fontsize=9)
-
-                for spine in ax_ern_emb.spines.values():
-                    spine.set_linewidth(0.8)
-                    spine.set_color('gray')
-                ax_ern_emb.tick_params(width=0.8, length=4, color='gray')
-                ax_ern_emb.invert_yaxis()
-
-            # row 2: simple inner nodes, translation, and uORF embeddings
-            row2_fig = subfigs[1]
-
-            basic_data = data['basic_data']
-            basic_node_types = data['basic_node_types']
-            num_basic_nodes = len(basic_node_types)
-
-            row2_gs = row2_fig.add_gridspec(
-                1, num_basic_nodes + 2, width_ratios=[1] * (num_basic_nodes + 1) + [0.5]
-            )
-
-            letter_idx = 65 + num_ern_to_show + 1
-
-            # Plot basic nodes
-            for i, (node_type, node_data) in enumerate(zip(basic_node_types, basic_data)):
-                ax = row2_fig.add_subplot(row2_gs[0, i])
-
-                self.add_subplot_letter(ax, chr(letter_idx))
-                letter_idx += 1
-
-                full_x = node_data.metadata['full_x']
-                full_y = node_data.metadata['full_y']
-                n_outputs = len(full_y)
-                n_inputs = len(full_x)
-                assert all([x.shape[1] == 1 for x in full_x]), 'Inputs are not 1D'
-                assert all([y.shape[1] == 1 for y in full_y]), 'Outputs are not 1D'
-
-                if n_outputs > 1:
-                    if n_inputs == 1:  # single input, multiple outputs
-                        allX = [full_x[0].flatten()[:, None]] * n_outputs
-                    else:
-                        assert n_inputs == n_outputs, (
-                            f"n_inputs: {n_inputs}, n_outputs: {n_outputs}"
-                        )
-                        # multiple inputs, multiple outputs, we treat them as separate pairs
-                        allX = [x.flatten()[:, None] for x in full_x]
-                    allY = [y.flatten()[:, None] for y in full_y]
-                    legends = [f'out {i}' for i in range(n_outputs)]
-                else:
-                    if n_inputs > 1:  # multiple inputs, single output
-                        raise ValueError(
-                            f'Multiple inputs, single output not supported: node {i} of {node_type} has {n_inputs} inputs and {n_outputs} outputs'
-                        )
-
-                    else:  # single input, single output
-                        allX = [full_x[0].flatten()[:, None]]
-                        allY = [full_y[0].flatten()[:, None]]
-                        legends = ['']
-
-                colors = truncated_cmap(np.linspace(0, 0.7, len(allX)))
-                xshapes = [x.shape for x in allX]
-                yshapes = [y.shape for y in allY]
-                npoints = len(allX[0])
-                logger.debug(
-                    f'Plotting {len(allX)} inputs and {len(allY)} outputs, {npoints} points'
-                )
-                logger.debug(f'X shapes: {xshapes}, Y shapes: {yshapes}')
-                for j, (X, Y, c, legend) in enumerate(zip(allX, allY, colors, legends)):
-                    ax.scatter(X, Y, s=4, alpha=0.05, linewidth=0, color=c)
-
-                    logger.debug(
-                        f'Plotting inputs with shape {X.shape} and outputs with shape {Y.shape}'
-                    )
-
-                    # calculate trend line using KNN
-                    xquery_min, xquery_max = X.min(), X.max()
-                    res = 200
-                    xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
-
-                    z, _ = knn_stats(
-                        xquery,
-                        Y,
-                        tree=build_tree(X),
-                        avg_method="mean",
-                        min_points=500,
-                        k=1000,
-                        radius=0.1,
-                    )
-
+            colors = self._cmap()(np.linspace(0, 0.7, len(allX)))
+            for j, (X, Y, col, leg) in enumerate(zip(allX, allY, colors, legends)):
+                X, Y = X.reshape(-1, 1), Y.reshape(-1, 1)
+                self._plot(ax, X, Y, labels, size, color=col, add_trend=True)
+                if len(legends) > 1 and leg:
+                    xq, z = self._trend(ax, X, Y)
+                    idx = np.arange(0, 200, 20) + int((j / len(allX)) * 100)
+                    idx = idx[idx < len(z)]
                     ax.plot(
-                        xquery,
-                        z,
-                        linewidth=1,
-                        color='black',
-                        linestyle='dashed',
+                        xq[idx],
+                        z[idx],
+                        marker=["^", "s", "X", "v", "D", "P", "o", "p", "h", "d"][j % 10],
+                        markersize=7,
+                        color="black",
+                        linestyle="None",
+                        label=leg,
+                        markerfacecolor="none",
+                        markeredgewidth=1,
                     )
+            if len(legends) > 1 and any(legends):
+                ax.legend(loc="upper left", fontsize="x-small", frameon=False)
+        else:
+            self._plot(ax, x, y, labels, size)
 
-                    if len(legends) > 1:
-                        marker = ['^', 's', 'X', 'v', 'D', 'P', 'o', 'p', 'h', 'd'][j]
-                        nmarkers = 10
-                        interval_size = res // nmarkers
-                        offset = (j / len(allX)) * (res * 0.5 / nmarkers)
-                        marker_idx = np.arange(0, res, interval_size) + int(offset)
-                        ax.plot(
-                            xquery[marker_idx],
-                            z[marker_idx],
-                            marker=marker,
-                            markersize=7,
-                            color='black',
-                            linestyle='None',
-                            label=legend,
-                            markerfacecolor='none',
-                            markeredgewidth=1,
-                        )
+        ax.set_title(title, fontweight="bold", fontsize=LABEL_FONT_SIZE)
+        self._set_plot_aspect(ax, aspect_ratio)
 
-                ax.set_title(f'{node_type}', fontsize=12, fontweight='bold')
-                ax.set_xlabel('Input (latent)', fontsize=10)
-                # show labels if more than one plot
-                if len(legends) > 1:
-                    ax.legend(
-                        loc='upper left',
-                        fontsize='x-small',
-                        frameon=False,
-                        facecolor='white',
-                    )
+    def _plot_ern_row(self, row_fig: mpl.figure.SubFigure, ern_nodes: List[NodeData]) -> int:
+        row_fig.suptitle("ERN Nodes and Embeddings", fontsize=16, y=1.0, fontweight="bold")
+        row_subfigs = row_fig.subfigures(1, 2, width_ratios=[4, 1], wspace=-0.05)
 
-                if i == 0:
-                    ax.set_ylabel('Output (latent)', fontsize=10)
+        # ── Scatter plots ─────────────────────────────────────────────────────────
+        scatter_sub = row_subfigs[0]
 
-                for spine in ax.spines.values():
-                    spine.set_linewidth(0.8)
-                    spine.set_color('gray')
-                ax.tick_params(width=0.8, length=4, color='gray')
+        num_ern = min(4, len(ern_nodes))
+        # Create a gridspec that allows for configurable height colorbar
+        cbar_empty_ratio = (
+            1.0 - ERN_COLORBAR_HEIGHT_RATIO
+        ) / 2  # split remaining space above/below
+        ern_gs = scatter_sub.add_gridspec(
+            3,
+            num_ern + 1,
+            width_ratios=[1] * num_ern + [ERN_COLORBAR_WIDTH],
+            height_ratios=[cbar_empty_ratio, ERN_COLORBAR_HEIGHT_RATIO, cbar_empty_ratio],
+            wspace=0.3,
+        )
+        vmin = min(node.plot_data.y.min() for node in ern_nodes[:num_ern])
+        vmax = max(node.plot_data.y.max() for node in ern_nodes[:num_ern])
 
-            translation_data = data['translation_data']
-            uorf_names = data['uorf_names']
-            uorf_embeddings = data['uorf_embeddings']
-
-            logger.debug(f"Plotting translation nodes with {len(translation_data)} uORFs")
-
-            ax_trans = row2_fig.add_subplot(row2_gs[0, num_basic_nodes])
-
-            self.add_subplot_letter(ax_trans, chr(letter_idx))
-            letter_idx += 1
-
-            colors = truncated_cmap(np.linspace(0, 1, len(translation_data)))
-
-            for i in range(len(translation_data)):
-                color = colors[i]
-                full_x = translation_data[i].metadata['full_x']
-                full_y = translation_data[i].metadata['full_y']
-                n_outputs = len(full_y)
-                n_inputs = len(full_x)
-                assert all([x.shape[1] == 1 for x in full_x]), 'Inputs are not 1D'
-                assert all([y.shape[1] == 1 for y in full_y]), 'Outputs are not 1D'
-                assert n_inputs == 1, f"Translation node has {n_inputs} inputs"
-                assert n_outputs == 1, f"Translation node has {n_outputs} outputs"
-
-                X = full_x[0]
-                Y = full_y[0]
-
-                logger.debug(f'Plotting translation node {uorf_names[i]} with {X.shape[0]} points')
-                ax_trans.scatter(X, Y, s=1, alpha=0.05, linewidth=0, color=color)
-
-                xquery_min, xquery_max = X.min(), X.max()
-                res = 200
-                xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
-                z = knn_stats(
-                    xquery, Y, tree=build_tree(X), stats="mean", min_points=500, k=5000, radius=0.05
-                )
-
-                ax_trans.plot(xquery, z, linewidth=2, color=color, label=f"{uorf_names[i]}")
-
-            ax_trans.set_title(
-                "Translation\n$\\mathrm{mRNA \\rightarrow PRT}$", fontsize=12, fontweight='bold'
+        sc: mpl.collections.PathCollection | None = None
+        for i in range(num_ern):
+            # Span all 3 rows for the scatter plots
+            ax = scatter_sub.add_subplot(ern_gs[:, i])
+            sc = self._plot(
+                ax,
+                ern_nodes[i].plot_data.x,
+                ern_nodes[i].plot_data.y,
+                LABELS["ERN"],
+                vmin=vmin,
+                vmax=vmax,
+                size=ERN_SAMPLE_SIZE,
             )
-            ax_trans.set_xlabel('Input mRNA (latent)', fontsize=10)
-
-            ax_trans.legend(
-                title="uORFs",
-                loc='upper left',
-                fontsize='x-small',
-                title_fontsize='small',
-                frameon=False,
-                facecolor='white',
+            self._set_plot_aspect(ax, ERN_ASPECT_RATIO)
+            ax.set_title(
+                f"ERN\n({ern_nodes[i].node_name})", fontweight="bold", fontsize=LABEL_FONT_SIZE
             )
 
-            for spine in ax_trans.spines.values():
-                spine.set_linewidth(0.8)
-                spine.set_color('gray')
-            ax_trans.tick_params(width=0.8, length=4, color='gray')
+        # Colour‑bar (fully opaque) - configurable height in middle row
+        if sc is not None:
+            cbar_ax = scatter_sub.add_subplot(ern_gs[1, num_ern])
+            cbar = plt.colorbar(sc, cax=cbar_ax)
+            cbar.set_label("Surviving mRNA", fontsize=10)
+            if hasattr(cbar, "solids"):
+                cbar.solids.set(alpha=1)
+            for coll in cbar.ax.collections:
+                coll.set_alpha(1)
+            for patch in cbar.ax.patches:
+                patch.set_alpha(1)
 
-            # uORF embeddings on right of row 2
-            ax_uorf_emb = row2_fig.add_subplot(row2_gs[0, -1])
+        emb_sub = row_subfigs[1]
+        # Create configurable height for ERN embeddings
+        emb_empty_ratio = (
+            1.0 - ERN_EMBEDDINGS_HEIGHT_RATIO
+        ) / 2  # split remaining space above/below
+        emb_gs = emb_sub.add_gridspec(
+            3, 1, height_ratios=[emb_empty_ratio, ERN_EMBEDDINGS_HEIGHT_RATIO, emb_empty_ratio]
+        )
+        emb_ax = emb_sub.add_subplot(emb_gs[1, 0])  # Use middle row with configurable height
+        self._bar(
+            emb_ax,
+            {node.node_name: node.embedding_value for node in ern_nodes},
+            "ERN Embeddings",
+            orientation="horizontal",
+            labelsize=12,
+            ratio=0.45,
+        )
 
-            self.add_subplot_letter(ax_uorf_emb, chr(letter_idx))
+    def _plot_forward_row(
+        self,
+        row_fig: mpl.figure.SubFigure,
+        basic_nodes: List[NodeData],
+        uorf_nodes: List[NodeData],
+    ) -> int:
+        row_fig.suptitle(f"Forward Nodes", fontsize=16, y=1.0, fontweight="bold")
 
-            names = list(uorf_embeddings.keys())
-            values = [float(uorf_embeddings[name][0]) for name in names]
+        num_forward = len(basic_nodes) + 1  # +1 for the aggregated translation panel
+        forward_gs = row_fig.add_gridspec(
+            1, num_forward, width_ratios=[1] * num_forward, wspace=0.3
+        )
 
-            n_uorfs = len(names)
-            position_colors = truncated_cmap(np.linspace(0, 1, n_uorfs))
+        # Reorder nodes: Source, Transcription, Translation, Output
+        source_transcription = [
+            node for node in basic_nodes if node.node_type in ["Source", "Transcription"]
+        ]
+        output_nodes = [node for node in basic_nodes if node.node_type == "Output"]
 
-            y_pos = np.arange(len(names))
-            bars = ax_uorf_emb.barh(
-                y_pos,
-                values,
-                color=position_colors,
-                height=0.7,
-                edgecolor='black',
-            )
+        # Plot Source and Transcription first
+        col_idx = 0
+        for node in source_transcription:
+            ax = row_fig.add_subplot(forward_gs[0, col_idx])
+            self.plot_node_data(ax, node)
+            col_idx += 1
 
-            ax_uorf_emb.set_yticks(y_pos)
-            ax_uorf_emb.set_yticklabels(names, fontsize=8)
-            ax_uorf_emb.set_title('uORF Embeddings', fontsize=11, fontweight='bold')
-            ax_uorf_emb.set_xlabel('Value', fontsize=9)
+        # Aggregated Translation panel with trend lines per uORF -------------------
+        ax_trans = row_fig.add_subplot(forward_gs[0, col_idx])
+        step = max(1, len(uorf_nodes) // 8)
+        selected_uorfs = uorf_nodes[::step][:8]
+        colors = self._cmap()(np.linspace(0, 1, len(selected_uorfs)))
+        for node, col in zip(selected_uorfs, colors):
+            xq, z = self._trend(ax_trans, node.plot_data.x, node.plot_data.y, k=1_000)
+            ax_trans.plot(xq, z, linewidth=2, color=col, label=node.node_name)
 
-            for spine in ax_uorf_emb.spines.values():
-                spine.set_linewidth(0.8)
-                spine.set_color('gray')
-            ax_uorf_emb.tick_params(width=0.8, length=4, color='gray')
+        ax_trans.set_title("Translation\nmRNA → PRT", fontsize=LABEL_FONT_SIZE, fontweight="bold")
+        ax_trans.set_xlabel("Input mRNA (latent)", fontsize=10)
+        ax_trans.set_ylabel("Output Protein (latent)", fontsize=10)
+        ax_trans.legend(
+            title="uORFs",
+            loc="upper left",
+            fontsize="x-small",
+            title_fontsize="small",
+            frameon=False,
+        )
+        self._set_plot_aspect(ax_trans, OTHER_ASPECT_RATIO)
 
-            wspace = self.figure_spec.layout.wspace
-            row1_fig.subplots_adjust(wspace=wspace, right=0.9)
-            row2_fig.subplots_adjust(wspace=wspace, right=0.9)
+        # Inset with uORF embeddings ----------------------------------------------
+        ax_inset = inset_axes(
+            ax_trans,
+            width="35%",
+            height="25%",
+            loc="lower right",
+            bbox_to_anchor=(-0.01, 0.12, 1, 1),
+            bbox_transform=ax_trans.transAxes,
+        )
+        uorf_embs = {node.node_name: node.embedding_value for node in uorf_nodes}
+        names, values = list(uorf_embs.keys()), list(uorf_embs.values())
+        if len(names) > 8:
+            step = len(names) // 8
+            names, values = names[::step][:8], values[::step][:8]
+        self._bar(ax_inset, list(zip(names, values)), "", orientation="vertical", inset=True)
+        ax_inset.set_title("uORF Embeddings", fontsize=8)
 
-            return fig
+        col_idx += 1
+
+        # Plot Output nodes last
+        for node in output_nodes:
+            ax = row_fig.add_subplot(forward_gs[0, col_idx])
+            self.plot_node_data(ax, node)
+            col_idx += 1
+
+    def _plot_inverse_row(self, row_fig: mpl.figure.SubFigure, inverse_nodes: List[NodeData]):
+        if not inverse_nodes:
+            return
+
+        row_fig.suptitle(f"Inverse Nodes", fontsize=16, y=1.05, fontweight="bold")
+
+        num_inverse = len(inverse_nodes)
+        inverse_gs = row_fig.add_gridspec(
+            1, num_inverse, width_ratios=[1] * num_inverse, wspace=0.3
+        )
+
+        for i, node in enumerate(inverse_nodes):
+            ax = row_fig.add_subplot(inverse_gs[0, i])
+            self.plot_node_data(ax, node)
+
+    def create_innernodes_figure(self, *, figsize: Tuple[int, int] = (20, 15)) -> mpl.figure.Figure:
+        # Gather all node data -----------------------------------------------------
+        all_node_data = self.get_all_node_data_unified(n_samples=self.n_samples)
+
+        ern_nodes = sorted(
+            [nd for nd in all_node_data if nd.embedding_name == "affinity"],
+            key=lambda n: n.embedding_value,
+            reverse=True,
+        )
+
+        uorf_nodes = [nd for nd in all_node_data if nd.embedding_name == "tl_rate"]
+
+        basic_nodes = [nd for nd in all_node_data if nd.embedding_name is None]
+
+        basic_core = [
+            nd for nd in basic_nodes if nd.node_type in ["Source", "Transcription", "Output"]
+        ]
+        inverse_nodes = [
+            nd
+            for nd in basic_nodes
+            if nd.node_type not in ["Source", "Transcription", "Output"] and SHOW_INVERSE_NODES
+        ]
+
+        # Main figure skeleton -----------------------------------------------------
+        fig = plt.figure(figsize=figsize, constrained_layout=False)
+        main_subfigs = fig.subfigures(3, 1, height_ratios=[1, 1, 1], hspace=0.1)
+
+        # Populate rows ------------------------------------------------------------
+        self._plot_ern_row(main_subfigs[0], ern_nodes)
+        self._plot_forward_row(main_subfigs[1], basic_core, uorf_nodes)
+        if SHOW_INVERSE_NODES:
+            self._plot_inverse_row(main_subfigs[2], inverse_nodes)
+
+        # Final figure adjustments
+        fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.05)
+        return fig
 
     def run(self, overwrite=True):
         """Execute the figure creation process"""
-
-        logger.debug("Collecting node data from model")
+        logger.debug("=== InnerNodesFigure.run() STARTED ===")
+        logger.debug(f"Model signature: {self.model.signature}")
+        logger.debug(f"Figure spec output file: {self.figure_spec.output_file}")
+        logger.debug(f"N samples: {self.n_samples}")
+        
         try:
-            all_data = self.collect_node_data()
-
+            logger.debug("Creating figure layout...")
             figax = self.figure_spec.make_figure()
-            self.create_visualization(all_data, figax)
+
+            logger.debug("Generating inner nodes figure...")
+            # Replace the figure with our new implementation
+            new_fig = self.create_innernodes_figure(figsize=self.figure_spec.layout.figsize)
+
+            logger.debug("Replacing figure in figax...")
+            # Replace the figure in figax
+            figax.figure = new_fig
+
+            logger.debug("Finalizing figure...")
             self.figure_spec.finalize(figax)
+            logger.debug("=== InnerNodesFigure.run() COMPLETED SUCCESSFULLY ===")
 
         except Exception as e:
             logger.error(f"Error creating inner nodes figure: {e}")
             import traceback
-
             logger.error(traceback.format_exc())
+            logger.error("=== InnerNodesFigure.run() FAILED ===")
+            raise
