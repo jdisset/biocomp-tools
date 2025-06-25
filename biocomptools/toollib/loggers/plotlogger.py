@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 
 class PlotLogger(Logger):
     jobs: List[DeferredNode[PlotJob]] = []
-    
+
     def initialize(self, training_program):
         """Store save_dir for later use in job construction."""
         super().initialize(training_program)
@@ -52,29 +52,61 @@ class PlotLogger(Logger):
             import dracon as dr
             from dracon.asizeof import asizeof
 
-            for job in self.jobs:
+            for job_idx, job in enumerate(self.jobs):
+                logger.debug(f'Processing job {job_idx + 1}/{len(self.jobs)}: {type(job).__name__}')
+                logger.debug(f'Job content preview: {str(job)[:200]}...')
                 j = job.copy(reroot=True)
                 try:
                     if best_model is not None:
-                        constructed_job = j.construct(
-                            context={
-                                **plot_extra_context,
-                                'best_model': best_model,
-                                'step': step,
-                                'save_dir': self._save_dir,  # Include save_dir in context
-                                # 'step_history': step_history,
-                                # 'stack': stack,
-                                # 'xbatches': xbatches,
-                                # 'ybatches': ybatches,
-                            },
+                        # Create minimal context for inner nodes plot to avoid training_set conflicts
+                        from biocomptools.toollib.figuremakers.innernodes import (
+                            InnerNodesFigure,
+                            InnerNodesFigureSpec,
+                        )
+                        from biocomp.plotutils import FigureSpec, FigureLayout
+
+                        minimal_context = {
+                            'InnerNodesFigure': InnerNodesFigure,
+                            'InnerNodesFigureSpec': InnerNodesFigureSpec,
+                            'FigureSpec': FigureSpec,
+                            'FigureLayout': FigureLayout,
+                            'best_model': best_model,
+                            'step': step,
+                            'save_dir': self._save_dir,
+                        }
+
+                        construction_context = minimal_context
+                        logger.debug(
+                            f'Constructing job {job_idx + 1} with context keys: {list(construction_context.keys())}'
+                        )
+                        logger.debug(
+                            f'Context step={step}, best_model signature={best_model.signature[:16]}..., save_dir={self._save_dir}'
+                        )
+                        try:
+                            constructed_job = j.construct(context=construction_context)
+                        except Exception as construct_error:
+                            logger.error(
+                                f'Construction failed for job {job_idx + 1} at step {step}: {construct_error}'
+                            )
+                            logger.debug(
+                                f'Construction context keys: {list(construction_context.keys())}'
+                            )
+                            logger.debug(f'Job being constructed: {str(j)[:1000]}')
+                            logger.exception(construct_error)
+                            continue
+                        logger.debug(
+                            f'Job {job_idx + 1} constructed successfully: {type(constructed_job).__name__}'
                         )
                         if not isinstance(constructed_job, PlotJob):
                             constructed_job = PlotJob(**constructed_job)
+                        logger.debug(f'Running job {job_idx + 1}...')
                         constructed_job.run()
+                        logger.debug(f'Job {job_idx + 1} completed successfully')
                     else:
                         logger.info('Skipping prediction plots - no best model available yet')
                 except Exception as e:
-                    logger.error(f'Error plotting job: {e}')
+                    logger.error(f'Error plotting job {job_idx + 1}: {e}')
+                    logger.debug(f'Failed job details: {str(job)[:500]}')
                     logger.exception(e)
                     continue
 
