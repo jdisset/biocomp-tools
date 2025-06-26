@@ -31,4 +31,5 @@ dependencies = [
 biocomp-plot= "biocomptools.plot:main"
 biocomp-train= "biocomptools.run_training:main"
 biocomp-check = "biocomptools.test_dataset:main"
+biocomp-updatedb = "biocomptools.update_biocompdb:main"
 
