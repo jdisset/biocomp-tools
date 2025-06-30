@@ -16,6 +16,7 @@ class Logger(BaseModel):
 
     periods: Union[int, List[int]] = 1  # Number of steps between logs or list of periods
     async_ok: bool = True  # whether this logger can run async (False for fast loggers like console)
+    parallel_ok: bool = False  # whether multiple steps can be processed in parallel for this logger
 
     metadata: Dict[str, Any] = {}
 
