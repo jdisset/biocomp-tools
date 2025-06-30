@@ -13,3 +13,4 @@ pyrightconfig.json
 repo*
 .repo*
 
+.envrc
