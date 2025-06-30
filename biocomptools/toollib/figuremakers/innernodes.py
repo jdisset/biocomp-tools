@@ -22,8 +22,20 @@ NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 ERN_ASPECT_RATIO = 1.0  # square plots for ERN scatter plots
 OTHER_ASPECT_RATIO = 0.8  # slightly taller plots for everything else
 
-ERN_SAMPLE_SIZE = 50_000  # sample size for ERN scatter plots
-NODE_SAMPLE_SIZE = 20_000  # sample size for other node plots
+SCATTER_ALPHA = 0.2
+CMAP_MIN = 0.3  # lower bound for colormap truncation
+CMAP_MAX = 1.0  # upper bound for colormap truncation
+
+ERN_SCATTER_ALPHA = 1
+ERN_CMAP_MIN = 0.0
+ERN_CMAP_MAX = 1.0
+
+
+ERN_SAMPLE_SIZE = 100_000  # sample size for ERN scatter plots
+NODE_SAMPLE_SIZE = 30_000  # sample size for other node plots
+N_PREDICT_SAMPLES = 100_000
+TREND_K = 1000
+
 
 SHOW_INVERSE_NODES = True
 LABEL_FONT_SIZE = 12
@@ -114,11 +126,11 @@ class InnerNodesFigure(Figure):
 
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
 
-    def _cmap(self) -> mpl.colors.Colormap:
+    def _cmap(self, cmin: float = CMAP_MIN, cmax: float = CMAP_MAX) -> mpl.colors.Colormap:
         """Truncated colormap – keeps lower part light for readability."""
         return mpl.colors.LinearSegmentedColormap.from_list(
             f"trunc_{DEFAULT_CMAP_NAME}",
-            plt.colormaps.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(0.3, 1, 256)),
+            plt.colormaps.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(cmin, cmax, 256)),
             N=256,
         )
 
@@ -161,12 +173,15 @@ class InnerNodesFigure(Figure):
         y: np.ndarray,
         labels: Dict[str, str],
         size: int = NODE_SAMPLE_SIZE,
+        scatter_alpha: float = SCATTER_ALPHA,
         *,
         add_colorbar: bool = False,
         vmin: float | None = None,
         vmax: float | None = None,
         color: Any | None = None,
         add_trend: bool = True,
+        cmap_min: float = CMAP_MIN,
+        cmap_max: float = CMAP_MAX,
     ) -> mpl.collections.PathCollection | None:
         """Generic scatter / line plot helper – returns the scatter for colour‑bar handling."""
         x, y = self._sample(x, y, size)
@@ -177,9 +192,9 @@ class InnerNodesFigure(Figure):
                 x[:, 0],
                 x[:, 1],
                 c=y.flatten(),
-                cmap=self._cmap(),
+                cmap=self._cmap(cmin=cmap_min, cmax=cmap_max),
                 s=10,
-                alpha=0.2,
+                alpha=scatter_alpha,
                 linewidths=0,
                 vmin=vmin,
                 vmax=vmax,
@@ -270,7 +285,7 @@ class InnerNodesFigure(Figure):
         return {k: float(v[0]) for k, v in zip(cleaned_names, uorf_values)}
 
     def prepare_all_networks_and_specs(
-        self, *, n_samples: int = 50_000
+        self, *, n_samples: int = N_PREDICT_SAMPLES
     ) -> Tuple[List[Network], List[NodeSpec], List[np.ndarray]]:
         all_networks: List[Network] = []
         all_node_specs: List[NodeSpec] = []
@@ -353,7 +368,7 @@ class InnerNodesFigure(Figure):
             invert_on_build=True,
         )
         basic_node_configs: List[Dict[str, Any]] = [
-            {"name": "Source", "node_id": 7, "display_name": "DNA → DNA"},
+            {"name": "Source", "node_id": 7, "display_name": "plasmid count → DNA"},
             {"name": "Transcription", "node_id": 3, "display_name": "DNA → mRNA"},
             {"name": "Output", "node_id": 0, "display_name": "PRT → fluo"},
         ]
@@ -364,9 +379,9 @@ class InnerNodesFigure(Figure):
             for row_id, row in basic_network.compute_graph.iterrows():
                 if getattr(row, "is_inverse_of", None) is not None:
                     type_map = {
-                        "inv_source": "DNA ← DNA",
-                        "inv_transcription": "mRNA ← DNA",
-                        "inv_translation": "mRNA ← PRT",
+                        "inv_source": "DNA → plasmid count",
+                        "inv_transcription": "mRNA → DNA",
+                        "inv_translation": "Fluo → mRNA",
                     }
                     display_name = type_map.get(row.type, f"Inverse {row.type}")
                     basic_node_configs.append(
@@ -397,7 +412,7 @@ class InnerNodesFigure(Figure):
 
         return all_networks, all_node_specs, all_inputs
 
-    def get_all_node_data_unified(self, *, n_samples: int = 50_000) -> List[NodeData]:
+    def get_all_node_data_unified(self, *, n_samples: int = N_PREDICT_SAMPLES) -> List[NodeData]:
         """Get all node data using a single, unified NetworkPrediction call."""
         networks, node_specs, inputs = self.prepare_all_networks_and_specs(n_samples=n_samples)
         nmod = NetworkModel(model=self.model, network=networks)
@@ -529,16 +544,18 @@ class InnerNodesFigure(Figure):
                 ern_nodes[i].plot_data.x,
                 ern_nodes[i].plot_data.y,
                 LABELS["ERN"],
+                scatter_alpha=ERN_SCATTER_ALPHA,
                 vmin=vmin,
                 vmax=vmax,
                 size=ERN_SAMPLE_SIZE,
+                cmap_min=ERN_CMAP_MIN,
+                cmap_max=ERN_CMAP_MAX,
             )
             self._set_plot_aspect(ax, ERN_ASPECT_RATIO)
             ax.set_title(
                 f"ERN\n({ern_nodes[i].node_name})", fontweight="bold", fontsize=LABEL_FONT_SIZE
             )
 
-        # Colour‑bar (fully opaque) - configurable height in middle row
         if sc is not None:
             cbar_ax = scatter_sub.add_subplot(ern_gs[1, num_ern])
             cbar = plt.colorbar(sc, cax=cbar_ax)
@@ -600,7 +617,17 @@ class InnerNodesFigure(Figure):
         selected_uorfs = uorf_nodes[::step][:8]
         colors = self._cmap()(np.linspace(0, 1, len(selected_uorfs)))
         for node, col in zip(selected_uorfs, colors):
-            xq, z = self._trend(ax_trans, node.plot_data.x, node.plot_data.y, k=1_000)
+            self._plot(
+                ax_trans,
+                node.plot_data.x,
+                node.plot_data.y,
+                LABELS["Translation"],
+                size=NODE_SAMPLE_SIZE,
+                color=col,
+                scatter_alpha=0.1,
+                add_trend=False,
+            )
+            xq, z = self._trend(ax_trans, node.plot_data.x, node.plot_data.y, k=TREND_K)
             ax_trans.plot(xq, z, linewidth=2, color=col, label=node.node_name)
 
         ax_trans.set_title("Translation\nmRNA → PRT", fontsize=LABEL_FONT_SIZE, fontweight="bold")
@@ -698,7 +725,7 @@ class InnerNodesFigure(Figure):
         logger.debug(f"Model signature: {self.model.signature}")
         logger.debug(f"Figure spec output file: {self.figure_spec.output_file}")
         logger.debug(f"N samples: {self.n_samples}")
-        
+
         try:
             logger.debug("Creating figure layout...")
             figax = self.figure_spec.make_figure()
@@ -718,6 +745,7 @@ class InnerNodesFigure(Figure):
         except Exception as e:
             logger.error(f"Error creating inner nodes figure: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             logger.error("=== InnerNodesFigure.run() FAILED ===")
             raise
