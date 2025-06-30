@@ -75,6 +75,13 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
             # compute overall metrics
             mse = float(np.mean((y_rep - yhat_rep) ** 2))
             rmse = float(np.sqrt(mse))
+            
+            # Debug logging to trace data values
+            logger.info(f"Rep {rep_idx}: DetailedTraining - y_rep stats: mean={y_rep.mean():.6f}, std={y_rep.std():.6f}, shape={y_rep.shape}")
+            logger.info(f"Rep {rep_idx}: DetailedTraining - yhat_rep stats: mean={yhat_rep.mean():.6f}, std={yhat_rep.std():.6f}")
+            if y_rep.shape[0] >= 5:
+                logger.info(f"Rep {rep_idx}: DetailedTraining - First 5 y values: {y_rep[:5, 0]}")
+                logger.info(f"Rep {rep_idx}: DetailedTraining - First 5 yhat values: {yhat_rep[:5, 0]}")
 
             # Debug: compare with sublosses RMSE if available
             if 'sublosses' in step_data and step_data['sublosses'] is not None:
@@ -189,6 +196,14 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
                     mse = np.mean((net_y - net_yhat) ** 2)
                     rmse = np.sqrt(mse)
                     network_name = network.name
+                    
+                    # Debug logging for per-network
+                    if i == 0:  # Log first network
+                        logger.info(f"DetailedTraining Per-Network {network_name} - net_y stats: mean={net_y.mean():.6f}, std={net_y.std():.6f}, shape={net_y.shape}")
+                        logger.info(f"DetailedTraining Per-Network {network_name} - net_yhat stats: mean={net_yhat.mean():.6f}, std={net_yhat.std():.6f}")
+                        if net_y.shape[0] >= 5:
+                            logger.info(f"DetailedTraining Per-Network {network_name} - First 5 y: {net_y[:5, 0]}")
+                            logger.info(f"DetailedTraining Per-Network {network_name} - First 5 yhat: {net_yhat[:5, 0]}")
                     networkdatapair = {
                         'network_name': network_name,
                         'network_hash': getattr(network, 'hash', ''),

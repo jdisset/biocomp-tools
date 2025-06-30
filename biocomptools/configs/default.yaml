@@ -64,7 +64,7 @@ logging:
     dev_debug: "%(asctime)s.%(msecs)03d %(levelname)-8s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
 
   levels:
-    !if "${getenv('BCTOOLS_DEBUG', False)}":
+    !if ${getenv('BCTOOLS_DEBUG', 0)}:
       then:
         biocomptools.run_training: DEBUG
         biocomptools.toollib.datasources: DEBUG
@@ -92,25 +92,25 @@ logging:
         biocomptools.modelmodel: INFO
         biocomptools.plot: INFO
 
-  !if "${getenv('BC_DEBUG', False)}":
-    then:
-      biocomp: DEBUG
-      biocomp.train: DEBUG
-      biocomp.nodes: DEBUG
-      biocomp.quantization: DEBUG
-      biocomp.compute: DEBUG
-      biocomp.network: DEBUG
-      biocomp.networks: DEBUG
-      biocomp.plotutils: DEBUG
-    else:
-      biocomp: INFO
-      biocomp.train: INFO
-      biocomp.nodes: INFO
-      biocomp.quantization: INFO
-      biocomp.compute: INFO
-      biocomp.network: INFO
-      biocomp.networks: INFO
-      biocomp.plotutils: INFO
+    !if ${getenv('BC_DEBUG', 0)}:
+      then:
+        # biocomp: DEBUG
+        biocomp.train: DEBUG
+        biocomp.nodes: DEBUG
+        biocomp.quantization: DEBUG
+        biocomp.compute: DEBUG
+        # biocomp.network: DEBUG
+        # biocomp.networks: DEBUG
+        # biocomp.plotutils: DEBUG
+      else:
+        biocomp: INFO
+        biocomp.train: INFO
+        biocomp.nodes: INFO
+        biocomp.quantization: INFO
+        biocomp.compute: INFO
+        biocomp.network: INFO
+        biocomp.networks: INFO
+        biocomp.plotutils: INFO
 
     dracon.commandline: INFO
     dracon.interpolation: INFO

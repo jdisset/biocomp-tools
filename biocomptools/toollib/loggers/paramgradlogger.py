@@ -524,11 +524,22 @@ def _plot_parameter_section(
         )
         gvalues, (gnames, _) = flatten_PTree(grads_data)
 
-        # Filter gradients to match filtered parameters
+        # Create a mapping of gradient names to values for efficient lookup
+        gname_to_value = {}
+        for gname, gvalue in zip(gnames, gvalues):
+            # Convert to comparable format (both as strings of the path)
+            gname_str = str(gname.actual_path if hasattr(gname, "actual_path") else gname)
+            gname_to_value[gname_str] = gvalue
+
+        # Match gradients to filtered parameters by name
         gvalues_filtered = []
-        for i in filtered_indices:
-            if i < len(gvalues):
-                gvalues_filtered.append(gvalues[i])
+        for pname in pnames_filtered:
+            # Convert parameter name to comparable format
+            pname_str = str(pname.actual_path if hasattr(pname, "actual_path") else pname)
+
+            # Look up the corresponding gradient by name
+            if pname_str in gname_to_value:
+                gvalues_filtered.append(gname_to_value[pname_str])
             else:
                 # If gradient doesn't exist for this parameter, mark as None
                 gvalues_filtered.append(None)
