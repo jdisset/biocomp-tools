@@ -72,6 +72,8 @@ callstack_params:
     xlims: ${xlims}
     ylims: ${ylims}
     vlims: ${vlims}
+    heatmap_params:
+      bad_color: "#ffffff"
 
     colorbar_params:
       size: [0.06, 0.85]
@@ -85,7 +87,7 @@ callstack_params:
     smooth_2d_params:
       draw_colorbar: false
       heatmap_params:
-        bad_color: "#EEEEEE00"
+        bad_color: "#ffffff"
         image_interpolation: "bilinear"
     xlims: ${xlims}
     ylims: ${ylims}
