@@ -54,6 +54,14 @@ RICH_PROGRESS_COLUMNS = [
 ]
 
 
+def should_ignore_path(path: Path, ignore_dirs: List[str]) -> bool:
+    """Check if path contains any of the ignored directory names."""
+    path_str = path.as_posix()
+    return any(f"/{ignore_dir}/" in f"/{path_str}/" or path_str.endswith(f"/{ignore_dir}") 
+               or path_str.startswith(f"{ignore_dir}/") or path_str == ignore_dir
+               for ignore_dir in ignore_dirs)
+
+
 class WorkerError(Exception):
     def __init__(self, message: str, path_info: Optional[str | Path] = None):
         super().__init__(f"{message}{f' (path: {path_info})' if path_info else ''}")
@@ -81,6 +89,7 @@ class ExperimentWorkerArgs(BaseModel):
     n_inner_workers: int
     delete_existing: bool = True
     verbose: bool
+    ignore_dirs: List[str] = Field(default_factory=list)
     model_config = {'arbitrary_types_allowed': True}
 
 
@@ -580,7 +589,7 @@ def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
             p
             for pat in args.config_calib_paths
             for p in (xp_root_fs / pat).rglob('*.parquet')
-            if (xp_root_fs / pat).is_dir()
+            if (xp_root_fs / pat).is_dir() and not should_ignore_path(p, args.ignore_dirs)
         }
     )
 
@@ -666,6 +675,7 @@ class BiocompDBUpdater(BaseModel):
     process_models: Annotated[bool, Arg(help="Process trained models")] = True
     process_figures: Annotated[bool, Arg(help="Process figures and plots")] = True
     nworkers: Annotated[int, Arg(help="Number of parallel workers")] = 8
+    ignore_dirs: Annotated[List[str], Arg(help="List of directory names to ignore")] = Field(default_factory=lambda: ["__archived"])
 
     _logger: logging.Logger = PrivateAttr()
     _metadata_exclusion_patterns: List[str] = PrivateAttr(
@@ -683,6 +693,10 @@ class BiocompDBUpdater(BaseModel):
     def _resolve_path(p: Path | str, base: Optional[Path] = None) -> Path:
         path = Path(p)
         return (base / path if base and not path.is_absolute() else path).expanduser().resolve()
+
+    def _should_ignore_path(self, path: Path) -> bool:
+        """Check if path contains any of the ignored directory names."""
+        return should_ignore_path(path, self.ignore_dirs)
 
     def _configure_logger(self):
         self._logger = logging.getLogger('biocomp_db')
@@ -743,7 +757,7 @@ class BiocompDBUpdater(BaseModel):
             self._logger.error(f"experiments root {self.xp_dir} not found.")
             return {}
 
-        xp_cand_dirs = sorted([d for d in self.xp_dir.iterdir() if d.is_dir()])
+        xp_cand_dirs = sorted([d for d in self.xp_dir.iterdir() if d.is_dir() and not self._should_ignore_path(d)])
         xps: Dict[str, md.Experiment] = {}
         tid = progress.add_task("[cyan]Parsing experiment files...", total=len(xp_cand_dirs))
         with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
@@ -822,7 +836,8 @@ class BiocompDBUpdater(BaseModel):
                 self._logger.info(f"Models dir {self.models_dir} not found")
                 return [], [], [], [], [], []
             mpaths = [
-                p for p in self.models_dir.rglob('*model.p*kl*') if 'checkpoints/' not in p.as_posix()
+                p for p in self.models_dir.rglob('*model.p*kl*') 
+                if 'checkpoints/' not in p.as_posix() and not self._should_ignore_path(p)
             ]
             self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
             if not mpaths:
@@ -874,7 +889,7 @@ class BiocompDBUpdater(BaseModel):
                 p
                 for pat in ['**/*.pdf', '**/*.png']
                 for p in self.plots_dir.rglob(pat)
-                if '__archive' not in p.as_posix()
+                if not self._should_ignore_path(p)
             ]
             self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
             if not fig_paths:
@@ -1015,6 +1030,7 @@ class BiocompDBUpdater(BaseModel):
                             metadata_exclusion_patterns=self._metadata_exclusion_patterns,
                             n_inner_workers=max(1, self.nworkers // 2 if self.nworkers > 1 else 1),
                             verbose=self.verbose,
+                            ignore_dirs=self.ignore_dirs,
                         )
                         for xp_obj in xps_map.values()
                     ]
