@@ -417,11 +417,18 @@ class TrainingSetLink(BiocompDB, table=True):
     dataset_hash: str = Field(foreign_key="dataset.hash", primary_key=True)
 
 
+class DataSetNetworkDataPair(BiocompDB, table=True):
+    dataset_name: Optional[str] = Field(foreign_key="dataset.name", primary_key=True)
+    dataset_hash: str = Field(foreign_key="dataset.hash", primary_key=True)
+    network_name: str = Field(foreign_key="networkdatapair.network_name", primary_key=True)
+    datafile_path: str = Field(foreign_key="networkdatapair.datafile_path", primary_key=True)
+
+
 class DataSet(BiocompDB, table=True):
     name: Optional[str] = Field(primary_key=True, default=None)
     hash: str = Field(primary_key=True)
-    
-    # relationships  
+
+    # relationships
     trained_models: List["TrainedModel"] = Relationship(
         back_populates="training_dataset",
         link_model=TrainingSetLink,
@@ -430,32 +437,37 @@ class DataSet(BiocompDB, table=True):
             "secondaryjoin": "TrainedModel.name == TrainingSetLink.trained_model_name",
         },
     )
+
     metrics: List["Metric"] = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "[Metric.on_dataset_name, Metric.on_dataset_hash]",
-            "primaryjoin": "and_(DataSet.name == Metric.on_dataset_name, DataSet.hash == Metric.on_dataset_hash)"
+            "primaryjoin": "and_(DataSet.name == Metric.on_dataset_name, DataSet.hash == Metric.on_dataset_hash)",
         }
     )
-    
+
+    # auto relationship to get all NetworkDataPair objects in this dataset
+    network_data_pairs: List["NetworkDataPair"] = Relationship(
+        link_model=DataSetNetworkDataPair,
+        sa_relationship_kwargs={
+            "primaryjoin": "and_(DataSet.name == DataSetNetworkDataPair.dataset_name, DataSet.hash == DataSetNetworkDataPair.dataset_hash)",
+            "secondaryjoin": "and_(NetworkDataPair.network_name == DataSetNetworkDataPair.network_name, NetworkDataPair.datafile_path == DataSetNetworkDataPair.datafile_path)",
+        },
+    )
+
     @classmethod
-    def from_network_data_pairs(cls, network_data_pairs: List["NetworkDataPair"], name: Optional[str] = None):
+    def from_network_data_pairs(
+        cls, network_data_pairs: List["NetworkDataPair"], name: Optional[str] = None
+    ):
         """Create a DataSet from a list of NetworkDataPair objects"""
         # Create ordered string dump for hash computation
         pair_strings = []
         for pair in sorted(network_data_pairs, key=lambda x: (x.network_name, x.datafile_path)):
             pair_strings.append(f"{pair.network_name}:{pair.datafile_path}")
-        
+
         content = "\n".join(pair_strings)
         hash_val = pronounceable_hash32(content.encode('utf-8'))
-        
+
         return cls(name=name, hash=hash_val)
-
-
-class DataSetNetworkDataPair(BiocompDB, table=True):
-    dataset_name: Optional[str] = Field(foreign_key="dataset.name", primary_key=True)
-    dataset_hash: str = Field(foreign_key="dataset.hash", primary_key=True)
-    network_name: str = Field(foreign_key="networkdatapair.network_name", primary_key=True)
-    datafile_path: str = Field(foreign_key="networkdatapair.datafile_path", primary_key=True)
 
 
 class NetworkDataPair(BiocompDB, table=True):
@@ -467,7 +479,7 @@ class NetworkDataPair(BiocompDB, table=True):
 
     # Remove old many-to-many relationship with TrainedModel
     # trained_models: List["TrainedModel"] = Relationship(...)
-    
+
     # metrics computed on this specific network-data pair
     # metrics: List["Metric"] = Relationship()
 
@@ -491,65 +503,66 @@ class TrainedModel(BiocompDB, table=True):
     end_loss: Optional[float] = Field(default=None)
 
     training_config: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    
+
     # Direct relationship to training dataset
     training_dataset_name: Optional[str] = Field(foreign_key="dataset.name", default=None)
     training_dataset_hash: Optional[str] = Field(foreign_key="dataset.hash", default=None)
-    
+
     training_dataset: Optional["DataSet"] = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "[TrainedModel.training_dataset_name, TrainedModel.training_dataset_hash]",
-            "primaryjoin": "and_(TrainedModel.training_dataset_name == DataSet.name, TrainedModel.training_dataset_hash == DataSet.hash)"
+            "primaryjoin": "and_(TrainedModel.training_dataset_name == DataSet.name, TrainedModel.training_dataset_hash == DataSet.hash)",
         }
     )
-    
-    metrics: List["Metric"] = Relationship(back_populates="trained_model")
 
+    metrics: List["Metric"] = Relationship(back_populates="trained_model")
 
 
 class Metric(BiocompDB, table=True):
     # Auto-incrementing primary key
     id: Optional[int] = Field(default=None, primary_key=True)
-    
+
     # Basic metric info
     name: str  # e.g. "RMSE", "grid_RMSE", etc.
     value: float
     n_points: Optional[int] = None  # number of points used to compute metric
-    
+
     # Foreign key relationships (all optional)
     trained_model_name: Optional[str] = Field(foreign_key="trainedmodel.name", default=None)
-    
+
     # Dataset this metric was computed on
     on_dataset_name: Optional[str] = Field(foreign_key="dataset.name", default=None)
     on_dataset_hash: Optional[str] = Field(foreign_key="dataset.hash", default=None)
-    
+
     # Individual NetworkDataPair this metric was computed on
     on_network_name: Optional[str] = Field(foreign_key="networkdatapair.network_name", default=None)
-    on_datafile_path: Optional[str] = Field(foreign_key="networkdatapair.datafile_path", default=None)
-    
+    on_datafile_path: Optional[str] = Field(
+        foreign_key="networkdatapair.datafile_path", default=None
+    )
+
     # Plot that generated this metric (composite foreign key)
     source_plot_figure: Optional[str] = Field(default=None)
     source_plot_position: Optional[int] = Field(default=None)
-    
+
     # metadata
     meta: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    
+
     # relationships
     trained_model: Optional[TrainedModel] = Relationship(back_populates="metrics")
     dataset: Optional["DataSet"] = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "[Metric.on_dataset_name, Metric.on_dataset_hash]",
             "primaryjoin": "and_(DataSet.name == Metric.on_dataset_name, DataSet.hash == Metric.on_dataset_hash)",
-            "overlaps": "metrics"
+            "overlaps": "metrics",
         }
     )
     network_data_pair: Optional["NetworkDataPair"] = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "[Metric.on_network_name, Metric.on_datafile_path]",
-            "primaryjoin": "and_(NetworkDataPair.network_name == Metric.on_network_name, NetworkDataPair.datafile_path == Metric.on_datafile_path)"
+            "primaryjoin": "and_(NetworkDataPair.network_name == Metric.on_network_name, NetworkDataPair.datafile_path == Metric.on_datafile_path)",
         }
     )
-    
+
     # We'll define this relationship with custom join conditions
     # source_plot: Optional["Plot"] = Relationship()
 
@@ -576,7 +589,6 @@ class Plot(BiocompDB, table=True):
     # relationships
     datafile: Optional[DataFile] = Relationship(back_populates="plotted_in")
     # metrics: List["Metric"] = Relationship(back_populates="source_plot")
-
 
 
 class Figure(BiocompDB, table=True):
