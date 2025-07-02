@@ -172,7 +172,7 @@ T = TypeVar('T')
 
 ANNOTATION_STYLE = {
     'color': '#F76665',
-    'linewidth': 3,
+    'linewidth': 2.5,
     'clip_on': False,
     'zorder': 200,
     'linestyle': '--',

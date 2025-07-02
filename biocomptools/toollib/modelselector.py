@@ -230,7 +230,10 @@ class ModelSelector(BaseModel):
         
         try:
             # build base query with eager loading of relationships
-            query = select(TrainedModel).options(selectinload(TrainedModel.training_dataset))
+            query = select(TrainedModel).options(
+                selectinload(TrainedModel.training_dataset).selectinload(DataSet.network_data_pairs),
+                selectinload(TrainedModel.metrics)
+            )
 
             # apply name filters
             if self.name:

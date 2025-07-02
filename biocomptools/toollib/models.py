@@ -517,6 +517,13 @@ class TrainedModel(BiocompDB, table=True):
 
     metrics: List["Metric"] = Relationship(back_populates="trained_model")
 
+    @property
+    def absolute_path_to_model(self):
+        """
+        Returns the absolute path to the model file. When raw, it's relative to BIOCOMP_ROOT.
+        """
+        return Path(config.paths.root) / self.path_to_model
+
 
 class Metric(BiocompDB, table=True):
     # Auto-incrementing primary key

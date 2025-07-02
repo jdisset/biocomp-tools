@@ -137,7 +137,7 @@ def _calculate_single_network_stats(
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
-        assert latent_gt.shape[1] == latent_yhats.shape[1]
+        assert latent_gt.shape[1] == latent_yhat.shape[1]
 
         # Debug traces for validation investigation
         from biocomptools.logging_config import get_logger

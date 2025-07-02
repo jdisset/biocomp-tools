@@ -29,12 +29,19 @@ from biocomptools.toollib.networkprediction import NetworkPrediction
 
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
-from biocomptools.toollib.figuremakers.uorfmatrixfigure import UORFMatrixFigure, bundle_uorf_data, get_uorf_values, extract_uorf_info
+from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
+    UORFMatrixFigure,
+    bundle_uorf_data,
+    get_uorf_values,
+    extract_uorf_info,
+)
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 
+from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
     Regex,
+    iRegex,
     NetworkSet,
     NetworkDataPair,
     NetworkSetUnion,
@@ -93,6 +100,8 @@ DEFAULT_TYPES = [
     FigAx,
     SimpleLayout,
     Regex,
+    iRegex,
+    ModelSelector,
     NetworkPrediction,
     NetworkSelector,
     NetworkSet,
