@@ -772,7 +772,11 @@ def build_data_manager(
         "By now, dataset should only contain NetworkDataPair objects"
     )
 
-    networks, datafiles = zip(*dataset.get_networks_and_data(db_session))
+    net_data = dataset.get_networks_and_data(db_session)
+    if not net_data:
+        raise ValueError("No networks and data found in the dataset. Please check your selectors.")
+
+    networks, datafiles = zip(*net_data)
     data = []
     actual_networks = []
 

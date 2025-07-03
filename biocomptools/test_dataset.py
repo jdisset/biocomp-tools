@@ -83,17 +83,12 @@ T = TypeVar('T')
 MaybeDeferred = DeferredNode[T] | T
 
 
-class TestLoader(BaseModel):
-    training_set: Annotated[NetworkSet, Arg(help='Networks in training set')] = Field(
-        default_factory=NetworkSet
-    )
-
-
 class DatasetTester(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-    training_set: Annotated[NetworkSet, Arg(help='Networks in training set')] = Field(
-        default_factory=NetworkSet
-    )
+
+    dataset: Annotated[
+        NetworkSet, Arg(help='Networks in training set', short='d', is_file=True, positional=True)
+    ]
 
     _lib: Optional[PartsLibrary] = None
 
@@ -117,18 +112,18 @@ class DatasetTester(BaseModel):
 
     def run(self):
         with self.db_session as session:
-            self.training_set.run_selectors(session)
+            self.dataset.run_selectors(session)
 
-        for n in self.training_set.content:
+        for n in self.dataset.content:
             assert isinstance(n, NetworkDataPair)
 
-        logger.info(f"Selectors yielded a total of {len(self.training_set)} networks")
+        logger.info(f"Selectors yielded a total of {len(self.dataset)} networks")
 
         training_dman = build_data_manager(
             lib=self.parts_library,
             db_session=self.db_session,
             path_prefix=self.path_prefix,
-            dataset=self.training_set,
+            dataset=self.dataset,
         )
         print(f"Successfully loaded {len(training_dman._networks)} networks:")
 
@@ -225,7 +220,7 @@ def pretty_print_networks(training_dman):
                         f" !! FOUND {len(name_duplicate)} INSTANCES !!", style="#e63946"
                     )
 
-                network_names.append(f"\n{extra_info}", style="#264653")
+                network_names.append(f"\n{extra_info}", style="#3187A2")
                 if i < len(group) - 1:
                     network_names.append("\n")
 
