@@ -273,6 +273,7 @@ class Recipe(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     content: dict = Field(sa_column=Column(JSON))
     hash: str = Field(default=None)
+    short_name: Optional[str] = None  # for easier display in UI
 
     xp: Optional[str] = Field(foreign_key="experiment.name", default=None)
     file: ForcedOptionalStr = None
@@ -323,13 +324,16 @@ class Recipe(BiocompDB, table=True):
         with open(filepath, 'r') as f:
             content = json5.load(f)
 
-        name = content.get('name', filepath.stem)
+        short_name = content.get('name', filepath.stem)
         if xp_name is not None:
-            name = f"{xp_name}_{name}"
+            name = f"{xp_name}_{short_name}"
+        else:
+            name = short_name
 
         return Recipe(
             name=name,
             content=content,
+            short_name=short_name,
             xp=xp_name,
             file=str(file_path),
             **kwargs,

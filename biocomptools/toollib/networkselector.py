@@ -23,50 +23,37 @@ logger = get_logger(__name__)
 ## {{{                         --     selector     --
 
 
-class Regex(str):
+class RegexString(str):
+    """Base class for regex string types."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.union_schema(
+            [
+                core_schema.is_instance_schema(cls),
+                core_schema.chain_schema(
+                    [
+                        core_schema.str_schema(),
+                        core_schema.no_info_plain_validator_function(cls),
+                    ]
+                ),
+            ]
+        )
+
+    def __new__(cls, string):
+        return super().__new__(cls, string)
+
+
+class Regex(RegexString):
     """A string that should be treated as a regex pattern."""
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, _source_type: Any, _handler: GetCoreSchemaHandler
-    ) -> core_schema.CoreSchema:
-        return core_schema.union_schema(
-            [
-                core_schema.is_instance_schema(cls),
-                core_schema.chain_schema(
-                    [
-                        core_schema.str_schema(),
-                        core_schema.no_info_plain_validator_function(cls),
-                    ]
-                ),
-            ]
-        )
-
-    def __new__(cls, string):
-        return super().__new__(cls, string)
+    pass
 
 
-class iRegex(str):
+class iRegex(RegexString):
     """A string that should be treated as a case-insensitive regex pattern."""
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, _source_type: Any, _handler: GetCoreSchemaHandler
-    ) -> core_schema.CoreSchema:
-        return core_schema.union_schema(
-            [
-                core_schema.is_instance_schema(cls),
-                core_schema.chain_schema(
-                    [
-                        core_schema.str_schema(),
-                        core_schema.no_info_plain_validator_function(cls),
-                    ]
-                ),
-            ]
-        )
-
-    def __new__(cls, string):
-        return super().__new__(cls, string)
+    pass
 
 
 def maybe_regex(s: str) -> str:
@@ -78,6 +65,17 @@ def maybe_regex(s: str) -> str:
         return re.escape(s)
 
 
+def apply_regex_filter(query, column, pattern: str | Regex | iRegex):
+    """Apply regex or exact match filter to a query column."""
+    if isinstance(pattern, iRegex):
+        regex_pattern = f"(?i){pattern}"
+        return query.where(column.regexp_match(regex_pattern))
+    elif isinstance(pattern, Regex):
+        return query.where(column.regexp_match(pattern))
+    else:
+        return query.where(column == pattern)
+
+
 class NetworkSelector(BaseModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
@@ -86,6 +84,7 @@ class NetworkSelector(BaseModel):
 
     experiment_name: Optional[str | Regex | iRegex] = None
     recipe_name: Optional[str | Regex | iRegex] = None
+    recipe_short_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
 
@@ -119,39 +118,26 @@ class NetworkSelector(BaseModel):
 
             if self.experiment_name:
                 logger.debug(f"Applying experiment filter: {self.experiment_name}")
-                if isinstance(self.experiment_name, iRegex):
-                    pattern = f"(?i){self.experiment_name}"
-                    query = query.where(col(Experiment.name).regexp_match(pattern))
-                elif isinstance(self.experiment_name, Regex):
-                    query = query.where(col(Experiment.name).regexp_match(self.experiment_name))
-                else:
-                    query = query.where(Experiment.name == self.experiment_name)
+                query = apply_regex_filter(query, col(Experiment.name), self.experiment_name)
 
             if self.recipe_name:
-                if isinstance(self.recipe_name, iRegex):
-                    # add case-insensitive flag to pattern
-                    pattern = f"(?i){self.recipe_name}"
-                    query = query.where(col(Recipe.name).regexp_match(pattern))
-                elif isinstance(self.recipe_name, Regex):
-                    query = query.where(col(Recipe.name).regexp_match(self.recipe_name))
+                if isinstance(self.recipe_name, (Regex, iRegex)):
+                    query = apply_regex_filter(query, col(Recipe.name), self.recipe_name)
                 else:
-                    if self.experiment_name:
-                        if isinstance(self.experiment_name, (Regex, iRegex)):
-                            # if experiment_name is a regex, we can't construct the exact recipe name
-                            # so we'll need to use a regex that matches the end of the string
-                            query = query.where(
-                                col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
-                            )
-                        else:
-                            # if we have exact experiment name, we can construct the full recipe name
-                            query = query.where(
-                                Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
-                            )
+                    if self.experiment_name and not isinstance(self.experiment_name, (Regex, iRegex)):
+                        # if we have exact experiment name, we can construct the full recipe name
+                        query = query.where(
+                            Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
+                        )
                     else:
-                        # if no experiment name is provided, match any experiment prefix
+                        # if no experiment name or experiment name is regex, match any experiment prefix
                         query = query.where(
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
+
+            if self.recipe_short_name:
+                logger.debug(f"Applying recipe_short_name filter: {self.recipe_short_name}")
+                query = apply_regex_filter(query, col(Recipe.short_name), self.recipe_short_name)
 
             logger.debug(f"Final network query: {query}")
 
@@ -163,8 +149,8 @@ class NetworkSelector(BaseModel):
                 raise ValueError(f"Failed to execute network query: {str(e)}") from e
 
             if not networks:
-                msg = f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}. Query: {query}. Ignoring."
-                logger.error(msg)
+                self._log_helpful_error_message(session, query)
+                return []
 
             # filter by output name if specified
             if self.output_name is not None:
@@ -191,20 +177,9 @@ class NetworkSelector(BaseModel):
                         )
 
                         # add calibration name filter based on type
-                        if isinstance(self.calibration_name, iRegex):
-                            # add case-insensitive flag to pattern
-                            pattern = f"(?i){self.calibration_name}"
-                            datafile_query = datafile_query.where(
-                                col(DataFile.calibration_name).regexp_match(pattern)
-                            )
-                        elif isinstance(self.calibration_name, Regex):
-                            datafile_query = datafile_query.where(
-                                col(DataFile.calibration_name).regexp_match(self.calibration_name)
-                            )
-                        else:
-                            datafile_query = datafile_query.where(
-                                DataFile.calibration_name == self.calibration_name
-                            )
+                        datafile_query = apply_regex_filter(
+                            datafile_query, col(DataFile.calibration_name), self.calibration_name
+                        )
 
                         datafile_query = datafile_query.order_by(col(DataFile.priority).desc())
                         logger.debug(f"Datafile query: {datafile_query}")
@@ -268,6 +243,125 @@ class NetworkSelector(BaseModel):
         except Exception as e:
             logger.exception(e)
             raise
+
+    def _log_helpful_error_message(self, session, original_query):
+        """Provide helpful error messages with available alternatives when no networks are found."""
+        error_parts = []
+        suggestions = []
+        
+        # Basic error message
+        filter_parts = []
+        if self.experiment_name:
+            filter_parts.append(f"experiment '{self.experiment_name}'")
+        if self.recipe_name:
+            filter_parts.append(f"recipe '{self.recipe_name}'")
+        if self.recipe_short_name:
+            filter_parts.append(f"recipe_short_name '{self.recipe_short_name}'")
+        
+        if filter_parts:
+            error_parts.append(f"No networks found for {', '.join(filter_parts)}")
+        else:
+            error_parts.append("No networks found")
+        
+        try:
+            # If we have an experiment name, try to find available recipes for that experiment
+            if self.experiment_name:
+                exp_query = (
+                    select(Recipe)
+                    .join(Experiment)
+                    .join(Network)
+                    .options(
+                        selectinload(Recipe.experiment),
+                        selectinload(Recipe.networks)
+                    )
+                )
+                exp_query = apply_regex_filter(exp_query, col(Experiment.name), self.experiment_name)
+                
+                available_recipes = session.exec(exp_query).all()
+                
+                if available_recipes:
+                    recipe_info = [(r.name, r.short_name) for r in available_recipes]
+                    suggestions.append(f"Available recipes for experiment '{self.experiment_name}': {recipe_info[:10]}{'...' if len(recipe_info) > 10 else ''}")
+                else:
+                    # If no recipes found for experiment, check if experiment exists at all
+                    exp_only_query = select(Experiment)
+                    exp_only_query = apply_regex_filter(exp_only_query, col(Experiment.name), self.experiment_name)
+                    available_experiments = session.exec(exp_only_query).all()
+                    
+                    if available_experiments:
+                        suggestions.append(f"Experiment '{self.experiment_name}' exists but has no recipes with networks")
+                    else:
+                        # Show similar experiment names
+                        all_exp_query = select(Experiment.name).distinct()
+                        all_experiments = [row for row in session.exec(all_exp_query).all()]
+                        suggestions.append(f"Experiment '{self.experiment_name}' not found. Available experiments: {all_experiments[:10]}{'...' if len(all_experiments) > 10 else ''}")
+            
+            # If we have a recipe name or recipe_short_name but no experiment, try to find matching recipes
+            elif self.recipe_name or self.recipe_short_name:
+                recipe_query = (
+                    select(Recipe)
+                    .join(Experiment)
+                    .join(Network)
+                    .options(
+                        selectinload(Recipe.experiment),
+                        selectinload(Recipe.networks)
+                    )
+                )
+                
+                # Apply recipe_name filter if specified
+                if self.recipe_name:
+                    if isinstance(self.recipe_name, (Regex, iRegex)):
+                        recipe_query = apply_regex_filter(recipe_query, col(Recipe.name), self.recipe_name)
+                    else:
+                        # For exact recipe name, try partial match
+                        recipe_query = recipe_query.where(col(Recipe.name).regexp_match(f".*_{self.recipe_name}$"))
+                
+                # Apply recipe_short_name filter if specified
+                if self.recipe_short_name:
+                    recipe_query = apply_regex_filter(recipe_query, col(Recipe.short_name), self.recipe_short_name)
+                
+                available_recipes = session.exec(recipe_query).all()
+                
+                if available_recipes:
+                    recipe_info = [(r.name, r.short_name, r.experiment.name) for r in available_recipes]
+                    filter_desc = []
+                    if self.recipe_name:
+                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
+                    if self.recipe_short_name:
+                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    filter_text = " and ".join(filter_desc)
+                    suggestions.append(f"Available recipes matching {filter_text}: {recipe_info[:10]}{'...' if len(recipe_info) > 10 else ''}")
+                else:
+                    filter_desc = []
+                    if self.recipe_name:
+                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
+                    if self.recipe_short_name:
+                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    filter_text = " and ".join(filter_desc)
+                    suggestions.append(f"No recipes found matching {filter_text}")
+            
+            # Add calibration info if specified
+            if self.calibration_name:
+                error_parts.append(f"calibration '{self.calibration_name}'")
+                
+                
+            # Add output name info if specified  
+            if self.output_name:
+                error_parts.append(f"output '{self.output_name}'")
+                
+        except Exception as e:
+            logger.debug(f"Error while generating helpful error message: {e}")
+            suggestions.append("Unable to query for suggestions due to database error")
+        
+        # Construct final error message
+        main_error = ", ".join(error_parts)
+        if suggestions:
+            suggestion_text = "\n  ".join(suggestions)
+            full_message = f"{main_error}.\n  Suggestions:\n  {suggestion_text}"
+        else:
+            full_message = f"{main_error}. No suggestions available."
+            
+        logger.error(full_message)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -424,27 +518,15 @@ class NetworkSet(BaseModel):
         return f"{self.__class__.__name__}[{len(self.content)} items]"
 
 
-class NetworkSetUnion(NetworkSet):
-    """
-    A union of multiple NetworkSets. (and itself)
-    """
+class NetworkSetOperation(NetworkSet):
+    """Base class for set operations."""
 
     sets: List[NetworkSet] = []
     # exclude from export:
     model_config = ConfigDict(exclude={'sets'})
 
-    allow_duplicates: bool = False
-
-    @model_validator(mode='before')
-    @classmethod
-    def normalize_list_input_to_sets(cls, data: Any) -> Any:
-        logger.debug(f"NetworkSetUnion.normalize_list_input_to_sets received: {data}")
-        if isinstance(data, list):
-            # assume the list items are the sets
-            return {"sets": data}
-        return data
-
-    def update_name(self):
+    def _update_name_with_operator(self, operator: str):
+        """Update name with given operator between set names."""
         if self.name is not None:
             return
         if any(s.name is None for s in self.sets):
@@ -453,8 +535,28 @@ class NetworkSetUnion(NetworkSet):
         for i, s in enumerate(self.sets):
             name += f"({s.name})"
             if i < len(self.sets) - 1:
-                name += ' U '
+                name += operator
         self.name = name
+
+
+class NetworkSetUnion(NetworkSetOperation):
+    """
+    A union of multiple NetworkSets. (and itself)
+    """
+
+    allow_duplicates: bool = False
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_list_input_to_sets(cls, data: Any) -> Any:
+        logger.debug(f"{cls.__name__}.normalize_list_input_to_sets received: {data}")
+        if isinstance(data, list):
+            # assume the list items are the sets
+            return {"sets": data}
+        return data
+
+    def update_name(self):
+        self._update_name_with_operator(' U ')
 
     def run_selectors(self, session=None):
         try:
@@ -477,33 +579,23 @@ class NetworkSetUnion(NetworkSet):
             raise e
 
 
-class NetworkSetIntersection(NetworkSet):
+class NetworkSetIntersection(NetworkSetOperation):
     """
     An intersection of multiple NetworkSets. (and itself)
     """
-
-    sets: List[NetworkSet] = []
+    pass
 
     @model_validator(mode='before')
     @classmethod
     def normalize_list_input_to_sets(cls, data: Any) -> Any:
-        logger.debug(f"NetworkSetIntersection.normalize_list_input_to_sets received: {data}")
+        logger.debug(f"{cls.__name__}.normalize_list_input_to_sets received: {data}")
         if isinstance(data, list):
             # assume the list items are the sets
             return {"sets": data}
         return data
 
     def update_name(self):
-        if self.name is not None:
-            return
-        if any(s.name is None for s in self.sets):
-            return
-        name = ''
-        for i, s in enumerate(self.sets):
-            name += f"({s.name})"
-            if i < len(self.sets) - 1:
-                name += ' ∩ '
-        self.name = name
+        self._update_name_with_operator(' ∩ ')
 
     def run_selectors(self, session=None):
         try:
