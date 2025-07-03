@@ -48,11 +48,13 @@ class RegexString(str):
 
 class Regex(RegexString):
     """A string that should be treated as a regex pattern."""
+
     pass
 
 
 class iRegex(RegexString):
     """A string that should be treated as a case-insensitive regex pattern."""
+
     pass
 
 
@@ -84,7 +86,6 @@ class NetworkSelector(BaseModel):
 
     experiment_name: Optional[str | Regex | iRegex] = None
     recipe_name: Optional[str | Regex | iRegex] = None
-    recipe_short_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
 
@@ -124,7 +125,9 @@ class NetworkSelector(BaseModel):
                 if isinstance(self.recipe_name, (Regex, iRegex)):
                     query = apply_regex_filter(query, col(Recipe.name), self.recipe_name)
                 else:
-                    if self.experiment_name and not isinstance(self.experiment_name, (Regex, iRegex)):
+                    if self.experiment_name and not isinstance(
+                        self.experiment_name, (Regex, iRegex)
+                    ):
                         # if we have exact experiment name, we can construct the full recipe name
                         query = query.where(
                             Recipe.name == f"{self.experiment_name}_{self.recipe_name}"
@@ -134,10 +137,6 @@ class NetworkSelector(BaseModel):
                         query = query.where(
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
-
-            if self.recipe_short_name:
-                logger.debug(f"Applying recipe_short_name filter: {self.recipe_short_name}")
-                query = apply_regex_filter(query, col(Recipe.short_name), self.recipe_short_name)
 
             logger.debug(f"Final network query: {query}")
 
@@ -248,21 +247,12 @@ class NetworkSelector(BaseModel):
         """Provide helpful error messages with available alternatives when no networks are found."""
         error_parts = []
         suggestions = []
-        
+
         # Basic error message
-        filter_parts = []
-        if self.experiment_name:
-            filter_parts.append(f"experiment '{self.experiment_name}'")
-        if self.recipe_name:
-            filter_parts.append(f"recipe '{self.recipe_name}'")
-        if self.recipe_short_name:
-            filter_parts.append(f"recipe_short_name '{self.recipe_short_name}'")
-        
-        if filter_parts:
-            error_parts.append(f"No networks found for {', '.join(filter_parts)}")
-        else:
-            error_parts.append("No networks found")
-        
+        error_parts.append(
+            f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}'"
+        )
+
         try:
             # If we have an experiment name, try to find available recipes for that experiment
             if self.experiment_name:
@@ -270,89 +260,79 @@ class NetworkSelector(BaseModel):
                     select(Recipe)
                     .join(Experiment)
                     .join(Network)
-                    .options(
-                        selectinload(Recipe.experiment),
-                        selectinload(Recipe.networks)
-                    )
+                    .options(selectinload(Recipe.experiment), selectinload(Recipe.networks))
                 )
-                exp_query = apply_regex_filter(exp_query, col(Experiment.name), self.experiment_name)
-                
+                exp_query = apply_regex_filter(
+                    exp_query, col(Experiment.name), self.experiment_name
+                )
                 available_recipes = session.exec(exp_query).all()
-                
                 if available_recipes:
-                    recipe_info = [(r.name, r.short_name) for r in available_recipes]
-                    suggestions.append(f"Available recipes for experiment '{self.experiment_name}': {recipe_info[:10]}{'...' if len(recipe_info) > 10 else ''}")
+                    recipe_names = '\n- '.join(list({r.name for r in available_recipes}))
+                    suggestions.append(
+                        f"Available recipes for experiment '{self.experiment_name}':\n- {recipe_names}"
+                    )
                 else:
                     # If no recipes found for experiment, check if experiment exists at all
                     exp_only_query = select(Experiment)
-                    exp_only_query = apply_regex_filter(exp_only_query, col(Experiment.name), self.experiment_name)
+                    exp_only_query = apply_regex_filter(
+                        exp_only_query, col(Experiment.name), self.experiment_name
+                    )
                     available_experiments = session.exec(exp_only_query).all()
-                    
                     if available_experiments:
-                        suggestions.append(f"Experiment '{self.experiment_name}' exists but has no recipes with networks")
+                        suggestions.append(
+                            f"Experiment '{self.experiment_name}' exists but has no recipes with networks"
+                        )
                     else:
                         # Show similar experiment names
                         all_exp_query = select(Experiment.name).distinct()
-                        all_experiments = [row for row in session.exec(all_exp_query).all()]
-                        suggestions.append(f"Experiment '{self.experiment_name}' not found. Available experiments: {all_experiments[:10]}{'...' if len(all_experiments) > 10 else ''}")
-            
-            # If we have a recipe name or recipe_short_name but no experiment, try to find matching recipes
-            elif self.recipe_name or self.recipe_short_name:
+                        all_experiments = '\n- '.join(
+                            list({row for row in session.exec(all_exp_query).all()})
+                        )
+                        suggestions.append(
+                            f"Experiment '{self.experiment_name}' not found. Available experiments:\n- {all_experiments}"
+                        )
+            # If we have a recipe name but no experiment, try to find matching recipes
+            elif self.recipe_name:
                 recipe_query = (
                     select(Recipe)
                     .join(Experiment)
                     .join(Network)
-                    .options(
-                        selectinload(Recipe.experiment),
-                        selectinload(Recipe.networks)
-                    )
+                    .options(selectinload(Recipe.experiment), selectinload(Recipe.networks))
                 )
-                
-                # Apply recipe_name filter if specified
-                if self.recipe_name:
-                    if isinstance(self.recipe_name, (Regex, iRegex)):
-                        recipe_query = apply_regex_filter(recipe_query, col(Recipe.name), self.recipe_name)
-                    else:
-                        # For exact recipe name, try partial match
-                        recipe_query = recipe_query.where(col(Recipe.name).regexp_match(f".*_{self.recipe_name}$"))
-                
-                # Apply recipe_short_name filter if specified
-                if self.recipe_short_name:
-                    recipe_query = apply_regex_filter(recipe_query, col(Recipe.short_name), self.recipe_short_name)
-                
-                available_recipes = session.exec(recipe_query).all()
-                
-                if available_recipes:
-                    recipe_info = [(r.name, r.short_name, r.experiment.name) for r in available_recipes]
-                    filter_desc = []
-                    if self.recipe_name:
-                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
-                    if self.recipe_short_name:
-                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
-                    filter_text = " and ".join(filter_desc)
-                    suggestions.append(f"Available recipes matching {filter_text}: {recipe_info[:10]}{'...' if len(recipe_info) > 10 else ''}")
+                if isinstance(self.recipe_name, (Regex, iRegex)):
+                    recipe_query = apply_regex_filter(
+                        recipe_query, col(Recipe.name), self.recipe_name
+                    )
                 else:
-                    filter_desc = []
-                    if self.recipe_name:
-                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
-                    if self.recipe_short_name:
-                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
-                    filter_text = " and ".join(filter_desc)
-                    suggestions.append(f"No recipes found matching {filter_text}")
-            
+                    # For exact recipe name, try partial match
+                    recipe_query = recipe_query.where(
+                        col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                    )
+                available_recipes = session.exec(recipe_query).all()
+                if available_recipes:
+                    # Make recipe info distinct by (name, experiment)
+                    recipe_info = list({(r.name, r.experiment.name) for r in available_recipes})
+                    recipe_lines = '\n- '.join(
+                        [f"{name} (experiment: {exp})" for name, exp in recipe_info]
+                    )
+                    suggestions.append(
+                        f"Available recipes matching '{self.recipe_name}':\n- {recipe_lines}"
+                    )
+                else:
+                    suggestions.append(f"No recipes found matching '{self.recipe_name}'")
+
             # Add calibration info if specified
             if self.calibration_name:
                 error_parts.append(f"calibration '{self.calibration_name}'")
-                
-                
-            # Add output name info if specified  
+
+            # Add output name info if specified
             if self.output_name:
                 error_parts.append(f"output '{self.output_name}'")
-                
+
         except Exception as e:
-            logger.debug(f"Error while generating helpful error message: {e}")
+            logger.error(f"Error while generating helpful error message: {e}")
             suggestions.append("Unable to query for suggestions due to database error")
-        
+
         # Construct final error message
         main_error = ", ".join(error_parts)
         if suggestions:
@@ -360,7 +340,7 @@ class NetworkSelector(BaseModel):
             full_message = f"{main_error}.\n  Suggestions:\n  {suggestion_text}"
         else:
             full_message = f"{main_error}. No suggestions available."
-            
+
         logger.error(full_message)
 
 
@@ -583,6 +563,7 @@ class NetworkSetIntersection(NetworkSetOperation):
     """
     An intersection of multiple NetworkSets. (and itself)
     """
+
     pass
 
     @model_validator(mode='before')

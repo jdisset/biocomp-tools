@@ -1,4 +1,9 @@
 ## {{{                          --     imports     --
+import os
+
+# set BCTOOLS_DEBUG to 1 to enable debug logging
+# os.environ.setdefault('BCTOOLS_DEBUG', '1')
+
 from biocomptools.logging_config import get_logger, setup_logging
 import biocomp.utils as ut
 from biocomp.network import generate_network_info
@@ -43,33 +48,12 @@ from biocomptools.toollib.networkselector import (
     UorfFilter,
 )
 
-from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
-from biocomptools.plot import NetworkPrediction
+from biocomptools.run_training import DEFAULT_TYPES
 
 import biocomptools.toollib.models as md
 
 setup_logging(force=False)
 logger = get_logger(__name__)
-
-
-DEFAULT_TYPES = [
-    Regex,
-    NetworkSelector,
-    NetworkSet,
-    NetworkDataPair,
-    NetworkSetUnion,
-    NetworkSetIntersection,
-    NetworkSetDifference,
-    PartialFunction,
-    NetworkFilter,
-    UorfFilter,
-    DataSource,
-    DBSource,
-    NetworkPrediction,
-    BiocompModel,
-] + PLOT_TYPES
-
-DEFAULT_TYPES = list(set(DEFAULT_TYPES))
 
 
 def make_context_from_types(types):
@@ -86,9 +70,7 @@ MaybeDeferred = DeferredNode[T] | T
 class DatasetTester(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    dataset: Annotated[
-        NetworkSet, Arg(help='Networks in training set', short='d', is_file=True, positional=True)
-    ]
+    dataset: Annotated[NetworkSet, Arg(help='Networks in training set', short='d', is_file=True)]
 
     _lib: Optional[PartsLibrary] = None
 
@@ -126,7 +108,6 @@ class DatasetTester(BaseModel):
             dataset=self.dataset,
         )
         print(f"Successfully loaded {len(training_dman._networks)} networks:")
-
         pretty_print_networks(training_dman)
 
 
@@ -142,6 +123,7 @@ def pretty_print_networks(training_dman):
             "network": network,
             'calibration_name': network.metadata.get('calibration_name', ''),
             'recipe_name': network.metadata.get('recipe_name', ''),
+            'datafile': network.metadata.get('data_file', ''),
             "info": generate_network_info(network),
         }
         for data, network in zip(raw_X, networks)
@@ -206,6 +188,9 @@ def pretty_print_networks(training_dman):
                 calib_name = row['calibration_name']
                 if calib_name:
                     extra_info += f"  -- calib: {calib_name}\n"
+
+                if row['datafile']:
+                    extra_info += f"  -- datafile: {row['datafile']}\n"
 
                 # extra_info += '\n' + str(info)
 
