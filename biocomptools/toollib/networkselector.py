@@ -150,7 +150,12 @@ class NetworkSelector(BaseModel):
                 networks = session.exec(query).all()
             except SQLAlchemyError as e:
                 logger.error(f"Database error while executing network query: {str(e)}")
+                logger.exception(e)
                 raise ValueError(f"Failed to execute network query: {str(e)}") from e
+            except Exception as e:
+                logger.error(f"Unexpected error while executing network query: {str(e)}")
+                logger.exception(e)
+                raise ValueError(f"Unexpected error while executing network query: {str(e)}") from e
 
             if not networks:
                 self._log_helpful_error_message(session, query)
@@ -193,6 +198,7 @@ class NetworkSelector(BaseModel):
                             logger.debug(f"Found {len(datafiles)} datafiles for calibration")
                         except SQLAlchemyError as e:
                             logger.error(f"Database error while querying datafiles: {str(e)}")
+                            logger.exception(e)
                             continue
                     else:
                         logger.debug("No calibration filter, getting best datafile")
@@ -208,6 +214,7 @@ class NetworkSelector(BaseModel):
                                 logger.error(
                                     f"Error getting best datafile for recipe {network.recipe_name}: {str(e)}"
                                 )
+                                logger.exception(e)
                                 continue
 
                     if not datafiles:
@@ -261,7 +268,7 @@ class NetworkSelector(BaseModel):
             filter_parts.append(f"recipe '{self.recipe_name}'")
         if self.recipe_short_name:
             filter_parts.append(f"recipe_short_name '{self.recipe_short_name}'")
-        
+
         if filter_parts:
             error_parts.append(f"No networks found for {', '.join(filter_parts)}")
         else:
@@ -324,7 +331,7 @@ class NetworkSelector(BaseModel):
                         recipe_query = recipe_query.where(
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
-                
+
                 # Apply recipe_short_name filter if specified
                 if self.recipe_short_name:
                     recipe_query = apply_regex_filter(
