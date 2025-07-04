@@ -101,6 +101,7 @@ class AsyncLoggerHandler(BaseModel):
             if event_type == "regular"
             else f"step_{step:06d}_{event_type}_{time.time()}.pkl"
         )
+        self.tmpdir.mkdir(parents=True, exist_ok=True)
         with open(step_file, 'wb') as f:
             dill.dump(data, f)
         return step_file
