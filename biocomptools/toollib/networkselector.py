@@ -86,6 +86,7 @@ class NetworkSelector(BaseModel):
 
     experiment_name: Optional[str | Regex | iRegex] = None
     recipe_name: Optional[str | Regex | iRegex] = None
+    recipe_short_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
 
@@ -137,6 +138,10 @@ class NetworkSelector(BaseModel):
                         query = query.where(
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
+
+            if self.recipe_short_name:
+                logger.debug(f"Applying recipe_short_name filter: {self.recipe_short_name}")
+                query = apply_regex_filter(query, col(Recipe.short_name), self.recipe_short_name)
 
             logger.debug(f"Final network query: {query}")
 
@@ -249,9 +254,18 @@ class NetworkSelector(BaseModel):
         suggestions = []
 
         # Basic error message
-        error_parts.append(
-            f"No networks found for experiment '{self.experiment_name}', recipe '{self.recipe_name}'"
-        )
+        filter_parts = []
+        if self.experiment_name:
+            filter_parts.append(f"experiment '{self.experiment_name}'")
+        if self.recipe_name:
+            filter_parts.append(f"recipe '{self.recipe_name}'")
+        if self.recipe_short_name:
+            filter_parts.append(f"recipe_short_name '{self.recipe_short_name}'")
+        
+        if filter_parts:
+            error_parts.append(f"No networks found for {', '.join(filter_parts)}")
+        else:
+            error_parts.append("No networks found")
 
         try:
             # If we have an experiment name, try to find available recipes for that experiment
@@ -291,22 +305,30 @@ class NetworkSelector(BaseModel):
                         suggestions.append(
                             f"Experiment '{self.experiment_name}' not found. Available experiments:\n- {all_experiments}"
                         )
-            # If we have a recipe name but no experiment, try to find matching recipes
-            elif self.recipe_name:
+            # If we have a recipe name or recipe_short_name but no experiment, try to find matching recipes
+            elif self.recipe_name or self.recipe_short_name:
                 recipe_query = (
                     select(Recipe)
                     .join(Experiment)
                     .join(Network)
                     .options(selectinload(Recipe.experiment), selectinload(Recipe.networks))
                 )
-                if isinstance(self.recipe_name, (Regex, iRegex)):
+                # Apply recipe_name filter if specified
+                if self.recipe_name:
+                    if isinstance(self.recipe_name, (Regex, iRegex)):
+                        recipe_query = apply_regex_filter(
+                            recipe_query, col(Recipe.name), self.recipe_name
+                        )
+                    else:
+                        # For exact recipe name, try partial match
+                        recipe_query = recipe_query.where(
+                            col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                        )
+                
+                # Apply recipe_short_name filter if specified
+                if self.recipe_short_name:
                     recipe_query = apply_regex_filter(
-                        recipe_query, col(Recipe.name), self.recipe_name
-                    )
-                else:
-                    # For exact recipe name, try partial match
-                    recipe_query = recipe_query.where(
-                        col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
+                        recipe_query, col(Recipe.short_name), self.recipe_short_name
                     )
                 available_recipes = session.exec(recipe_query).all()
                 if available_recipes:
@@ -315,11 +337,23 @@ class NetworkSelector(BaseModel):
                     recipe_lines = '\n- '.join(
                         [f"{name} (experiment: {exp})" for name, exp in recipe_info]
                     )
+                    filter_desc = []
+                    if self.recipe_name:
+                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
+                    if self.recipe_short_name:
+                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    filter_text = " and ".join(filter_desc)
                     suggestions.append(
-                        f"Available recipes matching '{self.recipe_name}':\n- {recipe_lines}"
+                        f"Available recipes matching {filter_text}:\n- {recipe_lines}"
                     )
                 else:
-                    suggestions.append(f"No recipes found matching '{self.recipe_name}'")
+                    filter_desc = []
+                    if self.recipe_name:
+                        filter_desc.append(f"recipe_name '{self.recipe_name}'")
+                    if self.recipe_short_name:
+                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    filter_text = " and ".join(filter_desc)
+                    suggestions.append(f"No recipes found matching {filter_text}")
 
             # Add calibration info if specified
             if self.calibration_name:
