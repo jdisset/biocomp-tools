@@ -6,9 +6,15 @@ from typing import Any, Dict, List, Optional, Union, Literal, Tuple
 from enum import Enum
 from itertools import groupby
 from operator import attrgetter
-from biocomptools.toollib.models import TrainedModel, NetworkDataPair, TrainingSetLink, DataSet, DataSetNetworkDataPair
+from biocomptools.toollib.models import (
+    TrainedModel,
+    NetworkDataPair,
+    TrainingSetLink,
+    DataSet,
+    DataSetNetworkDataPair,
+)
 from biocomptools.logging_config import get_logger
-from biocomptools.toollib.networkselector import NetworkSet, Regex
+from biocomptools.toollib.networkselector import NetworkSet, Regex, iRegex, apply_regex_filter
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = get_logger(__name__)
@@ -63,22 +69,28 @@ class TrainingSetCriteria(BaseModel):
             self.network_set.run_selectors()
             self._cached_pairs = self.network_set.content
         return self._cached_pairs
-    
-    def _get_dataset_pairs(self, dataset: Optional[DataSet], session: Session) -> List[NetworkDataPair]:
+
+    def _get_dataset_pairs(
+        self, dataset: Optional[DataSet], session: Session
+    ) -> List[NetworkDataPair]:
         """Get NetworkDataPair objects associated with a DataSet."""
         if dataset is None:
             return []
-        
+
         # Query DataSetNetworkDataPair junction table to get network data pairs
-        query = select(NetworkDataPair).join(
-            DataSetNetworkDataPair,
-            (DataSetNetworkDataPair.network_name == NetworkDataPair.network_name) &
-            (DataSetNetworkDataPair.datafile_path == NetworkDataPair.datafile_path)
-        ).where(
-            (DataSetNetworkDataPair.dataset_name == dataset.name) &
-            (DataSetNetworkDataPair.dataset_hash == dataset.hash)
+        query = (
+            select(NetworkDataPair)
+            .join(
+                DataSetNetworkDataPair,
+                (DataSetNetworkDataPair.network_name == NetworkDataPair.network_name)
+                & (DataSetNetworkDataPair.datafile_path == NetworkDataPair.datafile_path),
+            )
+            .where(
+                (DataSetNetworkDataPair.dataset_name == dataset.name)
+                & (DataSetNetworkDataPair.dataset_hash == dataset.hash)
+            )
         )
-        
+
         return session.exec(query).all()
 
     def matches(self, dataset: Optional[DataSet], session: Session) -> bool:
@@ -106,6 +118,9 @@ class ModelSelector(BaseModel):
         # Select by regex pattern
         ModelSelector(name=Regex("model_v[0-9]+.*"))
 
+        # Select by case-insensitive regex pattern
+        ModelSelector(name=iRegex("MODEL_v[0-9]+.*"))
+
         # Select by loss criteria
         ModelSelector(loss=LossCriteria(operator=LossOperator.LESS_THAN, value=0.01))
 
@@ -119,24 +134,24 @@ class ModelSelector(BaseModel):
                 mode="includes"
             )
         )
-        
-        # NEW: Group by field and pick best from each group
+
+        # Group by field and pick best from each group
         ModelSelector(
             experiment_name="exp_2024",
             group_by="training_dataset_hash",
             pick_best_per_group=True
         )
-        
-        # NEW: Return all models matching criteria
+
+        # Return all models matching criteria
         ModelSelector(
             run_name=Regex("run_.*"),
             pick_best_loss=False  # Returns all matches
         )
     """
 
-    name: Optional[Union[str, Regex]] = None
-    run_name: Optional[Union[str, Regex]] = None
-    experiment_name: Optional[Union[str, Regex]] = None
+    name: Optional[Union[str, Regex, iRegex]] = None
+    run_name: Optional[Union[str, Regex, iRegex]] = None
+    experiment_name: Optional[Union[str, Regex, iRegex]] = None
 
     # loss criteria - multiple ways to specify
     loss: Optional[LossCriteria] = None
@@ -148,7 +163,7 @@ class ModelSelector(BaseModel):
     training_set: Optional[TrainingSetCriteria] = None
     trained_on_exact: Optional[NetworkSet] = None
     trained_on_includes: Optional[NetworkSet] = None
-    
+
     # grouping and selection
     group_by: Optional[Union[str, List[str]]] = None
     pick_best_per_group: bool = False
@@ -158,7 +173,7 @@ class ModelSelector(BaseModel):
         """Lazy-load the database engine when needed (otherwise unpicklable)."""
         from biocomptools.toollib.models import get_biocompdb_sqlite_engine
         from biocomptools.toollib.common import config
-        
+
         _db_engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
         return _db_engine
 
@@ -200,11 +215,11 @@ class ModelSelector(BaseModel):
             self.training_set = TrainingSetCriteria(
                 network_set=self.trained_on_includes, mode="includes"
             )
-        
+
         # validate grouping options
         if self.pick_best_per_group and not self.group_by:
             raise ValueError("pick_best_per_group requires group_by to be specified")
-        
+
         # ensure group_by is a list
         if self.group_by and isinstance(self.group_by, str):
             self.group_by = [self.group_by]
@@ -227,37 +242,30 @@ class ModelSelector(BaseModel):
         """
         sess = session or self.db_session
         close_session_locally = session is None
-        
+
         try:
             # build base query with eager loading of relationships
             query = select(TrainedModel).options(
-                selectinload(TrainedModel.training_dataset).selectinload(DataSet.network_data_pairs),
-                selectinload(TrainedModel.metrics)
+                selectinload(TrainedModel.training_dataset).selectinload(
+                    DataSet.network_data_pairs
+                ),
+                selectinload(TrainedModel.metrics),
             )
 
             # apply name filters
             if self.name:
                 logger.debug(f"Applying name filter: {self.name}")
-                if isinstance(self.name, Regex):
-                    query = query.where(col(TrainedModel.name).regexp_match(self.name))
-                else:
-                    query = query.where(TrainedModel.name == self.name)
+                query = apply_regex_filter(query, col(TrainedModel.name), self.name)
 
             if self.run_name:
                 logger.debug(f"Applying run_name filter: {self.run_name}")
-                if isinstance(self.run_name, Regex):
-                    query = query.where(col(TrainedModel.run_name).regexp_match(self.run_name))
-                else:
-                    query = query.where(TrainedModel.run_name == self.run_name)
+                query = apply_regex_filter(query, col(TrainedModel.run_name), self.run_name)
 
             if self.experiment_name:
                 logger.debug(f"Applying experiment_name filter: {self.experiment_name}")
-                if isinstance(self.experiment_name, Regex):
-                    query = query.where(
-                        col(TrainedModel.experiment_name).regexp_match(self.experiment_name)
-                    )
-                else:
-                    query = query.where(TrainedModel.experiment_name == self.experiment_name)
+                query = apply_regex_filter(
+                    query, col(TrainedModel.experiment_name), self.experiment_name
+                )
 
             # execute query
             logger.debug(f"Executing model query: {query}")
@@ -309,14 +317,14 @@ class ModelSelector(BaseModel):
         finally:
             if close_session_locally:
                 sess.close()
-    
+
     def _apply_grouping(self, models: List[TrainedModel]) -> List[TrainedModel]:
         """Apply grouping logic to models."""
         if not self.group_by:
             return models
-        
+
         logger.debug(f"Grouping models by: {self.group_by}")
-        
+
         # Create a key function that extracts values for all group_by fields
         def make_group_key(model):
             values = []
@@ -333,23 +341,25 @@ class ModelSelector(BaseModel):
                     logger.warning(f"Model does not have field '{field}' for grouping")
                     values.append(None)
             return tuple(values)
-        
+
         # Sort models by group key to enable groupby
         sorted_models = sorted(models, key=make_group_key)
-        
+
         # Group models and optionally pick best from each group
         result_models = []
         for group_key, group_models in groupby(sorted_models, key=make_group_key):
             group_list = list(group_models)
             logger.debug(f"Group {group_key}: {len(group_list)} models")
-            
+
             if self.pick_best_per_group:
                 # Pick best model from this group
                 models_with_loss = [m for m in group_list if m.end_loss is not None]
                 if models_with_loss:
                     best_model = min(models_with_loss, key=lambda m: m.end_loss)
                     result_models.append(best_model)
-                    logger.debug(f"Selected best model from group: {best_model.name} (loss: {best_model.end_loss})")
+                    logger.debug(
+                        f"Selected best model from group: {best_model.name} (loss: {best_model.end_loss})"
+                    )
                 else:
                     # If no models have loss, just take the first one
                     result_models.append(group_list[0])
@@ -357,14 +367,14 @@ class ModelSelector(BaseModel):
             else:
                 # Include all models from this group
                 result_models.extend(group_list)
-        
+
         logger.debug(f"After grouping: {len(result_models)} models selected")
         return result_models
 
     def get_model(self, session=None, raise_if_multiple: bool = True) -> Optional[TrainedModel]:
         sess = session or self.db_session
         close_session_locally = session is None
-        
+
         try:
             models = self.get_models(sess)
             if raise_if_multiple and len(models) > 1:
@@ -379,14 +389,14 @@ class ModelSelector(BaseModel):
     @classmethod
     def best_per_training_set(
         cls,
-        name: Optional[Union[str, Regex]] = None,
-        run_name: Optional[Union[str, Regex]] = None,
-        experiment_name: Optional[Union[str, Regex]] = None,
-        **kwargs
+        name: Optional[Union[str, Regex, iRegex]] = None,
+        run_name: Optional[Union[str, Regex, iRegex]] = None,
+        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
+        **kwargs,
     ) -> "ModelSelector":
         """
         Create a selector that returns the best model for each unique training set.
-        
+
         Example:
             selector = ModelSelector.best_per_training_set(experiment_name="exp_2024")
             models = selector.get_models(session)  # Returns best model for each training dataset
@@ -397,24 +407,24 @@ class ModelSelector(BaseModel):
             experiment_name=experiment_name,
             group_by="training_dataset_hash",
             pick_best_per_group=True,
-            **kwargs
+            **kwargs,
         )
-    
+
     @classmethod
     def best_per_field(
         cls,
         field: Union[str, List[str]],
-        name: Optional[Union[str, Regex]] = None,
-        run_name: Optional[Union[str, Regex]] = None,
-        experiment_name: Optional[Union[str, Regex]] = None,
-        **kwargs
+        name: Optional[Union[str, Regex, iRegex]] = None,
+        run_name: Optional[Union[str, Regex, iRegex]] = None,
+        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
+        **kwargs,
     ) -> "ModelSelector":
         """
         Create a selector that returns the best model for each unique value of the specified field(s).
-        
+
         Args:
             field: Field name(s) to group by (e.g., "run_name", ["experiment_name", "run_name"])
-            
+
         Example:
             # Get best model for each run
             selector = ModelSelector.best_per_field("run_name", experiment_name="exp_2024")
@@ -426,20 +436,20 @@ class ModelSelector(BaseModel):
             experiment_name=experiment_name,
             group_by=field,
             pick_best_per_group=True,
-            **kwargs
+            **kwargs,
         )
-    
+
     @classmethod
     def all_matching(
         cls,
-        name: Optional[Union[str, Regex]] = None,
-        run_name: Optional[Union[str, Regex]] = None,
-        experiment_name: Optional[Union[str, Regex]] = None,
-        **kwargs
+        name: Optional[Union[str, Regex, iRegex]] = None,
+        run_name: Optional[Union[str, Regex, iRegex]] = None,
+        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
+        **kwargs,
     ) -> "ModelSelector":
         """
         Create a selector that returns all models matching the criteria.
-        
+
         Example:
             # Get all models from an experiment
             selector = ModelSelector.all_matching(experiment_name="exp_2024")
@@ -450,7 +460,7 @@ class ModelSelector(BaseModel):
             run_name=run_name,
             experiment_name=experiment_name,
             pick_best_loss=False,
-            **kwargs
+            **kwargs,
         )
 
 
@@ -514,7 +524,7 @@ class ModelSet(BaseModel):
 
         logger.debug(f"Running selectors on {len(self.content)} items")
         new_content = []
-        
+
         # Track unique models to avoid duplicates
         seen_models = set()
 
