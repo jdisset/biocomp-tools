@@ -188,6 +188,16 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                             # Add to validation datasets if not already present
                             if not any(vd.hash == validation_dataset.hash for vd in validation_datasets):
                                 validation_datasets.append(validation_dataset)
+                                
+                                for pair in validation_pairs:
+                                    dataset_associations.append(md.DataSetNetworkDataPair(
+                                        dataset_name=validation_dataset.name,
+                                        dataset_hash=validation_dataset.hash,
+                                        network_name=pair.network_name,
+                                        datafile_path=pair.datafile_path
+                                    ))
+                                
+                                all_network_data_pairs.extend(validation_pairs)
                     
                     # Add RMSE metric
                     if 'RMSE' in logger_values:
