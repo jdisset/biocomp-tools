@@ -443,73 +443,66 @@ def _proc_plot_task(
     elif ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
         pred_stats = task.get('prediction_stats', {})
         
-        # Extract metrics from prediction stats and create Metric objects
-        plot_source = f"{fig_file}:{task_idx}"
+        # Extract n_points from stats if available - will be used for all metrics
+        n_points = None
+        if 'eval_npoints' in pred_stats:
+            n_points = int(pred_stats['eval_npoints'])
+        elif 'n_points' in pred_stats:
+            n_points = int(pred_stats['n_points'])
         
-        if 'mse' in pred_stats:
-            metrics.append(md.Metric(
-                name="MSE",
-                value=float(pred_stats['mse']),
+        # Extract network_name and datafile_path from prediction metadata
+        # First check direct fields in task
+        network_name = task.get('network_name')
+        datafile_path = task.get('datafile_path')
+        
+        # If not found, check in extra_prediction_info
+        if network_name is None:
+            network_name = task.get('extra_prediction_info', {}).get('network_name')
+        if datafile_path is None:
+            datafile_path = task.get('extra_prediction_info', {}).get('datafile', {}).get('file')
+            if datafile_path is None:
+                datafile_path = task.get('extra_prediction_info', {}).get('datafile_path')
+        
+        # Helper function to create metric with proper fields
+        def create_metric(name: str, value: float) -> md.Metric:
+            metric = md.Metric(
+                name=name,
+                value=float(value),
                 trained_model_name=model_sig,
                 source_plot_figure=fig_file,
                 source_plot_position=task_idx,
+                n_points=n_points,  # Apply n_points to all metrics
                 meta={
-                    "network_name": net_name,
-                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
                     "plot_method": task.get('plot_method'),
                     "source": "plot_prediction"
                 }
-            ))
+            )
+            # Set database columns for network and datafile if available
+            if network_name is not None:
+                metric.on_network_name = network_name
+                metric.meta["network_name"] = network_name
+            if datafile_path is not None:
+                metric.on_datafile_path = datafile_path
+                metric.meta["datafile_path"] = datafile_path
+            return metric
+        
+        # Extract metrics from prediction stats
+        if 'mse' in pred_stats:
+            metrics.append(create_metric("MSE", pred_stats['mse']))
         
         if 'grid_mse' in pred_stats:
-            metrics.append(md.Metric(
-                name="grid_MSE",
-                value=float(pred_stats['grid_mse']),
-                trained_model_name=model_sig,
-                source_plot_figure=fig_file,
-                source_plot_position=task_idx,
-                meta={
-                    "network_name": net_name,
-                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
-                    "plot_method": task.get('plot_method'),
-                    "source": "plot_prediction"
-                }
-            ))
+            metrics.append(create_metric("grid_MSE", pred_stats['grid_mse']))
         
         normalized_grid_mse = pred_stats.get('normalized_grid_mse', pred_stats.get('grid_mse'))
         if normalized_grid_mse is not None:
-            metrics.append(md.Metric(
-                name="normalized_grid_MSE",
-                value=float(normalized_grid_mse),
-                trained_model_name=model_sig,
-                source_plot_figure=fig_file,
-                source_plot_position=task_idx,
-                meta={
-                    "network_name": net_name,
-                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
-                    "plot_method": task.get('plot_method'),
-                    "source": "plot_prediction"
-                }
-            ))
-            
-        if 'eval_npoints' in pred_stats:
-            metrics.append(md.Metric(
-                name="n_points",
-                value=float(pred_stats['eval_npoints']),
-                n_points=int(pred_stats['eval_npoints']),
-                trained_model_name=model_sig,
-                source_plot_figure=fig_file,
-                source_plot_position=task_idx,
-                meta={
-                    "network_name": net_name,
-                    "datafile_path": task.get('extra_prediction_info', {}).get('datafile', {}).get('file'),
-                    "plot_method": task.get('plot_method'),
-                    "source": "plot_prediction"
-                }
-            ))
+            metrics.append(create_metric("normalized_grid_MSE", normalized_grid_mse))
         
-        # Any additional stats are stored in metadata of other metrics
-
+        # Process any other numeric stats (excluding n_points/eval_npoints)
+        for stat_name, stat_value in pred_stats.items():
+            if stat_name not in ['mse', 'grid_mse', 'normalized_grid_mse', 'eval_npoints', 'n_points']:
+                if isinstance(stat_value, (int, float)):
+                    metrics.append(create_metric(stat_name, stat_value))
+        
         # Create simplified plot without prediction fields
         return md.Plot(**plot_args), metrics
 

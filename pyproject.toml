@@ -24,6 +24,7 @@ dependencies = [
 	"plotext",
 	"pynvml",
 	"psutil",
+	"gspread",
 ]
 
 
@@ -32,4 +33,6 @@ biocomp-plot= "biocomptools.plot:main"
 biocomp-train= "biocomptools.run_training:main"
 biocomp-check = "biocomptools.test_dataset:main"
 biocomp-updatedb = "biocomptools.update_biocompdb:main"
+biocomp-updatepartsdb = "biocomptools.update_partsdb:main"
+biocomp-update-partsdb = "biocomptools.update_partsdb:main"
 
