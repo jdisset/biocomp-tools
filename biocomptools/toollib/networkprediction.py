@@ -137,6 +137,8 @@ def _calculate_single_network_stats(
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
+        # Apply same slicing to gt as was applied to yhat
+        latent_gt = latent_gt[:, dependent_output_pos]
         assert latent_gt.shape[1] == latent_yhat.shape[1]
 
         # Debug traces for validation investigation
