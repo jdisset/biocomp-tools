@@ -264,12 +264,16 @@ class InnerNodesFigure(Figure):
             self._set_plot_aspect(ax, ratio)
 
     def extract_ern_embeddings(self) -> Dict[str, float]:
-        ern_names = self.model.compute_config.node_functions["sequestron_ERN"].kwargs[
-            "affinity_names"
-        ]
-        ern_names = [n.split("::")[1].split("#")[0] for n in ern_names]
-        ern_embedding_values = self.model.shared_params["shared"]["ERN_5p"]["affinities"]
-        return {k: float(v[0]) for k, v in zip(ern_names, ern_embedding_values)}
+        try:
+            ern_names = self.model.compute_config.node_functions["sequestron_ERN"].kwargs[
+                "affinity_names"
+            ]
+            ern_names = [n.split("::")[1].split("#")[0] for n in ern_names]
+            ern_embedding_values = self.model.shared_params["shared"]["ERN_5p"]["affinities"]
+            return {k: float(v[0]) for k, v in zip(ern_names, ern_embedding_values)}
+        except (KeyError, AttributeError) as e:
+            logger.warning(f"Could not extract ERN embeddings: {e}")
+            return {}
 
     def extract_uorf_embeddings(self) -> Dict[str, float]:
         uorf_names = self.model.compute_config.node_functions["translation"].kwargs[
@@ -514,6 +518,16 @@ class InnerNodesFigure(Figure):
         self._set_plot_aspect(ax, aspect_ratio)
 
     def _plot_ern_row(self, row_fig: mpl.figure.SubFigure, ern_nodes: List[NodeData]) -> int:
+        if not ern_nodes:
+            # If no ERN nodes, create empty subplot or placeholder
+            row_fig.suptitle("ERN Nodes and Embeddings (No ERN data available)", fontsize=16, y=1.0, fontweight="bold")
+            ax = row_fig.add_subplot(1, 1, 1)
+            ax.text(0.5, 0.5, "No ERN nodes found in this model", 
+                   ha='center', va='center', fontsize=14, transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
+            
         row_fig.suptitle("ERN Nodes and Embeddings", fontsize=16, y=1.0, fontweight="bold")
         row_subfigs = row_fig.subfigures(1, 2, width_ratios=[4, 1], wspace=-0.05)
 
@@ -710,7 +724,17 @@ class InnerNodesFigure(Figure):
         main_subfigs = fig.subfigures(3, 1, height_ratios=[1, 1, 1], hspace=0.1)
 
         # Populate rows ------------------------------------------------------------
-        self._plot_ern_row(main_subfigs[0], ern_nodes)
+        try:
+            self._plot_ern_row(main_subfigs[0], ern_nodes)
+        except Exception as e:
+            logger.warning(f"Failed to plot ERN row: {e}")
+            # Create a placeholder for the ERN row
+            ax = main_subfigs[0].add_subplot(1, 1, 1)
+            ax.text(0.5, 0.5, f"ERN plotting failed: {str(e)}", 
+                   ha='center', va='center', fontsize=12, transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            
         self._plot_forward_row(main_subfigs[1], basic_core, uorf_nodes)
         if SHOW_INVERSE_NODES:
             self._plot_inverse_row(main_subfigs[2], inverse_nodes)
