@@ -37,6 +37,7 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
 )
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 
+from biocomptools.modelmodel import BiocompModel, get_shared_params
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
@@ -102,6 +103,7 @@ DEFAULT_TYPES = [
     Regex,
     iRegex,
     ModelSelector,
+    BiocompModel,
     NetworkPrediction,
     NetworkSelector,
     NetworkSet,

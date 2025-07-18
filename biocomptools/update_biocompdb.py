@@ -9,6 +9,7 @@ import os
 import pickle
 import json
 import time
+import math
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -52,6 +53,20 @@ RICH_PROGRESS_COLUMNS = [
     TimeElapsedColumn(),
     TimeRemainingColumn(),
 ]
+
+
+def convert_metric_value(value: Any) -> Optional[float]:
+    """Convert a metric value to float, converting NaN/inf to None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return float(value)
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def should_ignore_path(path: Path, ignore_dirs: List[str]) -> bool:
@@ -147,10 +162,11 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
         training_set_links = []
         
         # Add training_loss as a training loss metric if it exists
-        if metadata.get('training_loss') is not None:
+        training_loss = metadata.get('training_loss')
+        if training_loss is not None:
             metrics.append(md.Metric(
                 name="training_loss_final",
-                value=float(metadata['training_loss']),
+                value=convert_metric_value(training_loss),
                 trained_model_name=model_name,
                 meta={"source": "training_completion", "timestamp": metadata.get('end_time')}
             ))
@@ -203,7 +219,7 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                     if 'RMSE' in logger_values:
                         metrics.append(md.Metric(
                             name="RMSE",
-                            value=float(logger_values['RMSE']),
+                            value=convert_metric_value(logger_values['RMSE']),
                             trained_model_name=model_name,
                             on_dataset_name=validation_dataset.name if validation_dataset else None,
                             on_dataset_hash=validation_dataset.hash if validation_dataset else None,
@@ -230,21 +246,21 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                                     
                                     metrics.append(md.Metric(
                                         name="RMSE",
-                                        value=float(network_data['RMSE']),
-                                        trained_model_name=model_name,
-                                        on_network_name=network_name,
-                                        on_datafile_path=datafile_path,
-                                        # Also link to validation dataset
-                                        on_dataset_name=validation_dataset.name if validation_dataset else None,
-                                        on_dataset_hash=validation_dataset.hash if validation_dataset else None,
-                                        n_points=network_data.get('n_points'),
-                                        meta={
-                                            "validation_set": validation_set_name,
-                                            "logger_name": logger_base_name,
-                                            "network_name": network_name,
-                                            "logger_type": "validation_loss_per_network"
-                                        }
-                                    ))
+                                        value=convert_metric_value(network_data['RMSE']),
+                                            trained_model_name=model_name,
+                                            on_network_name=network_name,
+                                            on_datafile_path=datafile_path,
+                                            # Also link to validation dataset
+                                            on_dataset_name=validation_dataset.name if validation_dataset else None,
+                                            on_dataset_hash=validation_dataset.hash if validation_dataset else None,
+                                            n_points=network_data.get('n_points'),
+                                            meta={
+                                                "validation_set": validation_set_name,
+                                                "logger_name": logger_base_name,
+                                                "network_name": network_name,
+                                                "logger_type": "validation_loss_per_network"
+                                            }
+                                        ))
                 
                 # Handle other logger types (training loss, gradient norms, etc.)
                 else:
@@ -252,7 +268,7 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                     if isinstance(logger_values, (int, float)):
                         metrics.append(md.Metric(
                             name=logger_name,
-                            value=float(logger_values),
+                            value=convert_metric_value(logger_values),
                             trained_model_name=model_name,
                             meta={"logger_name": logger_name, "logger_type": "general"}
                         ))
@@ -262,7 +278,7 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                             if isinstance(val, (int, float)):
                                 metrics.append(md.Metric(
                                     name=f"{logger_name}_{key}",
-                                    value=float(val),
+                                    value=convert_metric_value(val),
                                     trained_model_name=model_name,
                                     meta={
                                         "logger_name": logger_name,
@@ -475,9 +491,16 @@ def _proc_plot_task(
         
         # Helper function to create metric with proper fields
         def create_metric(name: str, value: float) -> md.Metric:
+            converted_value = convert_metric_value(value)
+            if converted_value is None and value is not None:
+                logging.getLogger('biocomp_db').debug(
+                    f"Converting metric '{name}' value {value} to NULL "
+                    f"(model: {model_sig}, network: {network_name})"
+                )
+            
             metric = md.Metric(
                 name=name,
-                value=float(value),
+                value=converted_value,
                 trained_model_name=model_sig,
                 source_plot_figure=fig_file,
                 source_plot_position=task_idx,

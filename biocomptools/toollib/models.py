@@ -535,7 +535,7 @@ class Metric(BiocompDB, table=True):
 
     # Basic metric info
     name: str  # e.g. "RMSE", "grid_RMSE", etc.
-    value: float
+    value: Optional[float] = None  # Can be NULL for NaN/failed computations
     n_points: Optional[int] = None  # number of points used to compute metric
 
     # Foreign key relationships (all optional)
