@@ -1,6 +1,8 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import func, and_, or_
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import with_loader_criteria
 from sqlmodel import select, Session, col
 from typing import Any, Dict, List, Optional, Union, Literal, Tuple
 from enum import Enum
@@ -12,10 +14,11 @@ from biocomptools.toollib.models import (
     TrainingSetLink,
     DataSet,
     DataSetNetworkDataPair,
+    Metric,
 )
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.networkselector import NetworkSet, Regex, iRegex, apply_regex_filter
-from sqlalchemy.exc import SQLAlchemyError
+
 
 logger = get_logger(__name__)
 
@@ -226,89 +229,76 @@ class ModelSelector(BaseModel):
 
         return self
 
-    def get_models(self, session=None) -> List[TrainedModel]:
-        """
-        Retrieve trained models based on specified filters.
-
-        Args:
-            session: The database session (optional - will create one if not provided)
-
-        Returns:
-            List[TrainedModel]: List of trained models matching criteria
-
-        Raises:
-            ValueError: If no models are found or query execution fails
-            SQLAlchemyError: For database-related errors
-        """
+    def get_models(
+        self, session=None, load_metrics_criteria: Optional[Dict[str, Any]] = None
+    ) -> List[TrainedModel]:
         sess = session or self.db_session
         close_session_locally = session is None
 
         try:
-            # build base query with eager loading of relationships
-            query = select(TrainedModel).options(
-                selectinload(TrainedModel.training_dataset).selectinload(
-                    DataSet.network_data_pairs
-                ),
-                selectinload(TrainedModel.metrics),
+            # Start with the base query
+            query = select(TrainedModel)
+
+            # Always eagerly load the training dataset relationship
+            query = query.options(
+                selectinload(TrainedModel.training_dataset).selectinload(DataSet.network_data_pairs)
             )
 
-            # apply name filters
+            if load_metrics_criteria:
+                metric_filters = []
+                for key, value in load_metrics_criteria.items():
+                    if key.endswith(".is_not"):
+                        field_name = key.replace(".is_not", "")
+                        metric_filters.append(getattr(Metric, field_name).is_not(value))
+                    else:
+                        metric_filters.append(getattr(Metric, key) == value)
+
+                query = query.options(
+                    selectinload(TrainedModel.metrics),
+                    with_loader_criteria(TrainedModel.metrics, lambda _: and_(*metric_filters)),
+                )
+
             if self.name:
-                logger.debug(f"Applying name filter: {self.name}")
                 query = apply_regex_filter(query, col(TrainedModel.name), self.name)
-
             if self.run_name:
-                logger.debug(f"Applying run_name filter: {self.run_name}")
                 query = apply_regex_filter(query, col(TrainedModel.run_name), self.run_name)
-
             if self.experiment_name:
-                logger.debug(f"Applying experiment_name filter: {self.experiment_name}")
                 query = apply_regex_filter(
                     query, col(TrainedModel.experiment_name), self.experiment_name
                 )
 
-            # execute query
-            logger.debug(f"Executing model query: {query}")
-            try:
-                models = sess.exec(query).all()
-            except SQLAlchemyError as e:
-                logger.error(f"Database error while executing model query: {str(e)}")
-                raise ValueError(f"Failed to execute model query: {str(e)}") from e
-
-            if not models:
-                logger.warning(f"No models found for selector: {self}")
-
-            # apply loss criteria (post-query filtering)
             if self.loss:
-                logger.debug(f"Applying loss criteria: {self.loss}")
-                models = [m for m in models if self.loss.matches(m.end_loss)]
+                op_map = {
+                    LossOperator.LESS_THAN: "__lt__",
+                    LossOperator.GREATER_THAN: "__gt__",
+                    LossOperator.LESS_EQUAL: "__le__",
+                    LossOperator.GREATER_EQUAL: "__ge__",
+                    LossOperator.EQUAL: "__eq__",
+                    LossOperator.NOT_EQUAL: "__ne__",
+                }
+                operator_method = getattr(col(TrainedModel.end_loss), op_map[self.loss.operator])
+                query = query.where(operator_method(self.loss.value))
 
-            # apply training set criteria (post-query filtering)
+            models = sess.exec(query).all()
+
+            # Post-query filtering for complex criteria that are hard to express in SQL
             if self.training_set:
-                logger.debug(f"Applying training set criteria: {self.training_set}")
                 filtered_models = []
                 for model in models:
-                    # need to ensure training_dataset is loaded
                     if self.training_set.matches(model.training_dataset, sess):
                         filtered_models.append(model)
                 models = filtered_models
 
-            # handle grouping and selection
             if self.group_by and models:
                 models = self._apply_grouping(models)
             elif self.pick_best_loss and models:
-                # original behavior - pick single best model
-                logger.debug("Picking model with best (lowest) loss")
-                # filter out models without loss values
                 models_with_loss = [m for m in models if m.end_loss is not None]
                 if models_with_loss:
                     best_model = min(models_with_loss, key=lambda m: m.end_loss)
                     models = [best_model]
                 else:
-                    logger.warning("No models with loss values found, cannot pick best")
                     models = []
 
-            logger.debug(f"Model selection complete. Found {len(models)} models.")
             return models
 
         except Exception as e:
@@ -325,6 +315,49 @@ class ModelSelector(BaseModel):
 
         logger.debug(f"Grouping models by: {self.group_by}")
 
+        # Optimize for the common case of grouping by training_dataset_hash
+        if self.group_by == ["training_dataset_hash"]:
+            # Use defaultdict for O(1) grouping instead of sorting + groupby
+            from collections import defaultdict
+
+            groups = defaultdict(list)
+
+            for model in models:
+                # Extract the hash once per model
+                if model.training_dataset:
+                    key = model.training_dataset.hash
+                else:
+                    key = None
+                groups[key].append(model)
+
+            # Process groups
+            result_models = []
+            for group_key, group_list in groups.items():
+                logger.debug(f"Group {group_key}: {len(group_list)} models")
+
+                if self.pick_best_per_group:
+                    # Pick best model from this group
+                    models_with_loss = [m for m in group_list if m.end_loss is not None]
+                    if models_with_loss:
+                        best_model = min(models_with_loss, key=lambda m: m.end_loss)
+                        result_models.append(best_model)
+                        logger.debug(
+                            f"Selected best model from group: {best_model.name} (loss: {best_model.end_loss})"
+                        )
+                    else:
+                        # If no models have loss, just take the first one
+                        result_models.append(group_list[0])
+                        logger.warning(
+                            f"No models with loss in group {group_key}, taking first model"
+                        )
+                else:
+                    # Include all models from this group
+                    result_models.extend(group_list)
+
+            logger.debug(f"After grouping: {len(result_models)} models selected")
+            return result_models
+
+        # General case for other grouping fields
         # Create a key function that extracts values for all group_by fields
         def make_group_key(model):
             values = []

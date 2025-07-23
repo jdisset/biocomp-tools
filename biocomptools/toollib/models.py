@@ -528,6 +528,11 @@ class TrainedModel(BiocompDB, table=True):
         """
         return Path(config.paths.root) / self.path_to_model
 
+    def load_model(self):
+        import biocomptools.modelmodel as mdl
+
+        return mdl.load_model(self.absolute_path_to_model)
+
 
 class Metric(BiocompDB, table=True):
     # Auto-incrementing primary key
