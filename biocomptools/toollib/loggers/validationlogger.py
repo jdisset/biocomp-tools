@@ -13,7 +13,7 @@ from biocomptools.run_training import TrainingProgram
 from biocomptools.toollib.common import config
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional, Dict, Any, Union
+from typing import List, Tuple, Callable, Optional, Dict, Any, Union, Literal
 from rich.console import Console
 from rich.table import Table
 from biocomp.utils import load_lib
@@ -44,6 +44,7 @@ class ValidationLossLogger(Logger):
     seed: int = 42
     predictor_n_stats_workers: int = 1
     plot_training_losses: bool = False
+    device: Literal['cpu', 'gpu'] = 'cpu'
 
     update_xynetworks: bool = True
 
@@ -80,14 +81,14 @@ class ValidationLossLogger(Logger):
 
     def initialize(self, training_program):
         """Initialize from training program or standalone configuration."""
-    
+
         if self.name is None:
             if training_program:
                 idx = self.find_myself(training_program)
                 self.name = f"loss_{idx}"
             else:
                 self.name = "loss"
-    
+
         if training_program:
             self._training_program = training_program
             self.compute_conf = training_program.compute_conf
@@ -98,14 +99,17 @@ class ValidationLossLogger(Logger):
                 self._plot_save_dir.mkdir(exist_ok=True, parents=True)
         elif self.compute_conf is None or self.data_conf is None:
             raise ValueError("In standalone mode, compute_conf and data_conf must be provided.")
-        
+
         # Initialize predictor during async initialization phase
-        logger.info(f"ValidationLossLogger {self.name}: Starting async initialization of predictor and NetworkModel")
+        logger.info(
+            f"ValidationLossLogger {self.name}: Starting async initialization of predictor and NetworkModel"
+        )
         start_time = time.time()
         self._initialize_predictor()
         init_time = time.time() - start_time
-        logger.info(f"ValidationLossLogger {self.name}: Completed async initialization in {init_time:.2f} seconds")
-
+        logger.info(
+            f"ValidationLossLogger {self.name}: Completed async initialization in {init_time:.2f} seconds"
+        )
 
     def _initialize_predictor(self, force_reinit: bool = False):
         if self._predictor is not None and not force_reinit and self._xynetworks is not None:
@@ -166,6 +170,7 @@ class ValidationLossLogger(Logger):
             n_stats_workers=self.predictor_n_stats_workers,
             enable_gridstats=self.enable_gridstats,
             per_prediction_info=per_prediction_info,
+            device=self.device,
         )
 
         self.metadata = {
@@ -318,7 +323,9 @@ class ValidationLossLogger(Logger):
 
             for net_metrics in per_net:
                 net_table.add_row(
-                    net_metrics['network_name'][:50] + "..." if len(net_metrics['network_name']) > 50 else net_metrics['network_name'],
+                    net_metrics['network_name'][:50] + "..."
+                    if len(net_metrics['network_name']) > 50
+                    else net_metrics['network_name'],
                     f"{net_metrics['rmse']:.6f}",
                 )
 
@@ -341,32 +348,32 @@ class ValidationLossLogger(Logger):
         """Plot validation history using improved plotting functionality."""
         if not self._history or self._plot_save_dir is None:
             return
-    
+
         from time import time
         from biocomptools.toollib.loggers.plotting_utils import MetricsPlotter
-    
+
         plot_start_time = time()
-    
+
         # Use the improved MetricsPlotter for consistent styling
         output_path = self._plot_save_dir / f"val_{self.name}_{step:05d}.png"
-        
+
         # Get training_id from training program if available
-        training_id = getattr(self._training_program, 'training_id', None) if self._training_program else None
-        
+        training_id = (
+            getattr(self._training_program, 'training_id', None) if self._training_program else None
+        )
+
         MetricsPlotter.plot_validation_history(
             self._history,
             f"Validation Loss ({self.name.title()})",
-            output_path, 
+            output_path,
             self.name,
-            training_id=training_id
+            training_id=training_id,
         )
-    
+
         plot_time = time() - plot_start_time
         logger.info(
             f"ValidationLossLogger {self.name}: Plot generation completed in {plot_time:.2f} seconds"
         )
-
-
 
     def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
         self.initialize(training_program)
@@ -383,7 +390,9 @@ class ValidationLossLogger(Logger):
                     f"ValidationLossLogger {self.name}: Late initialization took {init_time:.2f} seconds"
                 )
             else:
-                logger.debug(f"ValidationLossLogger {self.name}: Using predictor initialized during async phase")
+                logger.debug(
+                    f"ValidationLossLogger {self.name}: Using predictor initialized during async phase"
+                )
 
             if step_history is None or 'latest_params' not in step_history:
                 if step == 0:
@@ -457,4 +466,3 @@ class ValidationLossLogger(Logger):
             logger.info(f"ValidationLossLogger: Created validation video: {video_path}")
         else:
             logger.debug("ValidationLossLogger: No video created (insufficient plots or errors)")
-
