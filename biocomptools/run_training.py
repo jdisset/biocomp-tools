@@ -138,7 +138,7 @@ class TrainingProgram(BaseModel):
         description='Whether to keep step history files on disk indefinitely for replay mode.',
     )
     save_all_steps: bool = Field(
-        default=True,
+        default=False,
         description='Whether to save step history for every training step, regardless of logger periods.',
     )
     n_workers: int = 8
@@ -321,14 +321,13 @@ class TrainingProgram(BaseModel):
             # add logger reference to each callback for async_ok check
             all_callbacks.extend([(period, callback, logger_obj) for period, callback in callbacks])
 
-        # Separate sync and async callbacks
         sync_callbacks = [
             (period, callback)
             for period, callback, logger_obj in all_callbacks
             if not logger_obj.async_ok
         ]
         async_callbacks = [
-            (period, callback)
+            (period, callback, logger_obj)
             for period, callback, logger_obj in all_callbacks
             if logger_obj.async_ok
         ]
@@ -340,18 +339,9 @@ class TrainingProgram(BaseModel):
         if self.async_logging and async_callbacks:
             from biocomptools.async_logger_handler import AsyncLoggerHandler
 
-            # find minimum period for async callbacks only
-            async_periods = [period for period, _ in async_callbacks if period and period > 0]
-            min_period = min(async_periods) if async_periods else 1
-
-            # If save_all_steps is enabled, force min_period to 1 to save every step
-            if self.save_all_steps:
-                min_period = 1
-
             # create async handler for async callbacks only
             async_handler = AsyncLoggerHandler(
                 logger_callbacks=async_callbacks,
-                min_period=min_period,
                 n_workers=self.n_workers,
                 logger_objects=async_loggers,
                 async_store_location=self.async_store_location,
@@ -366,12 +356,12 @@ class TrainingProgram(BaseModel):
             # wait for initialization to complete before starting training
             async_handler.wait_for_initialization()
 
-            # add single async callback to logger_callbacks
-            logger_callbacks.append((min_period, async_handler.create_callback()))
+            # add single async callback to logger_callbacks, scheduled to run every step
+            logger_callbacks.append((1, async_handler.create_callback()))
 
             save_info = f", saving all steps" if self.save_all_steps else ""
             logger.info(
-                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool, min_period={min_period}{save_info})"
+                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool{save_info})"
             )
         elif self.async_logging:
             logger.info("Async logging enabled but no async-capable loggers found")

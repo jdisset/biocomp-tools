@@ -2,14 +2,13 @@ import dill
 import time
 import tempfile
 import os
-from pathlib import Path
-from typing import List, Tuple, Callable, Any, Dict, Optional, Union
-from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
-from threading import Thread
+import shutil
 import queue
 import atexit
-import shutil
+from pathlib import Path
+from typing import List, Tuple, Callable, Any, Dict, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Thread
 
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
@@ -21,8 +20,7 @@ logger = get_logger(__name__)
 class AsyncLoggerHandler(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    logger_callbacks: List[Tuple[int, Callable]]
-    min_period: int
+    logger_callbacks: List[Tuple[int, Callable, Any]]
     n_workers: int = Field(default=8, gt=0, le=32)
     logger_objects: List[Any] = Field(default_factory=list)
     async_store_location: Optional[Path] = None
@@ -32,7 +30,6 @@ class AsyncLoggerHandler(BaseModel):
     replay_mode: bool = False
     replay_base_dir: Optional[Path] = None
 
-    # Private execution state
     tmpdir: Path = Field(exclude=True, default=None)
     cleanup_tmpdir: bool = Field(exclude=True, default=True)
     step_queue: Any = Field(exclude=True, default=None)
@@ -86,8 +83,6 @@ class AsyncLoggerHandler(BaseModel):
             self.tmpdir = Path(tempfile.mkdtemp(prefix="biocomp_async_log_"))
             self.cleanup_tmpdir = not self.keep_history_on_disk
 
-        import queue
-
         self.step_queue = queue.Queue()
         self.should_stop = False
         self.executor = None
@@ -116,13 +111,13 @@ class AsyncLoggerHandler(BaseModel):
 
     def _execute_callbacks(self, step_file: Path, step: int, filter_func: Callable):
         data = self._load_step_data(step_file)
-        callbacks_to_run = [(p, c) for p, c in self.logger_callbacks if filter_func(p, c, step)]
+        callbacks_to_run = [(p, c) for p, c, _ in self.logger_callbacks if filter_func(p, c, step)]
 
         if not callbacks_to_run:
             return
 
         futures = [self.executor.submit(self._safe_call, c, data) for _, c in callbacks_to_run]
-        [f.result(timeout=300) for f in futures]
+        [f.result() for f in futures]
 
     def _safe_call(self, callback, data):
         start_time = time.time()
@@ -185,6 +180,26 @@ class AsyncLoggerHandler(BaseModel):
 
     def create_callback(self):
         def async_callback(step, training_config, step_history=None, stack=None):
+            triggering_loggers = []
+            if not self.save_all_steps:
+                for p, _, logger_obj in self.logger_callbacks:
+                    if p is not None and p > 0 and step > 0 and step % p == 0:
+                        name = getattr(logger_obj, 'name', type(logger_obj).__name__)
+                        triggering_loggers.append(name)
+
+            should_save_this_step = self.save_all_steps or bool(triggering_loggers)
+
+            if not should_save_this_step:
+                return
+
+            if self.save_all_steps:
+                reason = "save_all_steps is True"
+            else:
+                unique_triggers = sorted(list(set(triggering_loggers)))
+                reason = f"triggered by logger(s): {', '.join(unique_triggers)}"
+
+            logger.info(f"Step {step}: Saving step data. Reason: {reason}.")
+
             try:
                 data = {
                     'step': step,
@@ -196,7 +211,7 @@ class AsyncLoggerHandler(BaseModel):
                 self._save_step_data(step, data, "regular")
                 self.step_queue.put(step)
             except Exception as e:
-                logger.error(f"Failed to save step data: {e}")
+                logger.error(f"Failed to save step data for step {step}: {e}")
                 logger.exception(e)
 
         return async_callback
@@ -237,7 +252,6 @@ class AsyncLoggerHandler(BaseModel):
                 logger.error(f"Failed to initialize logger {type(logger_obj).__name__}: {e}")
                 logger.exception(e)
 
-        # Submit initialization jobs asynchronously
         self.initialization_futures = [
             self.executor.submit(init_logger, obj) for obj in self.logger_objects
         ]
@@ -248,10 +262,9 @@ class AsyncLoggerHandler(BaseModel):
             return
 
         logger.info("Waiting for logger initialization to complete...")
-        # Wait for all initialization futures to complete
-        for future in concurrent.futures.as_completed(self.initialization_futures):
+        for future in as_completed(self.initialization_futures):
             try:
-                future.result()  # This will raise any exceptions that occurred
+                future.result()
             except Exception as e:
                 logger.error(f"Logger initialization failed: {e}")
                 logger.exception(e)
@@ -271,7 +284,6 @@ class AsyncLoggerHandler(BaseModel):
                 logger.error(f"Failed to finalize logger {type(logger_obj).__name__}: {e}")
                 logger.exception(e)
 
-        # Submit finalization jobs asynchronously
         self.finalization_futures = [
             self.executor.submit(finalize_logger, obj) for obj in self.logger_objects
         ]
@@ -282,10 +294,9 @@ class AsyncLoggerHandler(BaseModel):
             return
 
         logger.info("Waiting for logger finalization to complete...")
-        # Wait for all finalization futures to complete
-        for future in concurrent.futures.as_completed(self.finalization_futures):
+        for future in as_completed(self.finalization_futures):
             try:
-                future.result()  # This will raise any exceptions that occurred
+                future.result()
             except Exception as e:
                 logger.error(f"Logger finalization failed: {e}")
                 logger.exception(e)
@@ -294,19 +305,13 @@ class AsyncLoggerHandler(BaseModel):
         self.finalization_futures.clear()
 
     def shutdown(self):
-        # Start async finalization first
         self.finalize_loggers_async()
-
-        # Shutdown queue processing
         self.step_queue.join()
         self.should_stop = True
         self.step_queue.put(None)
         if self.processing_thread:
             self.processing_thread.join(timeout=10)
-
-        # Wait for finalization to complete before shutting down executor
         self.wait_for_finalization()
-
         if self.executor:
             self.executor.shutdown(wait=True)
         self.cleanup()
@@ -324,28 +329,14 @@ class AsyncLoggerHandler(BaseModel):
     @classmethod
     def replay_from_disk(
         cls,
-        logger_callbacks: List[Tuple[int, Callable]],
+        logger_callbacks: List[Tuple[int, Callable, Any]],
         replay_base_dir: Union[str, Path],
         n_workers: int = 8,
         logger_objects: Optional[List] = None,
         step_filter: Optional[Callable[[int], bool]] = None,
     ) -> 'AsyncLoggerHandler':
-        """
-        Create an AsyncLoggerHandler in replay mode to process previously saved step history.
-
-        Args:
-            logger_callbacks: List of (period, callback) tuples for loggers to replay
-            replay_base_dir: Directory containing saved step history files
-            n_workers: Number of workers for parallel processing
-            logger_objects: Logger objects for initialization (if needed)
-            step_filter: Optional function to filter which steps to replay (lambda step: bool)
-
-        Returns:
-            AsyncLoggerHandler instance configured for replay mode
-        """
         return cls(
             logger_callbacks=logger_callbacks,
-            min_period=1,
             n_workers=n_workers,
             logger_objects=logger_objects or [],
             replay_mode=True,
@@ -363,7 +354,6 @@ class AsyncLoggerHandler(BaseModel):
 
         logger.info(f"Found {len(all_files)} step history files for replay")
 
-        # initialize loggers with simple mock
         if self.logger_objects and all_files:
             sample_data = self._load_step_data(all_files[0])
             mock_program = type(
@@ -389,7 +379,6 @@ class AsyncLoggerHandler(BaseModel):
                 if step_filter and not step_filter(step):
                     continue
 
-                # determine filter function
                 event_type = parts[2] if len(parts) > 2 else "regular"
                 filter_func = {
                     'start': self._should_run_start_loggers,
@@ -403,12 +392,8 @@ class AsyncLoggerHandler(BaseModel):
                 logger.exception(e)
 
         logger.info(f"Replay completed: processed {processed_count} steps")
-
-        # Use async finalization for replay as well
         self.finalize_loggers_async()
         self.wait_for_finalization()
-
-        # Clean shutdown (without additional finalization since we just did it)
         self.step_queue.join()
         self.should_stop = True
         self.step_queue.put(None)
