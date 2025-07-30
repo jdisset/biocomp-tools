@@ -227,6 +227,13 @@ class NetworkModel(BaseModel):
         self.update_params()
         self._precompile_batch_apply()
 
+    @property
+    def stack(self):
+        """get compute stack"""
+        if self._stack is None:
+            self.build_stack()
+        return self._stack
+
     def build_stack(self):
         """build compute stack from networks"""
         try:
