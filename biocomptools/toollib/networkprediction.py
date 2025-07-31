@@ -441,6 +441,7 @@ class NetworkPrediction(DataSource):
     def compute_all_network_predictions(
         self,
         with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
     ):
         """compute predictions for all networks"""
 
@@ -488,6 +489,7 @@ class NetworkPrediction(DataSource):
             z_value=self.z_value,
             disable_variational=self.disable_variational,
             with_shared_params=with_shared_params,
+            with_local_params=with_local_params,
             collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
             collect_out_indices=np.concatenate(collect_out_idx).flatten()
             if collect_out_idx
@@ -541,7 +543,11 @@ class NetworkPrediction(DataSource):
         assert len(self._x) == len(self.network_model.network)
 
     def _create_xy_function(
-        self, network_idx: int
+        self,
+        network_idx: int,
+        rescale_latent: bool = False,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
     ) -> Callable[[PlotData], Tuple[NdArray, NdArray]]:
         """create a function to get x and y data for a specific network"""
 
@@ -552,8 +558,16 @@ class NetworkPrediction(DataSource):
                 )
 
             # compute predictions if not already computed
-            if not hasattr(self, '_yhats') or self._yhats is None:
-                self.compute_all_network_predictions()
+            if (
+                not hasattr(self, '_yhats')
+                or self._yhats is None
+                or with_shared_params is not None
+                or with_local_params is not None
+            ):
+                self.compute_all_network_predictions(
+                    with_shared_params=with_shared_params,
+                    with_local_params=with_local_params,
+                )
                 if self.save_csv_to:
                     self.save_csv()
 
@@ -576,7 +590,9 @@ class NetworkPrediction(DataSource):
 
             # get output position for this network
             _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
-            assert isinstance(dependent_output_pos, int)
+            assert isinstance(dependent_output_pos, int), (
+                f"dependent_output_pos should be an int, got {type(dependent_output_pos)}: {dependent_output_pos}"
+            )
             if self.verbose:
                 logger.info(f"dep_output_pos: {dependent_output_pos}")
 
@@ -584,6 +600,13 @@ class NetworkPrediction(DataSource):
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
             # add stats to metadata
             pdata.metadata['prediction_stats'] = stats[network_idx].copy()
+
+            # apply inverse rescaling if requested and data is already latent
+            if self.already_latent and rescale_latent:
+                x = self.network_model.model.rescaler.inv(x)
+                yhat = self.network_model.model.rescaler.inv(yhat)
+                if self.verbose:
+                    print("applied inverse rescaling to x and yhat")
 
             if self.use_output_as_input:
                 if self.verbose:
@@ -777,16 +800,44 @@ class NetworkPrediction(DataSource):
 
         return all_stats
 
-    def get_network_stats(self, with_shared_params: Optional[pr.ParameterTree] = None):
+    def get_network_stats(
+        self,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
+    ):
         """get statistics for all networks, computing if necessary"""
-        if not hasattr(self, '_network_stats') or self._network_stats is None or with_shared_params:
-            if not hasattr(self, '_yhats') or self._yhats is None or with_shared_params:
-                self.compute_all_network_predictions(with_shared_params=with_shared_params)
+        if (
+            not hasattr(self, '_network_stats')
+            or self._network_stats is None
+            or with_shared_params
+            or with_local_params
+        ):
+            if (
+                not hasattr(self, '_yhats')
+                or self._yhats is None
+                or with_shared_params
+                or with_local_params
+            ):
+                self.compute_all_network_predictions(
+                    with_shared_params=with_shared_params,
+                    with_local_params=with_local_params,
+                )
             else:
                 # just calculate stats if predictions already exist
                 self._network_stats = self._calculate_all_network_stats()
 
         return self._network_stats
+
+    def get_shared_params(self) -> pr.ParameterTree:
+        """get shared parameters from the network model"""
+        return self.network_model.model.shared_params
+
+    def get_local_params(self) -> pr.ParameterTree:
+        """get local parameters from the network model"""
+        # ensure the network model is built and parameters are initialized
+        if not hasattr(self.network_model, '_local_params') or self.network_model._local_params is None:
+            self.network_model.update_params()
+        return self.network_model._local_params
 
     def save_csv(self):
         """save prediction statistics to a CSV file"""
@@ -846,13 +897,18 @@ class NetworkPrediction(DataSource):
 
         raise ValueError(f"unexpected input_order type: {type(self.input_order)}")
 
-    def get_data_lazy(self) -> List[LazyPlotData]:
+    def get_data_lazy(
+        self,
+        rescale_latent=False,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
+    ) -> List[LazyPlotData]:
         """get plot data in lazy evaluation mode"""
         logger.debug(f"getting data lazily for model {self.network_model.signature}")
 
         # handle collection points if provided
         if self.collection_points is not None and len(self.collection_points) > 0:
-            return self._get_collection_data_lazy()
+            return self._get_collection_data_lazy(with_shared_params, with_local_params)
 
         # otherwise, continue with normal network data
         plot_data_list = []
@@ -862,7 +918,15 @@ class NetworkPrediction(DataSource):
         # create plot data for each network
         for i, network in enumerate(self.network_model.network):
             metadata = self._create_network_metadata(i, network)
-            plot_data = self._extract_plot_data(i, network, input_order[i], metadata)
+            plot_data = self._extract_plot_data(
+                i,
+                network,
+                input_order[i],
+                metadata,
+                rescale_latent=rescale_latent,
+                with_shared_params=with_shared_params,
+                with_local_params=with_local_params,
+            )
 
             network_info = metadata['network_info']
             pretty_inputs = make_pretty_input_names(
@@ -876,7 +940,11 @@ class NetworkPrediction(DataSource):
         logger.debug(f"returning {len(plot_data_list)} plot data objects")
         return plot_data_list
 
-    def _get_collection_data_lazy(self) -> List[LazyPlotData]:
+    def _get_collection_data_lazy(
+        self,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
+    ) -> List[LazyPlotData]:
         """get plot data for collection points in lazy evaluation mode"""
         logger.debug(f"getting collection data lazily for model {self.network_model.signature}")
 
@@ -885,8 +953,16 @@ class NetworkPrediction(DataSource):
         plot_data_list = []
 
         # compute index offsets for each collection point if needed
-        if not hasattr(self, '_collected_in') or self._collected_in is None:
-            self.compute_all_network_predictions()
+        if (
+            not hasattr(self, '_collected_in')
+            or self._collected_in is None
+            or with_shared_params is not None
+            or with_local_params is not None
+        ):
+            self.compute_all_network_predictions(
+                with_shared_params=with_shared_params,
+                with_local_params=with_local_params,
+            )
 
         assert self._collected_in is not None
         assert len(self.collection_points) == len(self._input_shapes)
@@ -913,8 +989,16 @@ class NetworkPrediction(DataSource):
                 output_shapes=self._output_shapes[i],
                 i=i,
             ) -> Tuple[NdArray, NdArray]:
-                if not hasattr(self, '_collected_in') or self._collected_in is None:
-                    self.compute_all_network_predictions()
+                if (
+                    not hasattr(self, '_collected_in')
+                    or self._collected_in is None
+                    or with_shared_params is not None
+                    or with_local_params is not None
+                ):
+                    self.compute_all_network_predictions(
+                        with_shared_params=with_shared_params,
+                        with_local_params=with_local_params,
+                    )
                 assert self._collected_in is not None
                 assert self._collected_out is not None
 
@@ -1010,13 +1094,25 @@ class NetworkPrediction(DataSource):
         return metadata
 
     def _extract_plot_data(
-        self, network_idx: int, network, input_order: Optional[List[int]], metadata: Dict[str, Any]
+        self,
+        network_idx: int,
+        network,
+        input_order: Optional[List[int]],
+        metadata: Dict[str, Any],
+        rescale_latent: bool = False,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
     ) -> LazyPlotData:
         """extract plot data from a network"""
         import biocomp.plotutils as pu
 
         # create function to get data for this network
-        get_xy_fn = self._create_xy_function(network_idx)
+        get_xy_fn = self._create_xy_function(
+            network_idx,
+            rescale_latent=rescale_latent,
+            with_shared_params=with_shared_params,
+            with_local_params=with_local_params,
+        )
 
         # extract plot data
         plot_data = pu.extract_lazy_plot_data_from_network(
@@ -1032,9 +1128,18 @@ class NetworkPrediction(DataSource):
 
         return plot_data
 
-    def get_data(self) -> List[PlotData]:
+    def get_data(
+        self,
+        rescale_latent=False,
+        with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
+    ) -> List[PlotData]:
         """get fully-evaluated plot data"""
-        lazy_data = self.get_data_lazy()
+        lazy_data = self.get_data_lazy(
+            rescale_latent=rescale_latent,
+            with_shared_params=with_shared_params,
+            with_local_params=with_local_params,
+        )
 
         # evaluate all plot data
         for i, data in enumerate(lazy_data):

@@ -228,6 +228,13 @@ class NetworkModel(BaseModel):
         self._precompile_batch_apply()
 
     @property
+    def params(self):
+        """get parameters"""
+        if self._params is None:
+            self.update_params()
+        return self._params
+
+    @property
     def stack(self):
         """get compute stack"""
         if self._stack is None:
@@ -435,6 +442,7 @@ class NetworkModel(BaseModel):
         disable_variational: bool = True,
         z_value: Union[str, float] = 'uniform',
         with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
@@ -457,6 +465,7 @@ class NetworkModel(BaseModel):
             disable_variational=disable_variational,
             z_value=z_value,
             with_shared_params=with_shared_params,
+            with_local_params=with_local_params,
             collect_in_indices=collect_in_indices,
             collect_out_indices=collect_out_indices,
             device=device,
@@ -472,6 +481,7 @@ class NetworkModel(BaseModel):
         disable_variational: bool = True,
         z_value: Union[str, float] = 'uniform',
         with_shared_params: Optional[pr.ParameterTree] = None,
+        with_local_params: Optional[pr.ParameterTree] = None,
         collect_in_indices: Optional[np.ndarray] = None,
         collect_out_indices: Optional[np.ndarray] = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
@@ -484,6 +494,8 @@ class NetworkModel(BaseModel):
             key: random key for predictions
             max_points_per_batch: maximum number of output points per batch
             disable_variational: whether to disable variational parameters
+            with_shared_params: optional ParameterTree to replace shared parameters during prediction
+            with_local_params: optional ParameterTree to replace local parameters during prediction
 
             collection_points: list of points to collect data from. Each point is a NodeSpec,
             meaning a network id and node id that will be used to index the full, flattened, running output of the network
@@ -506,11 +518,22 @@ class NetworkModel(BaseModel):
             key = jax.random.PRNGKey(key)
 
         # prepare parameters
-        if with_shared_params is None:
+        if with_shared_params is None and with_local_params is None:
             params = self._params
         else:
-            shared_params = get_shared_params(with_shared_params)
-            params = pr.ParameterTree.merge(shared_params, self._local_params)
+            # use provided shared params or default to model's shared params
+            if with_shared_params is not None:
+                shared_params = get_shared_params(with_shared_params)
+            else:
+                shared_params = self.model.shared_params
+            
+            # use provided local params or default to model's local params
+            if with_local_params is not None:
+                local_params = get_nonshared_params(with_local_params)
+            else:
+                local_params = self._local_params
+            
+            params = pr.ParameterTree.merge(shared_params, local_params)
 
         if disable_variational:
             logger.debug("disabling variational embeddings")

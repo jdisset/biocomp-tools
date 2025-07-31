@@ -5,7 +5,7 @@ matplotlib.use('Agg')  # Use non-interactive backend to prevent GUI issues in th
 
 from dracon.deferred import DeferredNode
 from typing import List, Tuple, Callable
-from biocomptools.plot import plot_extra_context
+from biocomptools.plot import DEFAULT_CONTEXT
 from biocomptools.plot import PlotJob
 from biocomptools.toollib.loggers.logger import Logger
 from dracon.utils import ser_debug
