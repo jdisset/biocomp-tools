@@ -213,7 +213,7 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
-    def run(self, overwrite: bool = True):
+    def run(self, overwrite: bool = True, finalize: bool = True):
         if not overwrite and self.figure_spec.output_path.exists():
             logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
             return
@@ -235,8 +235,15 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
-            self.figure_spec.metadata = metadata
-            self.figure_spec.finalize(self._figax)  # type: ignore
+            if finalize:
+                self.figure_spec.metadata = metadata
+                self.figure_spec.finalize(self._figax)  # type: ignore
+
+    @property
+    def fig(self):
+        if hasattr(self, '_figax'):
+            return self._figax.figure
+        raise AttributeError("Figure not prepared yet. Call 'prepare()' first.")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

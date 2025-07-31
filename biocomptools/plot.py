@@ -333,7 +333,7 @@ class PlotJob(BaseModel):
         logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
 
 
-plot_extra_context = {
+DEFAULT_CONTEXT = {
     **make_context_from_types(DEFAULT_TYPES),
     'get_pretty_axis_label': get_pretty_axis_label,
     'urlencoded': urlencoded,
@@ -355,7 +355,7 @@ def main():
         deferred_paths=[
             '/figures.*',
         ],
-        context=plot_extra_context,
+        context=DEFAULT_CONTEXT,
         enable_shorthand_vars=False,
     )
 
