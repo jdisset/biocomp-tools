@@ -1,0 +1,16 @@
+!define BASE_ERNS: [CasE, Csy4, PgU]
+
+!define rotations: ${[BASE_ERNS[i:] + BASE_ERNS[:i] for i in range(len(BASE_ERNS))]}
+!define permutations: ${[[a,b,c] for a in BASE_ERNS for b in BASE_ERNS for c in BASE_ERNS if len(set([a,b,c])) == 3]}
+
+!each(rotation) ${rotations}:
+  - !define ERNS: ${rotation}
+    <<: !include file:$DIR/twoandone.yaml
+
+!each(permutation) ${permutations}:
+  - !define ERNS: ${permutation}
+    <<: !include file:$DIR/twoandoneskip.yaml
+
+!each(i) ${[1]}:
+  - !define ERNS: ${BASE_ERNS}
+    <<: !include file:$DIR/three.yaml

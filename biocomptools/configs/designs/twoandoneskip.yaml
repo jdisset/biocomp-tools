@@ -1,0 +1,91 @@
+!Network
+!set_default ERNS: [CasE, Csy4, PgU]
+!set_default PROMOTER: hEF1a
+!set_default TERMINATOR: L0.T_4560
+!set_default COLORS: { x1: mKO2, x2: eBFP2, b: mMaroon1, y: mNeonGreen }
+
+!set_default UORFS:
+  - null
+  - 1w_uORF
+  - 1x_uORF
+  - 2x_uORF
+  - 3x_uORF
+  - 4x_uORF
+  - 5x_uORF
+  - 6x_uORF
+  - 8x_uORF
+
+!noconstruct u1: &u1
+  part: ${UORFS}
+  ref_id: U1
+
+!noconstruct u2: &u2
+  part: ${UORFS}
+  ref_id: U2
+
+!noconstruct u3: &u3
+  part: ${UORFS}
+  ref_id: U3
+
+!set_default RECS: ${[ern + "_rec" for ern in ERNS]}
+
+!noconstruct _: &unit
+  - slots:
+      - ${PROMOTER}
+      - ${COLORS[tu]}
+      - ${TERMINATOR}
+    name: ${tu}_marker
+  - slots:
+      - ${PROMOTER}
+      - ${u1}
+      - ${RECS[0]}
+      - ${ERNS[1]}
+      - ${TERMINATOR}
+    name: ${tu}_a+
+  - slots:
+      - ${PROMOTER}
+      - ${ERNS[0]}
+      - ${TERMINATOR}
+    name: ${tu}_a-
+  - slots:
+      - ${PROMOTER}
+      - ${u2}
+      - ${RECS[1]}
+      - ${COLORS[y]}
+      - ${TERMINATOR}
+    name: ${tu}_b+
+  - slots:
+      - ${PROMOTER}
+      - ${ERNS[1]}
+      - ${TERMINATOR}
+    name: ${tu}_b-
+  - slots:
+      - ${PROMOTER}
+      - ${u3}
+      - ${RECS[2]}
+      - ${COLORS[y]}
+      - ${TERMINATOR}
+    name: ${tu}_c+
+  - slots:
+      - ${PROMOTER}
+      - ${ERNS[2]}
+      - ${TERMINATOR}
+    name: ${tu}_c-
+  - slots:
+      - ${PROMOTER}
+      - ${COLORS[y]}
+      - ${TERMINATOR}
+    name: ${tu}_direct_out
+
+cotx:
+  - name: x1
+    units:
+      - ${&/unit:tu=x1}
+  - name: x2
+    units:
+      - ${&/unit:tu=x2}
+  - name: b
+    units:
+      - ${&/unit:tu=b}
+
+invert_on_build: true
