@@ -404,7 +404,7 @@ class ModelSelector(BaseModel):
         logger.debug(f"After grouping: {len(result_models)} models selected")
         return result_models
 
-    def get_model(self, session=None, raise_if_multiple: bool = True) -> Optional[TrainedModel]:
+    def get_model(self, session=None, raise_if_multiple: bool = True) -> TrainedModel:
         sess = session or self.db_session
         close_session_locally = session is None
 
@@ -414,7 +414,9 @@ class ModelSelector(BaseModel):
                 raise ValueError(
                     f"Multiple models found for selector: {self}. Use get_models() instead."
                 )
-            return models[0] if models else None
+            if not models:
+                raise ValueError(f"No models found for selector: {self}")
+            return models[0]
         finally:
             if close_session_locally:
                 sess.close()

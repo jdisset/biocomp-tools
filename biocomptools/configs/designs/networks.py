@@ -1,3 +1,6 @@
+from biocomp.network import Network, CoTransfection, TranscriptionUnit, Slot, Unit
+import itertools as it
+
 ## {{{                      --     net generation     --
 P = "hEF1a"
 T = "L0.T_4560"
@@ -160,15 +163,21 @@ def make_three_network(erns=None):
     )
 
 
-nets = []
-rotations = [ERNS[i:] + ERNS[:i] for i in range(len(ERNS))]
-permutations = list(it.permutations(ERNS))
-nets += [make_twoandone_network(erns=rot) for rot in rotations]
-nets += [make_twoandoneskip_network(erns=per) for per in permutations]
-nets += [make_three_network(erns=ERNS)]
+def make_all_networks():
+    """
+    Generate all networks with the given ERNs.
+    """
+    networks = []
+    rotations = [ERNS[i:] + ERNS[:i] for i in range(len(ERNS))]
+    permutations = list(it.permutations(ERNS))
+    networks += [make_twoandone_network(erns=rot) for rot in rotations]
+    networks += [make_twoandoneskip_network(erns=per) for per in permutations]
+    networks += [make_three_network(erns=ERNS)]
+    for net in networks:
+        net.set_input_as_bias('mMaroon1')
+    return networks
 
-len(nets)
 
+ALL_NETWORKS = make_all_networks()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

@@ -80,12 +80,12 @@
 cotx:
   - name: x1
     units:
-      - ${&/unit:tu=x1}
+      - "${&unit:tu='x1'}"
   - name: x2
     units:
-      - ${&/unit:tu=x2}
+      - "${&unit:tu='x2'}"
   - name: b
     units:
-      - ${&/unit:tu=b}
+      - "${&unit:tu='b'}"
 
 invert_on_build: true
