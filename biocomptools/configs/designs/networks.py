@@ -61,7 +61,9 @@ def make_units(tu_name, erns=None):
 
 
 def make_twoandone_network(erns=None):
+    ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
     return Network(
+        name=f"two_and_one ({ern_names})",
         cotx=[
             CoTransfection(
                 name="x1",
@@ -103,7 +105,9 @@ def make_units_withskip(tu_name, erns=None, direct=True):
 
 
 def make_twoandoneskip_network(erns=None):
+    ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
     return Network(
+        name=f"two_and_one_skip ({ern_names})",
         cotx=[
             CoTransfection(
                 name="x1",
@@ -144,7 +148,9 @@ def make_units_three(tu_name, erns=None, direct=True):
 
 
 def make_three_network(erns=None):
+    ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
     return Network(
+        name=f"three ({ern_names})",
         cotx=[
             CoTransfection(
                 name="x1",
