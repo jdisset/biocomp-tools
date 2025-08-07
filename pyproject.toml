@@ -31,6 +31,7 @@ dependencies = [
 [project.scripts]
 biocomp-plot= "biocomptools.plot:main"
 biocomp-train= "biocomptools.run_training:main"
+biocomp-design= "biocomptools.run_design:main"
 biocomp-check = "biocomptools.test_dataset:main"
 biocomp-updatedb = "biocomptools.update_biocompdb:main"
 biocomp-updatepartsdb = "biocomptools.update_partsdb:main"

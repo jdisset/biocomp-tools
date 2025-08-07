@@ -40,10 +40,16 @@ u3 = Slot(
 )
 
 
-def make_units(tu_name, erns=None):
+def make_units(tu_name, erns=None, mask=None):
     erns = erns or ERNS
     recs = [f"{ern}_rec" for ern in erns]
-    return [
+    N_MAX_UNITS = 8
+    if mask is None:
+        mask = [True] * N_MAX_UNITS
+
+    assert len(mask) == N_MAX_UNITS, f"Mask length must be {N_MAX_UNITS}, got {len(mask)}"
+
+    unmasked = [
         # marker
         Unit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker"),
         # a
@@ -58,6 +64,8 @@ def make_units(tu_name, erns=None):
         # direct_out
         Unit(slots=[P, COLORS['y'], T], name=f"{tu_name}_direct_out"),
     ]
+    units = [unmasked[i] for i in range(N_MAX_UNITS) if mask[i]]
+    return units
 
 
 def make_twoandone_network(erns=None):
@@ -147,6 +155,24 @@ def make_units_three(tu_name, erns=None, direct=True):
     return units
 
 
+def make_units_two(tu_name, erns=None, direct=True):
+    erns = erns or ERNS
+    recs = [f"{ern}_rec" for ern in erns]
+    units = [
+        # marker
+        Unit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker"),
+        # a
+        Unit(slots=[P, u1, recs[0], COLORS['y'], T], name=f"{tu_name}_a+"),
+        Unit(slots=[P, erns[0], T], name=f"{tu_name}_a-"),
+        # b
+        Unit(slots=[P, u2, recs[1], COLORS['y'], T], name=f"{tu_name}_b+"),
+        Unit(slots=[P, erns[1], T], name=f"{tu_name}_b-"),
+    ]
+    if direct:
+        units.append(Unit(slots=[P, COLORS['y'], T], name=f"{tu_name}_direct_out"))
+    return units
+
+
 def make_three_network(erns=None):
     ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
     return Network(
@@ -169,6 +195,24 @@ def make_three_network(erns=None):
     )
 
 
+def make_two_network(erns=None):
+    ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
+    return Network(
+        name=f"two ({ern_names})",
+        cotx=[
+            CoTransfection(
+                name="x1",
+                units=make_units_two("x1", erns=erns),
+            ),
+            CoTransfection(
+                name="x2",
+                units=make_units_two("x2", erns=erns),
+            ),
+        ],
+        invert_on_build=True,
+    )
+
+
 def make_all_networks():
     """
     Generate all networks with the given ERNs.
@@ -181,9 +225,18 @@ def make_all_networks():
     networks += [make_three_network(erns=ERNS)]
     for net in networks:
         net.set_input_as_bias('mMaroon1')
+    networks += [make_two_network(erns=rot) for rot in rotations]
     return networks
 
 
 ALL_NETWORKS = make_all_networks()
+THREE_NETWORKS = [n for n in ALL_NETWORKS if n.name.startswith("three")]
+TWO_AND_ONE_SKIP_NETWORKS = [n for n in ALL_NETWORKS if n.name.startswith("two_and_one_skip")]
+TWO_AND_ONE_NETWORKS = [
+    n
+    for n in ALL_NETWORKS
+    if n.name.startswith("two_and_one") and not n.name.startswith("two_and_one_skip")
+]
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}

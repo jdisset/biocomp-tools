@@ -67,12 +67,15 @@ logging:
     !if ${getenv('BCTOOLS_DEBUG', 0)}:
       then:
         biocomptools.run_training: DEBUG
+        biocomptools.run_design: DEBUG
+        biocomptools.optimtools: DEBUG
         biocomptools.toollib.datasources: DEBUG
         biocomptools.toollib.networkselector: DEBUG
         biocomptools.toollib.networkprediction: DEBUG
         biocomptools.toollib.models: DEBUG
         biocomptools.toollib.figuremakers.innernodes: DEBUG
         biocomptools.toollib.loggers.plotlogger: DEBUG
+        biocomptools.toollib.loggers.paramgradlogger: DEBUG
         biocomptools.toollib.plot: DEBUG
         biocomptools.toollib.trainutils: DEBUG
         biocomptools.mlflowlogger: DEBUG
@@ -80,12 +83,15 @@ logging:
         biocomptools.plot: DEBUG
       else:
         biocomptools.run_training: INFO
+        biocomptools.run_design: INFO
+        biocomptools.optimtools: INFO
         biocomptools.toollib.datasources: INFO
         biocomptools.toollib.networkselector: INFO
         biocomptools.toollib.networkprediction: INFO
         biocomptools.toollib.models: INFO
         biocomptools.toollib.figuremakers.innernodes: INFO
         biocomptools.toollib.loggers.plotlogger: INFO
+        biocomptools.toollib.loggers.paramgradlogger: INFO
         biocomptools.toollib.plot: INFO
         biocomptools.toollib.trainutils: INFO
         biocomptools.mlflowlogger: INFO

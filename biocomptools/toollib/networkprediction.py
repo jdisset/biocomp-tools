@@ -311,6 +311,8 @@ class NetworkPrediction(DataSource):
     gridstats_radius: float = 0.1
     gridstats_min_points: int = 40
 
+    shuffle_inputs: bool = True  # shuffle inputs before prediction
+
     n_stats_workers: int = 8  # number of workers for parallel processing of statistics
 
     verbose: bool = False  # print prediction statistics to the console
@@ -349,7 +351,8 @@ class NetworkPrediction(DataSource):
                 )
 
         # shuffle inputs with fixed random seed
-        self._shuffle_inputs()
+        if self.shuffle_inputs:
+            self._shuffle_inputs()
 
         # prepare aligned inputs
         self._aligned_x, self._aligned_ground_truth = self._prepare_inputs()
@@ -835,7 +838,10 @@ class NetworkPrediction(DataSource):
     def get_local_params(self) -> pr.ParameterTree:
         """get local parameters from the network model"""
         # ensure the network model is built and parameters are initialized
-        if not hasattr(self.network_model, '_local_params') or self.network_model._local_params is None:
+        if (
+            not hasattr(self.network_model, '_local_params')
+            or self.network_model._local_params is None
+        ):
             self.network_model.update_params()
         return self.network_model._local_params
 

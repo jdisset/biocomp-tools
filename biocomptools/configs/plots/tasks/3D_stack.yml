@@ -1,6 +1,6 @@
 !set_default axnum: null
-!set_default nslices: 25
-!set_default threshold: 0.225
+!set_default nslices: 30
+!set_default threshold: 0.235
 !set_default opacity: 0.25
 !set_default zlims: [0, 0.6]
 
@@ -9,27 +9,33 @@
 plot_config:
   <<: !include pkg:biocomptools:configs/plot_config/default_plotconf_v2
   <<{+<}:
+    # rc_context:
+    #   figure.subplot.wspace: 0.1
+    #   figure.constrained_layout.wspace: 0.1
     callstack_params:
-      knn_stats_params:
-        k: 1000
-        min_points: 25
-        radius: 0.12
-
       smooth_3d_params:
-        draw_colorbar: false
+        draw_colorbar: true
         show_inner_spines: false
         show_slice_ticks: false
         show_front_face_ticks: true
         xaxis_labelpad: 10
         yaxis_labelpad: 10
+        colorbar_position: [1.5, 0.4]
         cube_edge_props:
           bottom_right:
             zaxis_title:
               offset: [50, 0]
-
         smooth_2d_params:
           knn_grid_params:
-            grid_resolution: 70
+            grid_resolution: 100
+            knn_stats_params:
+              density_power: 1
+              # weight_by_densities: true
+              weight_by_densities: false
+              # adaptive_sigma: true
+              k: 100
+              min_points: 5
+              radius: 0.10
           heatmap_params:
             opacity: ${float(opacity)}
             show_image: True

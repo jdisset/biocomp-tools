@@ -20,6 +20,7 @@ class EnhancedConsoleLogger(Logger):
 
     plot_height: int = 22
     plot_width: int = 100
+    top_k_designs: int = 2  # number of top designs to show per target in design mode
     async_ok: bool = False  # fast console logger doesn't need async
 
     def __init__(self, *args, **kwargs):
@@ -29,24 +30,86 @@ class EnhancedConsoleLogger(Logger):
         self._global_step_counter = 0
         self._best_mean_loss = float('inf')
 
-    def _print_step_stats(self, step: int, losses: np.ndarray):
+    def _print_step_stats(self, step: int, losses: np.ndarray, all_losses: np.ndarray = None):
         """Print detailed statistics for current step"""
         from rich.console import Console
         from rich.table import Table
 
         console = Console()
         losses = np.asarray(losses)
-        table = Table(title=f"Step {step} Statistics")
-        table.add_column("Replicate", justify="right", style="cyan")
-        table.add_column("Avg Loss", justify="right", style="green")
-        table.add_column("Min Loss", justify="right", style="blue")
-        table.add_column("Max Loss", justify="right", style="red")
+        
+        # check if we're in design mode by looking for all_losses
+        if all_losses is not None:
+            self._print_design_stats(step, all_losses, console, self.top_k_designs)
+        else:
+            # original training mode stats
+            table = Table(title=f"Step {step} Statistics")
+            table.add_column("Replicate", justify="right", style="cyan")
+            table.add_column("Avg Loss", justify="right", style="green")
+            table.add_column("Min Loss", justify="right", style="blue")
+            table.add_column("Max Loss", justify="right", style="red")
 
-        for i, loss in enumerate(losses):
-            avg_loss = np.mean(loss)
-            min_loss = np.min(loss)
-            max_loss = np.max(loss)
-            table.add_row(str(i), f"{avg_loss:.4f}", f"{min_loss:.4f}", f"{max_loss:.4f}")
+            for i, loss in enumerate(losses):
+                avg_loss = np.mean(loss)
+                min_loss = np.min(loss)
+                max_loss = np.max(loss)
+                table.add_row(str(i), f"{avg_loss:.4f}", f"{min_loss:.4f}", f"{max_loss:.4f}")
+
+            console.print(table)
+
+    def _print_design_stats(self, step: int, all_losses: np.ndarray, console, top_k: int = 2):
+        """Print design mode statistics showing top-k losses per target"""
+        from rich.table import Table
+        
+        all_losses = np.asarray(all_losses)
+        
+        # handle different possible shapes of all_losses
+        if all_losses.ndim == 2:
+            # single replicate case: (n_targets, n_networks)
+            n_targets, n_networks = all_losses.shape
+            n_replicates = 1
+            all_losses = all_losses[None, :, :]  # add replicate dimension
+        elif all_losses.ndim == 3:
+            # (n_replicates, n_targets, n_networks)
+            n_replicates, n_targets, n_networks = all_losses.shape
+        elif all_losses.ndim == 4:
+            # (n_replicates, n_batches_per_step, n_targets, n_networks)
+            n_replicates, n_batches, n_targets, n_networks = all_losses.shape
+            # average over batches to get (n_replicates, n_targets, n_networks)
+            all_losses = np.mean(all_losses, axis=1)
+        else:
+            console.print(f"[red]Unexpected all_losses shape: {all_losses.shape}[/red]")
+            return
+
+        table = Table(title=f"Step {step} Design Statistics (Top {top_k} per Target)")
+        table.add_column("Target", justify="right", style="cyan")
+        table.add_column("Rep", justify="right", style="yellow")
+        table.add_column("Net", justify="right", style="magenta")
+        table.add_column("Loss", justify="right", style="green")
+
+        for target_id in range(n_targets):
+            # get losses for this target across all replicates and networks
+            target_losses = all_losses[:, target_id, :]  # shape: (n_replicates, n_networks)
+            flat_losses = target_losses.reshape(-1)  # flatten to (n_replicates * n_networks)
+            
+            # get top-k indices (lowest losses)
+            top_k_actual = min(top_k, len(flat_losses))
+            top_indices = np.argsort(flat_losses)[:top_k_actual]
+            
+            for rank, flat_idx in enumerate(top_indices):
+                # convert flat index back to (replicate, network)
+                rep_id = flat_idx // n_networks
+                net_id = flat_idx % n_networks
+                loss_val = flat_losses[flat_idx]
+                
+                # style the best result differently
+                loss_style = "bright_green" if rank == 0 else "green"
+                table.add_row(
+                    str(target_id) if rank == 0 else "",  # only show target_id for first row
+                    str(rep_id), 
+                    str(net_id), 
+                    f"[{loss_style}]{loss_val:.4f}[/{loss_style}]"
+                )
 
         console.print(table)
 
@@ -101,8 +164,10 @@ class EnhancedConsoleLogger(Logger):
             if step_history is not None:
                 losses = step_history.get('loss')
                 if losses is not None:
+                    # check for design mode by looking for all_losses in step_history
+                    all_losses = step_history.get('all_losses')
                     self._update_history(step, losses)
-                    self._print_step_stats(step, losses)
+                    self._print_step_stats(step, losses, all_losses)
                     self._plot_loss_history()
 
         return [(self.periods, log_loss)]

@@ -312,6 +312,7 @@ class InnerNodesFigure(Figure):
                 ],
                 invert_on_build=True,
             )
+
             all_networks.append(net)
             all_node_specs.append(
                 NodeSpec(
@@ -520,14 +521,26 @@ class InnerNodesFigure(Figure):
     def _plot_ern_row(self, row_fig: mpl.figure.SubFigure, ern_nodes: List[NodeData]) -> int:
         if not ern_nodes:
             # If no ERN nodes, create empty subplot or placeholder
-            row_fig.suptitle("ERN Nodes and Embeddings (No ERN data available)", fontsize=16, y=1.0, fontweight="bold")
+            row_fig.suptitle(
+                "ERN Nodes and Embeddings (No ERN data available)",
+                fontsize=16,
+                y=1.0,
+                fontweight="bold",
+            )
             ax = row_fig.add_subplot(1, 1, 1)
-            ax.text(0.5, 0.5, "No ERN nodes found in this model", 
-                   ha='center', va='center', fontsize=14, transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "No ERN nodes found in this model",
+                ha='center',
+                va='center',
+                fontsize=14,
+                transform=ax.transAxes,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
             return
-            
+
         row_fig.suptitle("ERN Nodes and Embeddings", fontsize=16, y=1.0, fontweight="bold")
         row_subfigs = row_fig.subfigures(1, 2, width_ratios=[4, 1], wspace=-0.05)
 
@@ -730,11 +743,18 @@ class InnerNodesFigure(Figure):
             logger.warning(f"Failed to plot ERN row: {e}")
             # Create a placeholder for the ERN row
             ax = main_subfigs[0].add_subplot(1, 1, 1)
-            ax.text(0.5, 0.5, f"ERN plotting failed: {str(e)}", 
-                   ha='center', va='center', fontsize=12, transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                f"ERN plotting failed: {str(e)}",
+                ha='center',
+                va='center',
+                fontsize=12,
+                transform=ax.transAxes,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
-            
+
         self._plot_forward_row(main_subfigs[1], basic_core, uorf_nodes)
         if SHOW_INVERSE_NODES:
             self._plot_inverse_row(main_subfigs[2], inverse_nodes)
@@ -752,7 +772,7 @@ class InnerNodesFigure(Figure):
 
         try:
             logger.debug("Creating figure layout...")
-            figax = self.figure_spec.make_figure()
+            self._figax = self.figure_spec.make_figure()
 
             logger.debug("Generating inner nodes figure...")
             # Replace the figure with our new implementation
@@ -760,10 +780,10 @@ class InnerNodesFigure(Figure):
 
             logger.debug("Replacing figure in figax...")
             # Replace the figure in figax
-            figax.figure = new_fig
+            self._figax.figure = new_fig
 
             logger.debug("Finalizing figure...")
-            self.figure_spec.finalize(figax)
+            self.figure_spec.finalize(self._figax)
             logger.debug("=== InnerNodesFigure.run() COMPLETED SUCCESSFULLY ===")
 
         except Exception as e:

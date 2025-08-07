@@ -74,6 +74,7 @@ callstack_params:
     vlims: ${vlims}
     heatmap_params:
       bad_color: "#ffffff"
+      contours: 0
 
     colorbar_params:
       size: [0.06, 0.85]
@@ -94,7 +95,7 @@ callstack_params:
     zlims: ${zlims}
     vlims: ${vlims}
     zslices: [0.05, 0.25, 0.4, 0.55]
-    draw_colorbar: null
+    draw_colorbar: true
     colorbar_position: [1.05, 0.4]
     colorbar_size: [0.045, 0.5]
     projection_angle: 45.0

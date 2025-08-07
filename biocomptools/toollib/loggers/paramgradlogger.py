@@ -63,11 +63,12 @@ def _calculate_figure_dimensions(
     shared_params,
     nonshared_params,
     plot_local_params,
+    plot_shared_params=True,
     base_width=4.0,
     base_height=3,
 ):
     """Calculate figure dimensions based on parameter counts and subplot layouts."""
-    shared_count = _count_filtered_parameters(shared_params)
+    shared_count = _count_filtered_parameters(shared_params) if plot_shared_params else 0
     nonshared_count = _count_filtered_parameters(nonshared_params) if plot_local_params else 0
 
     # Calculate rows and columns for each section
@@ -628,6 +629,7 @@ def plot_parameter_diagnostics(
     colors=None,
     grid_alpha: float = 0.15,
     plot_local_params: bool = True,
+    plot_shared_params: bool = True,
 ):
     if colors is None:
         colors = {
@@ -648,22 +650,22 @@ def plot_parameter_diagnostics(
         }
 
     # Separate shared and non-shared parameters using the proper functions
-    shared_params = get_shared_params(params)
+    shared_params = get_shared_params(params) if plot_shared_params else None
     nonshared_params = get_nonshared_params(params) if plot_local_params else None
 
     shared_gradients = None
     nonshared_gradients = None
     if param_gradients is not None:
-        shared_gradients = get_shared_params(param_gradients)
+        shared_gradients = get_shared_params(param_gradients) if plot_shared_params else None
         nonshared_gradients = get_nonshared_params(param_gradients) if plot_local_params else None
 
     # Determine height ratios based on which sections have data
-    has_shared = shared_params is not None
+    has_shared = shared_params is not None and plot_shared_params
     has_nonshared = nonshared_params is not None and plot_local_params
 
     # Calculate optimal figure dimensions based on parameter counts
     fwidth, fheight, shared_rows, nonshared_rows = _calculate_figure_dimensions(
-        shared_params, nonshared_params, plot_local_params
+        shared_params, nonshared_params, plot_local_params, plot_shared_params
     )
 
     # Create figure with subfigures
@@ -745,6 +747,7 @@ class ParamGradLogger(Logger):
 
     output_dir: str = "plots/params_diagnostics"
     plot_local_params: bool = False
+    plot_shared_params: bool = True
     learning_rate: Optional[float] = None  # if None, will try to extract from step_history
     replicate: Optional[int] = None  # if None, will plot all replicates
     grad_aggregation: Literal['mean', 'first'] = 'mean'
@@ -862,6 +865,7 @@ class ParamGradLogger(Logger):
                     title=main_title,
                     show_plot=False,
                     plot_local_params=self.plot_local_params,
+                    plot_shared_params=self.plot_shared_params,
                 )
                 t2 = time.time()
 

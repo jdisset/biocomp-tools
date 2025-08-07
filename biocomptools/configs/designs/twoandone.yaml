@@ -38,49 +38,49 @@
       - !Slot ${TERMINATOR}
     name: ${tu}_marker
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
-      - !Slot ${&u1}
+      - !Slot ${construct(&u1)}
       - !Slot ${RECS[0]}
       - !Slot ${ERNS[2]}
       - !Slot ${TERMINATOR}
     name: ${tu}_a+
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
       - !Slot ${ERNS[0]}
       - !Slot ${TERMINATOR}
     name: ${tu}_a-
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
-      - !Slot ${&u2}
+      - !Slot ${construct(&u2)}
       - !Slot ${RECS[1]}
       - !Slot ${ERNS[2]}
       - !Slot ${TERMINATOR}
     name: ${tu}_b+
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
       - !Slot ${ERNS[1]}
       - !Slot ${TERMINATOR}
     name: ${tu}_b-
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
-      - !Slot ${&u3}
+      - !Slot ${construct(&u3)}
       - !Slot ${RECS[2]}
       - !Slot ${COLORS['y']}
       - !Slot ${TERMINATOR}
     name: ${tu}_c+
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
       - !Slot ${ERNS[2]}
       - !Slot ${TERMINATOR}
     name: ${tu}_c-
   - !TranscriptionUnit
-    slots: !Slot
+    slots:
       - !Slot ${PROMOTER}
       - !Slot ${COLORS['y']}
       - !Slot ${TERMINATOR}

@@ -348,9 +348,8 @@ class NetworkModel(BaseModel):
             if self._batch_apply_cpu is not None:
                 try:
                     start_time = time()
-                    _ = self._batch_apply_cpu(
-                        dummy_params, dummy_x, dummy_z, dummy_keys
-                    ).block_until_ready()
+                    yhatdummy, _ = self._batch_apply_cpu(dummy_params, dummy_x, dummy_z, dummy_keys)
+                    yhatdummy.block_until_ready()
                     cpu_compile_time = time() - start_time
                     logger.info(f"CPU batch_apply precompiled in {cpu_compile_time:.2f} seconds")
                 except Exception as e:
@@ -360,9 +359,10 @@ class NetworkModel(BaseModel):
             if self._batch_apply_gpu is not self._batch_apply_cpu:
                 try:
                     start_time = time()
-                    _ = self._batch_apply_gpu(
+                    yhatdummy, _ = self._batch_apply_gpu(
                         dummy_params, dummy_x, dummy_z, dummy_keys
                     ).block_until_ready()
+                    yhatdummy.block_until_ready()
                     gpu_compile_time = time() - start_time
                     logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")
                 except Exception as e:
@@ -526,13 +526,13 @@ class NetworkModel(BaseModel):
                 shared_params = get_shared_params(with_shared_params)
             else:
                 shared_params = self.model.shared_params
-            
+
             # use provided local params or default to model's local params
             if with_local_params is not None:
                 local_params = get_nonshared_params(with_local_params)
             else:
                 local_params = self._local_params
-            
+
             params = pr.ParameterTree.merge(shared_params, local_params)
 
         if disable_variational:
