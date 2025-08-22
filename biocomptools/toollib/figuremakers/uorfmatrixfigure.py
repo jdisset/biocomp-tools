@@ -221,6 +221,8 @@ class UORFMatrixFigure(Figure):
     annotate: List[tuple[int, int]] = []
     annotation_style: dict[str, Union[str, float]] = ANNOTATION_STYLE
     annotation_margin: float = 0.08
+    show_individual_rmse: bool = True
+    show_overall_rmse: bool = True
 
     wspace: float = 0.25
     hspace: float = 0.25
@@ -407,19 +409,20 @@ class UORFMatrixFigure(Figure):
             ):
                 rmse = cell.data.metadata['prediction_stats']['grid_rmse']
                 rmses.append(rmse)
-                ax = figax.ax[cell.row][cell.col]
-                ax.text(
-                    0.5,
-                    0.5,
-                    f"RMSE: {rmse:.3f}",
-                    fontsize=self.rmse_fontsize,
-                    ha='center',
-                    va='center',
-                    transform=ax.transAxes,
-                    color='black',
-                )
+                if self.show_individual_rmse:
+                    ax = figax.ax[cell.row][cell.col]
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"RMSE: {rmse:.3f}",
+                        fontsize=self.rmse_fontsize,
+                        ha='center',
+                        va='center',
+                        transform=ax.transAxes,
+                        color='black',
+                    )
 
-        if rmses:
+        if rmses and self.show_overall_rmse:
             overall_rmse = np.mean(rmses)
             fig = figax.figure
             fig.text(

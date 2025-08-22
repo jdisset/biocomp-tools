@@ -1,6 +1,6 @@
 !set_default axnum: null
 !set_default nslices: 30
-!set_default threshold: 0.235
+!set_default threshold: 0.0235
 !set_default opacity: 0.25
 !set_default zlims: [0, 0.6]
 
