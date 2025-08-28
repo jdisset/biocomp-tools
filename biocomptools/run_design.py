@@ -70,8 +70,7 @@ class DesignProgram(BaseOptimizationProgram):
         False
     )
 
-    topk_n: Annotated[int, Arg(help='Number of top designs to keep per target')] = 10
-
+    topk_n: Annotated[int, Arg(help='Number of top designs to keep per target')] = 64
 
     plot_results: Annotated[bool, Arg(help='Generate result plots')] = True
     plot_n_samples: Annotated[int, Arg(help='Max samples to plot')] = 5000
@@ -351,27 +350,38 @@ class DesignProgram(BaseOptimizationProgram):
                 plot_dir = save_dir / 'plots'
                 plot_dir.mkdir(exist_ok=True)
                 logger.debug(
-                    f"Plotting with n_samples={self.plot_n_samples}, show_difference={self.show_difference_plots}"
+                    f"Plotting with n_samples={self.plot_n_samples}, show_difference={self.show_difference_plots}, plot_top_k={self.topk_n}"
                 )
 
                 assert self._dmanager is not None
-                plot_design_results(
-                    dmanager=self._dmanager,
-                    dconf=self.design_conf,
-                    xraw=xraw,
-                    yraw=yraw,
-                    yhatdep=yhatdep,
-                    topk=topk,
-                    n_eval_samples=self.plot_n_samples,
-                    save_dir=plot_dir,
-                    show_difference=self.show_difference_plots,
+
+                # Create target-specific plot subdirectories and plot each target separately
+                for tid, target in enumerate(self._dmanager.targets):
+                    target_name = target.name or Path(target.path).stem
+                    target_plot_dir = plot_dir / target_name
+                    target_plot_dir.mkdir(exist_ok=True)
+
+                    # Create single-target topk list for this target only
+                    single_target_topk = [topk[tid]]  # wrap in list to maintain expected structure
+
+                    # Plot all top-k results for this target
+                    plot_design_results(
+                        dmanager=DesignManager(targets=[target], networks=self._dmanager.networks),
+                        dconf=self.design_conf,
+                        xraw=xraw[:, :, :, tid : tid + 1, :],  # slice to keep only this target
+                        yraw=yraw[:, :, :, tid : tid + 1, :],  # slice to keep only this target
+                        yhatdep=yhatdep[:, :, tid : tid + 1, :] if yhatdep is not None else None,
+                        topk=single_target_topk,
+                        n_eval_samples=self.plot_n_samples,
+                        save_dir=target_plot_dir,
+                        show_difference=self.show_difference_plots,
+                        plot_top_k=self.topk_n,
+                    )
+
+                total_plots = len(self.targets) * self.topk_n
+                logger.info(
+                    f"Generated {total_plots} plots organized by target, saved to {plot_dir}"
                 )
-                num_plots = (
-                    len(self.targets) * len(self._dmanager.networks)
-                    if hasattr(self, '_dmanager')
-                    else 'unknown'
-                )
-                logger.info(f"Generated {num_plots} plots, saved to {plot_dir}")
 
             self._save_best_designs_summary(save_dir, topk)
 
@@ -407,47 +417,56 @@ class DesignProgram(BaseOptimizationProgram):
         summary_file = save_dir / 'best_designs_summary.txt'
         recipes_dir = save_dir / 'best_recipes'
         recipes_dir.mkdir(exist_ok=True)
-        
+
         # Get final params and stack from evaluation results
         final_params = self._evaluation_results[0] if hasattr(self, '_evaluation_results') else None
-        
+
         # Build the compute stack once
         if final_params is not None and self._model is not None:
             import biocomp.compute as cmp
+
             stack = cmp.ComputeStack(networks=self._dmanager.networks)
             stack.build(self._model.compute_config)
         else:
             stack = None
             logger.warning("Cannot commit networks: final_params or model not available")
-        
+
         with open(summary_file, 'w') as f:
             f.write("BEST DESIGN SUMMARY\n")
             f.write("=" * 50 + "\n\n")
 
             best_per_target = {}
-            
+
             for tid, target in enumerate(self.targets):
                 target_name = target.name or Path(target.path).stem
                 f.write(f"Target: {target_name}\n")
                 f.write("-" * 30 + "\n")
 
+                # Create target-specific recipe subfolder
+                target_recipes_dir = recipes_dir / target_name
+                target_recipes_dir.mkdir(exist_ok=True)
+
+                # Store all designs for this target (not just best)
+                target_designs = []
+
                 for rank, (rep_id, net_id, loss_val) in enumerate(topk[tid], 1):
                     network_name = self._dmanager.networks[net_id].name
                     f.write(f"  Rank {rank}: Replicate {rep_id}, Network '{network_name}'\n")
                     f.write(f"           Loss: {loss_val:.6f}\n")
-                    
-                    # Save the best (rank 1) network recipe
-                    if rank == 1 and final_params is not None and stack is not None:
+
+                    # Save all top-k network recipes (not just rank 1)
+                    if final_params is not None and stack is not None:
                         # Get params for this replicate and target
                         bparams = tree_get(final_params, (rep_id, tid))
-                        
+
                         # Commit the networks to get post-processed versions
                         try:
                             committed_networks = stack.commit(bparams)
                             cnet = committed_networks[net_id]
-                            
-                            # Save to best_per_target dict
-                            best_per_target[target_name] = {
+
+                            # Store design info
+                            design_info = {
+                                'rank': rank,
                                 'replicate': rep_id,
                                 'network_name': network_name,
                                 'network_id': net_id,
@@ -455,29 +474,51 @@ class DesignProgram(BaseOptimizationProgram):
                                 'loss': float(loss_val),
                                 'params': bparams,
                             }
-                            
+                            target_designs.append(design_info)
+
+                            # Save best design to best_per_target dict
+                            if rank == 1:
+                                best_per_target[target_name] = design_info
+
                             # Generate pretty recipe
                             network_recipe = cnet.to_pretty_recipe()
-                            
-                            # Save recipe to file
-                            recipe_filename = recipes_dir / f"{target_name}_{network_name}_rep{rep_id}.txt"
+
+                            # Save recipe to file with rank prefix
+                            recipe_filename = (
+                                target_recipes_dir
+                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.txt"
+                            )
                             with open(recipe_filename, 'w') as rf:
-                                rf.write(f"# Best design for target: {target_name}\n")
+                                rf.write(f"# Design for target: {target_name}\n")
+                                rf.write(f"# Rank: {rank}\n")
                                 rf.write(f"# Network: {network_name}\n")
                                 rf.write(f"# Replicate: {rep_id}\n")
                                 rf.write(f"# Loss: {loss_val:.6f}\n")
                                 rf.write("#" + "=" * 59 + "\n\n")
                                 rf.write(network_recipe)
-                            
-                            f.write(f"           Recipe saved: {recipe_filename.name}\n")
-                            logger.debug(f"Saved recipe for {target_name}/{network_name} to {recipe_filename}")
-                            
+
+                            f.write(
+                                f"           Recipe saved: {target_name}/{recipe_filename.name}\n"
+                            )
+                            logger.debug(
+                                f"Saved recipe for {target_name} rank {rank} to {recipe_filename}"
+                            )
+                            # also save network as pickle
+                            network_pickle_file = (
+                                target_recipes_dir
+                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.pickle"
+                            )
+                            with open(network_pickle_file, 'wb') as npf:
+                                pickle.dump(cnet, npf)
+
                         except Exception as e:
-                            logger.warning(f"Failed to commit/save recipe for {target_name}/{network_name}: {e}")
+                            logger.warning(
+                                f"Failed to commit/save recipe for {target_name} rank {rank}: {e}"
+                            )
                             f.write(f"           Recipe: Failed to generate ({e})\n")
 
                 f.write("\n")
-        
+
         # Save the best_per_target dict as pickle for later use
         if best_per_target:
             best_designs_file = save_dir / 'best_designs.pickle'

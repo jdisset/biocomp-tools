@@ -18,6 +18,8 @@ UORFS = [
     "8x_uORF",
 ]
 
+NO_UORFS = [None]
+
 
 COLORS = {
     'x1': 'mKO2',
@@ -36,6 +38,10 @@ u2 = Slot(
 )
 u3 = Slot(
     part=UORFS,
+    ref_id="U3",
+)
+u3 = Slot(
+    part=NO_UORFS,
     ref_id="U3",
 )
 
@@ -100,7 +106,7 @@ def make_units_withskip(tu_name, erns=None, direct=True):
         Unit(slots=[P, u1, recs[0], erns[1], T], name=f"{tu_name}_a+"),
         Unit(slots=[P, erns[0], T], name=f"{tu_name}_a-"),
         # b
-        Unit(slots=[P, u2, recs[1], COLORS['y'], T], name=f"{tu_name}_b+"),
+        Unit(slots=[P, u3, recs[1], COLORS['y'], T], name=f"{tu_name}_b+"),
         Unit(slots=[P, erns[1], T], name=f"{tu_name}_b-"),
         # c
         Unit(slots=[P, u3, recs[2], COLORS['y'], T], name=f"{tu_name}_c+"),
@@ -223,8 +229,8 @@ def make_all_networks():
     networks += [make_twoandone_network(erns=rot) for rot in rotations]
     networks += [make_twoandoneskip_network(erns=per) for per in permutations]
     networks += [make_three_network(erns=ERNS)]
-    for net in networks:
-        net.set_input_as_bias('mMaroon1')
+    # for net in networks:
+    #     net.set_input_as_bias('mMaroon1')
     networks += [make_two_network(erns=rot) for rot in rotations]
     return networks
 

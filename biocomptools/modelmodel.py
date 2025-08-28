@@ -205,7 +205,7 @@ class NetworkModel(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: bc.Network | list[bc.Network]
 
-    max_points_per_batch: int = 30000
+    max_points_per_batch: int = 10000
 
     _stack: Optional[cmp.ComputeStack] = None
     _params: Optional[pr.ParameterTree] = None
