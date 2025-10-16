@@ -1,4 +1,4 @@
-from biocomp.network import Network, CoTransfection, TranscriptionUnit, Slot, Unit
+from biocomp.old_network.network import Network, CoTransfection, TranscriptionUnit, Slot, Unit
 import itertools as it
 
 ## {{{                      --     net generation     --

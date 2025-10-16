@@ -1064,9 +1064,9 @@ class NetworkPrediction(DataSource):
         """create metadata dictionary for a network"""
         metadata = self.metadata.copy()
 
-        import biocomp.network
+        import biocomp.old_network.network
 
-        network_info = biocomp.network.generate_network_info(network)
+        network_info = biocomp.old_network.network.generate_network_info(network)
 
         metadata.update(
             {

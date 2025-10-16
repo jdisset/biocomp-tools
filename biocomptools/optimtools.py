@@ -31,7 +31,7 @@ from biocomp.train import TrainingConfig
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
 from biocomp.design import DesignManager, DesignConfig, Target
-from biocomp.network import Network, CoTransfection, TranscriptionUnit, Slot
+from biocomp.old_network.network import Network, CoTransfection, TranscriptionUnit, Slot
 
 # Import plot types
 from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES

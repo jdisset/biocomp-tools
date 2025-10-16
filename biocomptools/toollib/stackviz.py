@@ -72,7 +72,7 @@ def generate_stack_html(
     """Generate an interactive HTML visualization of a compute stack using D3.js.
 
     Args:
-        stack: ComputeStack object to visualize
+        stack: ComputeStack object to visualize (works with both old and new systems)
         config: Optional StackVisualizerConfig for customizing the visualization
 
     Returns:
@@ -88,40 +88,99 @@ def generate_stack_html(
     total_networks = len(stack.networks)
     total_nodes = stack.number_of_nodes
 
+    # Detect if this is old or new system
+    is_old_system = hasattr(stack.layers[0].nodes[0], 'compute_node_id') if stack.layers and stack.layers[0].nodes else False
+
     # Process each layer
     for layer_id, layer in enumerate(stack.layers):
+        # Get layer type - both systems have this
+        layer_type = layer.type_str() if hasattr(layer, 'type_str') else layer.f_type
+
+        # Get signature - try multiple approaches
+        signature = None
+        if layer.nodes:
+            node = layer.nodes[0]
+            if hasattr(node, 'type_signature'):
+                signature = node.type_signature
+            else:
+                # For new system, get from graph
+                graph = stack.networks[node.network_id].compute_graph
+                if hasattr(graph, 'nodes'):  # New system
+                    cg_node = graph.nodes.get(node.node_id)
+                    if cg_node:
+                        signature = f"{cg_node.node_type}"
+
         layer_info = {
             "id": layer_id,
-            "type": layer.type_str(),
+            "type": layer_type,
             "nodeCount": len(layer.nodes),
-            "signature": layer.nodes[0].type_signature if layer.nodes else None,
+            "signature": signature,
         }
         layers_data.append(layer_info)
 
         # Process nodes in the layer
         for node_idx, node in enumerate(layer.nodes):
+            # Get node ID - both systems have this
+            if is_old_system:
+                node_id = node.compute_node_id
+                compute_id = node.compute_node_id
+            else:
+                node_id = node.node_id
+                compute_id = node.node_id
+
+            # Get signature
+            node_signature = None
+            if hasattr(node, 'type_signature'):
+                node_signature = node.type_signature
+            else:
+                graph = stack.networks[node.network_id].compute_graph
+                if hasattr(graph, 'nodes'):  # New system
+                    cg_node = graph.nodes.get(node.node_id)
+                    if cg_node:
+                        node_signature = cg_node.node_type
+
+            # Get batch order if available
+            batch_order = getattr(node, 'batch_order', None)
+
             node_data = {
-                "id": node.node_id,
+                "id": node_id,
                 "layerId": layer_id,
                 "networkId": node.network_id,
                 "networkName": node.network_id,
                 "localId": node_idx,
-                "computeId": node.compute_node_id,
-                "signature": node.type_signature,
-                "batchOrder": node.batch_order,
+                "computeId": compute_id,
+                "signature": node_signature,
+                "batchOrder": batch_order,
             }
             nodes_data.append(node_data)
 
             # Process edges (connections to other nodes)
-            if node.get_compute_node("output_to"):
-                for out_idx, (target_id, slot) in enumerate(node.get_compute_node("output_to")):
-                    if (node.network_id, target_id) in stack.node_map:
-                        target_layer, target_pos = stack.node_map[(node.network_id, target_id)]
+            if is_old_system:
+                # Old system: use get_compute_node
+                if node.get_compute_node("output_to"):
+                    for out_idx, (target_id, slot) in enumerate(node.get_compute_node("output_to")):
+                        if (node.network_id, target_id) in stack.node_map:
+                            target_layer, target_pos = stack.node_map[(node.network_id, target_id)]
+                            edge_data = {
+                                "source": node_id,
+                                "target": stack.layers[target_layer].nodes[target_pos].compute_node_id,
+                                "sourceSlot": out_idx,
+                                "targetSlot": slot,
+                                "networkId": node.network_id,
+                            }
+                            edges_data.append(edge_data)
+            else:
+                # New system: use compute_graph edges
+                graph = stack.networks[node.network_id].compute_graph
+                outgoing_edges = graph.get_outgoing_edges(node.node_id)
+                for edge in outgoing_edges:
+                    if (node.network_id, edge.target_id) in stack.node_map:
+                        target_layer, target_pos = stack.node_map[(node.network_id, edge.target_id)]
                         edge_data = {
-                            "source": node.node_id,
+                            "source": node_id,
                             "target": stack.layers[target_layer].nodes[target_pos].node_id,
-                            "sourceSlot": out_idx,
-                            "targetSlot": slot,
+                            "sourceSlot": edge.output_slot,
+                            "targetSlot": edge.input_slot,
                             "networkId": node.network_id,
                         }
                         edges_data.append(edge_data)
@@ -406,19 +465,55 @@ _HTML_TEMPLATE = """
                 .attr("stroke", vizData.config.nodeStrokeColor)
                 .on("mouseover", function(event, d) {
                     const networkColor = vizData.config.hoverColors[d.networkId % vizData.config.hoverColors.length];
-                    
-                    // Highlight all nodes in the same network
+
+                    // Find all ancestors (nodes that lead to this node)
+                    const ancestors = new Set();
+                    const descendants = new Set();
+                    const connectedEdges = new Set();
+
+                    // Helper to find ancestors recursively
+                    function findAncestors(nodeId) {
+                        const incomingEdges = vizData.edges.filter(e => e.target === nodeId && e.networkId === d.networkId);
+                        incomingEdges.forEach(e => {
+                            connectedEdges.add(e);
+                            if (!ancestors.has(e.source)) {
+                                ancestors.add(e.source);
+                                findAncestors(e.source);
+                            }
+                        });
+                    }
+
+                    // Helper to find descendants recursively
+                    function findDescendants(nodeId) {
+                        const outgoingEdges = vizData.edges.filter(e => e.source === nodeId && e.networkId === d.networkId);
+                        outgoingEdges.forEach(e => {
+                            connectedEdges.add(e);
+                            if (!descendants.has(e.target)) {
+                                descendants.add(e.target);
+                                findDescendants(e.target);
+                            }
+                        });
+                    }
+
+                    // Find all connected nodes
+                    findAncestors(d.id);
+                    findDescendants(d.id);
+
+                    // Add the current node itself
+                    const connectedNodes = new Set([d.id, ...ancestors, ...descendants]);
+
+                    // Highlight connected nodes only
                     nodeGroup.selectAll(".node")
-                        .filter(n => n.networkId === d.networkId)
-                        .attr("fill", networkColor)
-                        .attr("r", vizData.config.nodeRadius * 1.2);
-                    
-                    // Highlight related edges
+                        .attr("fill", n => connectedNodes.has(n.id) ? networkColor : vizData.config.nodeFillColor)
+                        .attr("r", n => connectedNodes.has(n.id) ? vizData.config.nodeRadius * 1.2 : vizData.config.nodeRadius)
+                        .attr("opacity", n => connectedNodes.has(n.id) ? 1 : 0.2);
+
+                    // Highlight connected edges only
                     edgeGroup.selectAll(".edge")
-                        .filter(e => e.networkId === d.networkId)
-                        .attr("stroke", networkColor)
-                        .attr("stroke-width", 2);
-                        
+                        .attr("stroke", e => connectedEdges.has(e) ? networkColor : vizData.config.edgeColor)
+                        .attr("stroke-width", e => connectedEdges.has(e) ? 2 : 1)
+                        .attr("opacity", e => connectedEdges.has(e) ? 1 : 0.1);
+
                     // Update arrow markers for highlighted edges
                     const markerId = `arrowhead-${d.networkId}`;
                     if (!mainGroup.select(`#${markerId}`).size()) {
@@ -435,43 +530,48 @@ _HTML_TEMPLATE = """
                             .attr("d", "M0,-5L10,0L0,5")
                             .attr("fill", networkColor);
                     }
-                    
+
+                    // Apply marker to highlighted edges
                     edgeGroup.selectAll(".edge")
-                        .filter(e => e.networkId === d.networkId)
-                        .attr("marker-end", `url(#${markerId})`);
-                    
+                        .attr("marker-end", e => connectedEdges.has(e) ? `url(#${markerId})` : "url(#arrowhead)");
+
                     // Show tooltip
                     tooltip.transition()
                         .duration(200)
                         .style("opacity", .9);
-                        
+
+                    const ancestorCount = ancestors.size;
+                    const descendantCount = descendants.size;
+
                     const tooltipContent = `
                         <strong>Network:</strong> ${d.networkId}<br/>
                         <strong>Node ID:</strong> ${d.id}<br/>
                         <strong>Compute ID:</strong> ${d.computeId}<br/>
                         <strong>Layer:</strong> ${vizData.layers[d.layerId].type}<br/>
                         <strong>Signature:</strong> ${d.signature}<br/>
-                        <strong>Batch Order:</strong> ${d.batchOrder}
+                        <strong>Batch Order:</strong> ${d.batchOrder}<br/>
+                        <strong>Ancestors:</strong> ${ancestorCount}<br/>
+                        <strong>Descendants:</strong> ${descendantCount}
                     `;
-                    
+
                     tooltip.html(tooltipContent)
                         .style("left", (event.pageX + 10) + "px")
                         .style("top", (event.pageY - 10) + "px");
                 })
                 .on("mouseout", function(event, d) {
-                    // Reset nodes
+                    // Reset all nodes
                     nodeGroup.selectAll(".node")
-                        .filter(n => n.networkId === d.networkId)
                         .attr("fill", vizData.config.nodeFillColor)
-                        .attr("r", vizData.config.nodeRadius);
-                    
-                    // Reset edges
+                        .attr("r", vizData.config.nodeRadius)
+                        .attr("opacity", 1);
+
+                    // Reset all edges
                     edgeGroup.selectAll(".edge")
-                        .filter(e => e.networkId === d.networkId)
                         .attr("stroke", vizData.config.edgeColor)
                         .attr("stroke-width", 1)
+                        .attr("opacity", 1)
                         .attr("marker-end", "url(#arrowhead)");
-                    
+
                     // Hide tooltip
                     tooltip.transition()
                         .duration(500)

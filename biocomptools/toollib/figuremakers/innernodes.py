@@ -4,7 +4,7 @@ from biocomptools.toollib.networkprediction import NetworkPrediction, reconstruc
 from biocomptools.logging_config import get_logger
 from biocomp.plotutils import FigureSpec, FigureLayout, FigAx, PlotData
 from biocomp.plotting.plotting_core import knn_stats, DEFAULT_CMAP_NAME, build_tree
-from biocomp.network import Network, CoTransfection, Unit
+from biocomp.old_network.network import Network, CoTransfection, Unit
 
 from typing import Optional, List, Dict, Tuple, Union, Literal, TypeVar, TypeAlias, Annotated, Any
 from pydantic import Field, ConfigDict, BaseModel, BeforeValidator

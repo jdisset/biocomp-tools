@@ -6,7 +6,7 @@ import os
 
 from biocomptools.logging_config import get_logger, setup_logging
 import biocomp.utils as ut
-from biocomp.network import generate_network_info
+from biocomp.old_network.network import generate_network_info
 from biocomptools.modelmodel import BiocompModel
 from typing import TypeVar
 import pandas as pd
