@@ -201,7 +201,9 @@ class UORFMatrixFigure(Figure):
 
     label_fontsize: int = 20
     rmse_fontsize: int = 8
+    rmse_prefix: str = "RMSE: "
     overall_rmse_fontsize: int = 10
+    overall_rmse_prefix: str = "Overall RMSE: "
     xlabel_padding: float = 0.3
     ylabel_padding: float = 0.3
     axis_title_padding: float = 0.6
@@ -415,7 +417,7 @@ class UORFMatrixFigure(Figure):
                     ax.text(
                         0.5,
                         0.5,
-                        f"RMSE: {rmse:.3f}",
+                        f"{self.rmse_prefix}{rmse:.3f}",
                         fontsize=self.rmse_fontsize,
                         ha='center',
                         va='center',
@@ -429,7 +431,7 @@ class UORFMatrixFigure(Figure):
             fig.text(
                 0.5,
                 0.97,
-                f"Overall RMSE: {overall_rmse:.3f}",
+                f"{self.overall_rmse_prefix}{overall_rmse:.3f}",
                 fontsize=self.overall_rmse_fontsize,
                 ha='center',
                 va='center',
