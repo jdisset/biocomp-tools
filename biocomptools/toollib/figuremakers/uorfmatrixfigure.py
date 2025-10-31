@@ -201,6 +201,7 @@ class UORFMatrixFigure(Figure):
 
     label_fontsize: int = 20
     rmse_fontsize: int = 8
+    overall_rmse_fontsize: int = 10
     xlabel_padding: float = 0.3
     ylabel_padding: float = 0.3
     axis_title_padding: float = 0.6
@@ -429,7 +430,7 @@ class UORFMatrixFigure(Figure):
                 0.5,
                 0.97,
                 f"Overall RMSE: {overall_rmse:.3f}",
-                fontsize=self.rmse_fontsize,
+                fontsize=self.overall_rmse_fontsize,
                 ha='center',
                 va='center',
                 color='black',
