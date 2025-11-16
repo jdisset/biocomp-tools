@@ -3,15 +3,41 @@ from typing import List, Optional, Annotated, Any, TypeVar
 import sqlalchemy as sa
 from sqlalchemy import Column, JSON
 from pydantic import BeforeValidator, BaseModel
-from sqlalchemy import and_
 from pathlib import Path
 from biocomptools.toollib.common import config
-import biocomp as bc
-from biocomp.utils import load_lib
-
-from sqlmodel import select, Session, col
-from biocomptools.logging_config import get_logger
 from biocomptools.toollib.hashutils import pronounceable_hash32
+import biocomp as bc
+from biocomp.library import load_lib
+from biocomptools.logging_config import get_logger
+
+
+def extract_network_info(net: bc.network.Network) -> dict:
+    markers = tuple(sorted(net.get_inverted_input_proteins()))
+    all_outputs = tuple(sorted(net.get_output_proteins()))
+    dependent_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+
+    info = {
+        'markers': markers,
+        'all_outputs': all_outputs,
+        'dependent_outputs': dependent_outputs,
+        'nb_inputs': net.nb_inputs,
+        'nb_outputs': net.nb_outputs,
+    }
+
+    if net.compute_graph:
+        ern_nodes = net.compute_graph.get_nodes_by_type("ern")
+        info['ern_names'] = [
+            n.extra.get('ern_name', '') for n in ern_nodes if 'ern_name' in n.extra
+        ]
+
+        agg_nodes = net.compute_graph.get_nodes_by_type("aggregation")
+        if agg_nodes:
+            info['architecture'] = f"{len(agg_nodes)}_aggregation"
+        else:
+            info['architecture'] = "simple"
+
+    return info
+
 
 logger = get_logger(__name__)
 
@@ -193,7 +219,7 @@ class Network(BiocompDB, table=True):
 
     @classmethod
     def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
-        network_info = bc.network.generate_network_info(network)
+        network_info = extract_network_info(network)
         print(f"Network markers: {network_info['markers']}")
         if recipe_name is None:
             recipe_name = 'unknown'
@@ -254,18 +280,12 @@ class Network(BiocompDB, table=True):
     def title(self):
         if self._network is None:
             return f"{self.name}"
-        fresh_info = bc.network.generate_network_info(self._network)
-        # uorfstr = '\n'.join(fresh_info['uorf_names'])
-        titlestr = f"{fresh_info['architecture']}"
-        # make sure first letter of each word is capitalized
+        fresh_info = extract_network_info(self._network)
+        titlestr = f"{fresh_info.get('architecture', 'unknown')}"
         titlestr = " ".join([x.capitalize() for x in titlestr.split()])
-        if len(fresh_info['ern_names']) > 0:
-            titlestr = f"{titlestr} ({', '.join(fresh_info['ern_names'])})"
-
-        for val, name in zip(fresh_info['uorf_values'], fresh_info['uorf_names']):
-            if val[0] > 0 or val[1] > 0:
-                titlestr = f"{titlestr}\n{name}: {val}"
-
+        ern_names = fresh_info.get('ern_names', [])
+        if ern_names:
+            titlestr = f"{titlestr} ({', '.join(ern_names)})"
         return titlestr
 
 
@@ -357,55 +377,68 @@ class Recipe(BiocompDB, table=True):
 
         we build directly from the recipe content, without parsing the recipe file.
         """
+        import biocomp.biorules as br
+        from biocomp.network import recipe_to_networks
+        from biocomp.recipe import Recipe
+        from biocomp.library import LibraryContext
 
         logger.debug(f"Building recipe {self.name}")
 
         lib = lib or load_lib()
         assert lib is not None
 
-        errors = []
+        try:
+            with LibraryContext.with_library(lib):
+                from biocomp.recipe import dict_to_recipe
 
-        def error_handler(msg):
-            nonlocal errors
+                if isinstance(self.content, dict) and "content" in self.content:
+                    recipe_obj = dict_to_recipe(self.content)
+                elif (
+                    isinstance(self.content, list)
+                    and self.content
+                    and isinstance(self.content[0], dict)
+                ):
+                    if "sources" in self.content[0]:
+                        recipe_dict = {"name": self.name, "content": self.content}
+                        recipe_obj = dict_to_recipe(recipe_dict)
+                    else:
+                        recipe_obj = Recipe(name=self.name, content=self.content)
+                elif isinstance(self.content, list):
+                    recipe_obj = Recipe(name=self.name, content=self.content)
+                else:
+                    raise ValueError(f"Unexpected recipe content type: {type(self.content)}")
+
+                invert = inverse == 'all' or inverse is True
+                networks = recipe_to_networks(recipe_obj, br.ALL_RULES, invert=invert)
+
+        except Exception as e:
             import traceback
 
-            msg = f"{msg}\n{traceback.format_exc()}"
-            errors.append(msg)
-
-        networks: Optional[ListOr[bc.network.Network]] = bc.recipe.network_from_recipe(
-            None,
-            lib,
-            inverse=inverse,
-            use_cache=use_cache,
-            recipe_object=self.content,
-            error_handler=error_handler,
-        )
-
-        if networks is None:
-            logger.error(f"Recipe {self.name} did not yield any networks.")
+            error_msg = f"{e}\n{traceback.format_exc()}"
+            self.errors = {"network_build_error": [error_msg]}
+            logger.error(f"Recipe {self.name} failed to build networks: {error_msg}")
             return []
 
-        networks = networks if isinstance(networks, list) else [networks]
-        for net in networks:
-            net.metadata['recipe_name'] = self.name
-
-        if errors:
-            self.errors = "\n".join(errors)
-            logger.error(f"Recipe {self.name} has {len(errors)} errors: {self.errors}")
+        if not networks:
+            logger.error(f"Recipe {self.name} did not yield any networks.")
             return []
 
         network_models = []
 
         for net in networks:
-            network_info = bc.network.generate_network_info(net)
+            network_info = extract_network_info(net)
             network_info['recipe_name'] = self.name
-            unique_name = f"{self.name}_{'-'.join(network_info['markers'])}"
+
+            markers = network_info['markers']
+            unique_name = f"{self.name}_{'-'.join(markers)}" if markers else self.name
+            net.name = unique_name
+            net.metadata['recipe_name'] = self.name
+
             network = Network(
                 name=unique_name,
                 recipe_name=self.name,
                 network_info=network_info,
             )
-            net.name = unique_name
             network._network = net
             network_models.append(network)
 

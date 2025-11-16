@@ -31,14 +31,22 @@ from PIL import Image
 import pikepdf
 from pydantic import Field, BaseModel, PrivateAttr, model_validator
 
-import biocomp.utils as ut
+from biocomp.library import load_lib
 import biocomptools.toollib.models as md
 from biocomptools.toollib.common import config
 from dracon.commandline import make_program, Arg
 
 ProcessDatafileResult: TypeAlias = Tuple[md.DataFile, str, Dict[str, Any]]
 
-ModelLoadResult: TypeAlias = Tuple[md.TrainedModel, List[md.Metric], Optional[md.DataSet], List[md.DataSetNetworkDataPair], List[md.DataSet], List[md.NetworkDataPair], List[md.TrainingSetLink]]
+ModelLoadResult: TypeAlias = Tuple[
+    md.TrainedModel,
+    List[md.Metric],
+    Optional[md.DataSet],
+    List[md.DataSetNetworkDataPair],
+    List[md.DataSet],
+    List[md.NetworkDataPair],
+    List[md.TrainingSetLink],
+]
 FigureProcessorResult: TypeAlias = Tuple[Optional[md.Figure], List[md.Plot], List[md.Metric]]
 ExperimentWorkerResult: TypeAlias = Tuple[
     str, Optional[md.Experiment], List[Dict[str, Any]], List[Tuple[str, str]]
@@ -72,9 +80,13 @@ def convert_metric_value(value: Any) -> Optional[float]:
 def should_ignore_path(path: Path, ignore_dirs: List[str]) -> bool:
     """Check if path contains any of the ignored directory names."""
     path_str = path.as_posix()
-    return any(f"/{ignore_dir}/" in f"/{path_str}/" or path_str.endswith(f"/{ignore_dir}") 
-               or path_str.startswith(f"{ignore_dir}/") or path_str == ignore_dir
-               for ignore_dir in ignore_dirs)
+    return any(
+        f"/{ignore_dir}/" in f"/{path_str}/"
+        or path_str.endswith(f"/{ignore_dir}")
+        or path_str.startswith(f"{ignore_dir}/")
+        or path_str == ignore_dir
+        for ignore_dir in ignore_dirs
+    )
 
 
 class WorkerError(Exception):
@@ -115,34 +127,44 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
         with open(mpath, 'rb') as f:
             biocomp_model = pickle.load(f)
         metadata = getattr(biocomp_model, 'metadata', {})
-        
+
         # Create NetworkDataPair objects from training set
         training_set_metadata = metadata.get('training_set', {})
-        training_set_content = training_set_metadata.get('content', []) if isinstance(training_set_metadata, dict) else []
-        training_set_name = training_set_metadata.get('name', None) if isinstance(training_set_metadata, dict) else None
-        
+        training_set_content = (
+            training_set_metadata.get('content', [])
+            if isinstance(training_set_metadata, dict)
+            else []
+        )
+        training_set_name = (
+            training_set_metadata.get('name', None)
+            if isinstance(training_set_metadata, dict)
+            else None
+        )
+
         training_set = [
             md.NetworkDataPair(**e)
             for e in training_set_content
             if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
         ]
-        
+
         # Create dataset from training set
         training_dataset = None
         dataset_associations = []
         if training_set:
             dataset_name = training_set_name or f"training_{metadata.get('run_name', mpath.stem)}"
             training_dataset = md.DataSet.from_network_data_pairs(training_set, name=dataset_name)
-            
+
             # Create DataSetNetworkDataPair associations
             for pair in training_set:
-                dataset_associations.append(md.DataSetNetworkDataPair(
-                    dataset_name=training_dataset.name,
-                    dataset_hash=training_dataset.hash,
-                    network_name=pair.network_name,
-                    datafile_path=pair.datafile_path
-                ))
-        
+                dataset_associations.append(
+                    md.DataSetNetworkDataPair(
+                        dataset_name=training_dataset.name,
+                        dataset_hash=training_dataset.hash,
+                        network_name=pair.network_name,
+                        datafile_path=pair.datafile_path,
+                    )
+                )
+
         model_name = getattr(biocomp_model, 'signature', mpath.stem)
         trained_model = md.TrainedModel(
             name=model_name,
@@ -154,83 +176,101 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
             training_dataset_name=training_dataset.name if training_dataset else None,
             training_dataset_hash=training_dataset.hash if training_dataset else None,
         )
-        
+
         # Extract metrics from metadata
         metrics = []
         validation_datasets = []
         all_network_data_pairs = []
         training_set_links = []
-        
+
         # Add training_loss as a training loss metric if it exists
         training_loss = metadata.get('training_loss')
         if training_loss is not None:
-            metrics.append(md.Metric(
-                name="training_loss_final",
-                value=convert_metric_value(training_loss),
-                trained_model_name=model_name,
-                meta={"source": "training_completion", "timestamp": metadata.get('end_time')}
-            ))
-        
+            metrics.append(
+                md.Metric(
+                    name="training_loss_final",
+                    value=convert_metric_value(training_loss),
+                    trained_model_name=model_name,
+                    meta={"source": "training_completion", "timestamp": metadata.get('end_time')},
+                )
+            )
+
         # Extract logger metrics
         logger_metrics = metadata.get('logger_metrics', [])
         for logger_data in logger_metrics:
             if not isinstance(logger_data, dict):
                 continue
-                
+
             for logger_name, logger_values in logger_data.items():
                 if not isinstance(logger_values, dict):
                     continue
-                    
+
                 # Handle validation loss loggers
                 if "validation_loss" in logger_name:
                     # Extract logger base name (e.g., "CasE_uORFmatrix" from "CasE_uORFmatrix_validation_loss")
                     logger_base_name = logger_name.replace('_validation_loss', '')
                     validation_set_name = f"validation_{logger_base_name}"
                     validation_dataset = None
-                    
+
                     # Create validation dataset from per_network data if available
-                    if 'per_network' in logger_values and isinstance(logger_values['per_network'], list):
+                    if 'per_network' in logger_values and isinstance(
+                        logger_values['per_network'], list
+                    ):
                         validation_pairs = []
                         for network_data in logger_values['per_network']:
                             if isinstance(network_data, dict) and 'networkdatapair' in network_data:
                                 ndp = network_data['networkdatapair']
-                                if isinstance(ndp, dict) and 'network_name' in ndp and 'datafile_path' in ndp:
+                                if (
+                                    isinstance(ndp, dict)
+                                    and 'network_name' in ndp
+                                    and 'datafile_path' in ndp
+                                ):
                                     validation_pairs.append(md.NetworkDataPair(**ndp))
-                        
+
                         if validation_pairs:
                             validation_dataset = md.DataSet.from_network_data_pairs(
                                 validation_pairs, name=validation_set_name
                             )
                             # Add to validation datasets if not already present
-                            if not any(vd.hash == validation_dataset.hash for vd in validation_datasets):
+                            if not any(
+                                vd.hash == validation_dataset.hash for vd in validation_datasets
+                            ):
                                 validation_datasets.append(validation_dataset)
-                                
+
                                 for pair in validation_pairs:
-                                    dataset_associations.append(md.DataSetNetworkDataPair(
-                                        dataset_name=validation_dataset.name,
-                                        dataset_hash=validation_dataset.hash,
-                                        network_name=pair.network_name,
-                                        datafile_path=pair.datafile_path
-                                    ))
-                                
+                                    dataset_associations.append(
+                                        md.DataSetNetworkDataPair(
+                                            dataset_name=validation_dataset.name,
+                                            dataset_hash=validation_dataset.hash,
+                                            network_name=pair.network_name,
+                                            datafile_path=pair.datafile_path,
+                                        )
+                                    )
+
                                 all_network_data_pairs.extend(validation_pairs)
-                    
+
                     # Add RMSE metric
                     if 'RMSE' in logger_values:
-                        metrics.append(md.Metric(
-                            name="RMSE",
-                            value=convert_metric_value(logger_values['RMSE']),
-                            trained_model_name=model_name,
-                            on_dataset_name=validation_dataset.name if validation_dataset else None,
-                            on_dataset_hash=validation_dataset.hash if validation_dataset else None,
-                            meta={
-                                "validation_set": validation_set_name,
-                                "logger_name": logger_name.split('_validation_loss')[0],
-                                "logger_type": "validation_loss"
-                            }
-                        ))
-                    
-                    # Add per-network metrics  
+                        metrics.append(
+                            md.Metric(
+                                name="RMSE",
+                                value=convert_metric_value(logger_values['RMSE']),
+                                trained_model_name=model_name,
+                                on_dataset_name=validation_dataset.name
+                                if validation_dataset
+                                else None,
+                                on_dataset_hash=validation_dataset.hash
+                                if validation_dataset
+                                else None,
+                                meta={
+                                    "validation_set": validation_set_name,
+                                    "logger_name": logger_name.split('_validation_loss')[0],
+                                    "logger_type": "validation_loss",
+                                },
+                            )
+                        )
+
+                    # Add per-network metrics
                     if 'per_network' in logger_values:
                         per_network_list = logger_values['per_network']
                         if isinstance(per_network_list, list):
@@ -243,67 +283,86 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                                         ndp = network_data['networkdatapair']
                                         if isinstance(ndp, dict):
                                             datafile_path = ndp.get('datafile_path')
-                                    
-                                    metrics.append(md.Metric(
-                                        name="RMSE",
-                                        value=convert_metric_value(network_data['RMSE']),
+
+                                    metrics.append(
+                                        md.Metric(
+                                            name="RMSE",
+                                            value=convert_metric_value(network_data['RMSE']),
                                             trained_model_name=model_name,
                                             on_network_name=network_name,
                                             on_datafile_path=datafile_path,
                                             # Also link to validation dataset
-                                            on_dataset_name=validation_dataset.name if validation_dataset else None,
-                                            on_dataset_hash=validation_dataset.hash if validation_dataset else None,
+                                            on_dataset_name=validation_dataset.name
+                                            if validation_dataset
+                                            else None,
+                                            on_dataset_hash=validation_dataset.hash
+                                            if validation_dataset
+                                            else None,
                                             n_points=network_data.get('n_points'),
                                             meta={
                                                 "validation_set": validation_set_name,
                                                 "logger_name": logger_base_name,
                                                 "network_name": network_name,
-                                                "logger_type": "validation_loss_per_network"
-                                            }
-                                        ))
-                
+                                                "logger_type": "validation_loss_per_network",
+                                            },
+                                        )
+                                    )
+
                 # Handle other logger types (training loss, gradient norms, etc.)
                 else:
                     # For other numeric metrics
                     if isinstance(logger_values, (int, float)):
-                        metrics.append(md.Metric(
-                            name=logger_name,
-                            value=convert_metric_value(logger_values),
-                            trained_model_name=model_name,
-                            meta={"logger_name": logger_name, "logger_type": "general"}
-                        ))
+                        metrics.append(
+                            md.Metric(
+                                name=logger_name,
+                                value=convert_metric_value(logger_values),
+                                trained_model_name=model_name,
+                                meta={"logger_name": logger_name, "logger_type": "general"},
+                            )
+                        )
                     elif isinstance(logger_values, dict):
                         # For complex logger data, extract numeric values and store metadata
                         for key, val in logger_values.items():
                             if isinstance(val, (int, float)):
-                                metrics.append(md.Metric(
-                                    name=f"{logger_name}_{key}",
-                                    value=convert_metric_value(val),
-                                    trained_model_name=model_name,
-                                    meta={
-                                        "logger_name": logger_name,
-                                        "logger_type": "complex",
-                                        "original_data": logger_values
-                                    }
-                                ))
-        
+                                metrics.append(
+                                    md.Metric(
+                                        name=f"{logger_name}_{key}",
+                                        value=convert_metric_value(val),
+                                        trained_model_name=model_name,
+                                        meta={
+                                            "logger_name": logger_name,
+                                            "logger_type": "complex",
+                                            "original_data": logger_values,
+                                        },
+                                    )
+                                )
+
         # Create TrainingSetLink object for the training dataset
         if training_dataset:
-            training_set_links.append(md.TrainingSetLink(
-                trained_model_name=model_name,
-                dataset_name=training_dataset.name,
-                dataset_hash=training_dataset.hash
-            ))
-        
+            training_set_links.append(
+                md.TrainingSetLink(
+                    trained_model_name=model_name,
+                    dataset_name=training_dataset.name,
+                    dataset_hash=training_dataset.hash,
+                )
+            )
+
         # Add training set NetworkDataPair objects
         if training_set:
             all_network_data_pairs.extend(training_set)
-        
-        return trained_model, metrics, training_dataset, dataset_associations, validation_datasets, all_network_data_pairs, training_set_links
-        
+
+        return (
+            trained_model,
+            metrics,
+            training_dataset,
+            dataset_associations,
+            validation_datasets,
+            all_network_data_pairs,
+            training_set_links,
+        )
+
     except Exception as e:
         raise ModelLoadError(f"failed to load model: {e}", path_info=mpath) from e
-
 
 
 def _w_parse_xp_file(args: Tuple[str, str]) -> Tuple[str, Optional[md.Experiment]]:
@@ -468,19 +527,19 @@ def _proc_plot_task(
 
     elif ds_type == 'prediction' and net_name and (model_sig := task.get('model_signature')):
         pred_stats = task.get('prediction_stats', {})
-        
+
         # Extract n_points from stats if available - will be used for all metrics
         n_points = None
         if 'eval_npoints' in pred_stats:
             n_points = int(pred_stats['eval_npoints'])
         elif 'n_points' in pred_stats:
             n_points = int(pred_stats['n_points'])
-        
+
         # Extract network_name and datafile_path from prediction metadata
         # First check direct fields in task
         network_name = task.get('network_name')
         datafile_path = task.get('datafile_path')
-        
+
         # If not found, check in extra_prediction_info
         if network_name is None:
             network_name = task.get('extra_prediction_info', {}).get('network_name')
@@ -488,7 +547,7 @@ def _proc_plot_task(
             datafile_path = task.get('extra_prediction_info', {}).get('datafile', {}).get('file')
             if datafile_path is None:
                 datafile_path = task.get('extra_prediction_info', {}).get('datafile_path')
-        
+
         # Helper function to create metric with proper fields
         def create_metric(name: str, value: float) -> md.Metric:
             converted_value = convert_metric_value(value)
@@ -497,7 +556,7 @@ def _proc_plot_task(
                     f"Converting metric '{name}' value {value} to NULL "
                     f"(model: {model_sig}, network: {network_name})"
                 )
-            
+
             metric = md.Metric(
                 name=name,
                 value=converted_value,
@@ -505,10 +564,7 @@ def _proc_plot_task(
                 source_plot_figure=fig_file,
                 source_plot_position=task_idx,
                 n_points=n_points,  # Apply n_points to all metrics
-                meta={
-                    "plot_method": task.get('plot_method'),
-                    "source": "plot_prediction"
-                }
+                meta={"plot_method": task.get('plot_method'), "source": "plot_prediction"},
             )
             # Set database columns for network and datafile if available
             if network_name is not None:
@@ -518,29 +574,34 @@ def _proc_plot_task(
                 metric.on_datafile_path = datafile_path
                 metric.meta["datafile_path"] = datafile_path
             return metric
-        
+
         # Extract metrics from prediction stats
         if 'mse' in pred_stats:
             metrics.append(create_metric("MSE", pred_stats['mse']))
-        
+
         if 'grid_mse' in pred_stats:
             metrics.append(create_metric("grid_MSE", pred_stats['grid_mse']))
-        
+
         normalized_grid_mse = pred_stats.get('normalized_grid_mse', pred_stats.get('grid_mse'))
         if normalized_grid_mse is not None:
             metrics.append(create_metric("normalized_grid_MSE", normalized_grid_mse))
-        
+
         # Process any other numeric stats (excluding n_points/eval_npoints)
         for stat_name, stat_value in pred_stats.items():
-            if stat_name not in ['mse', 'grid_mse', 'normalized_grid_mse', 'eval_npoints', 'n_points']:
+            if stat_name not in [
+                'mse',
+                'grid_mse',
+                'normalized_grid_mse',
+                'eval_npoints',
+                'n_points',
+            ]:
                 if isinstance(stat_value, (int, float)):
                     metrics.append(create_metric(stat_name, stat_value))
-        
+
         # Create simplified plot without prediction fields
         return md.Plot(**plot_args), metrics
 
     return None, metrics
-
 
 
 def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorResult:
@@ -586,14 +647,15 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
                     print(f"Plot extracted {len(task_metrics)} metrics")
 
         if should_debug:
-            print(f"Processed {len(plots)} plots and {len(all_metrics)} metrics from {fig_path.name}.")
+            print(
+                f"Processed {len(plots)} plots and {len(all_metrics)} metrics from {fig_path.name}."
+            )
 
         return figure, plots, all_metrics
     except Exception as e:
         if isinstance(e, FigureProcessingError):
             raise
         raise FigureProcessingError(f"generic error: {e}", path_info=fig_path) from e
-
 
 
 def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
@@ -701,7 +763,9 @@ class BiocompDBUpdater(BaseModel):
     process_models: Annotated[bool, Arg(help="Process trained models")] = True
     process_figures: Annotated[bool, Arg(help="Process figures and plots")] = True
     nworkers: Annotated[int, Arg(help="Number of parallel workers")] = 8
-    ignore_dirs: Annotated[List[str], Arg(help="List of directory names to ignore")] = Field(default_factory=lambda: ["__archived"])
+    ignore_dirs: Annotated[List[str], Arg(help="List of directory names to ignore")] = Field(
+        default_factory=lambda: ["__archived"]
+    )
 
     _logger: logging.Logger = PrivateAttr()
     _metadata_exclusion_patterns: List[str] = PrivateAttr(
@@ -783,7 +847,9 @@ class BiocompDBUpdater(BaseModel):
             self._logger.error(f"experiments root {self.xp_dir} not found.")
             return {}
 
-        xp_cand_dirs = sorted([d for d in self.xp_dir.iterdir() if d.is_dir() and not self._should_ignore_path(d)])
+        xp_cand_dirs = sorted(
+            [d for d in self.xp_dir.iterdir() if d.is_dir() and not self._should_ignore_path(d)]
+        )
         xps: Dict[str, md.Experiment] = {}
         tid = progress.add_task("[cyan]Parsing experiment files...", total=len(xp_cand_dirs))
         with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
@@ -856,98 +922,121 @@ class BiocompDBUpdater(BaseModel):
             new_bkp_f.unlink(missing_ok=True)
             return False
 
-    def _load_models(self, progress: Progress) -> Tuple[List[md.TrainedModel], List[md.Metric], List[md.DataSet], List[md.DataSetNetworkDataPair], List[md.NetworkDataPair], List[md.TrainingSetLink]]:
-            self._logger.info("loading models...")
-            if not self.models_dir.is_dir():
-                self._logger.info(f"Models dir {self.models_dir} not found")
-                return [], [], [], [], [], []
-            mpaths = [
-                p for p in self.models_dir.rglob('*model.p*kl*') 
-                if 'checkpoints/' not in p.as_posix() and not self._should_ignore_path(p)
-            ]
-            self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
-            if not mpaths:
-                return [], [], [], [], [], []
-    
-            models: List[md.TrainedModel] = []
-            all_metrics: List[md.Metric] = []
-            all_datasets: List[md.DataSet] = []
-            all_dataset_associations: List[md.DataSetNetworkDataPair] = []
-            all_network_data_pairs: List[md.NetworkDataPair] = []
-            all_training_set_links: List[md.TrainingSetLink] = []
-            tid = progress.add_task("[magenta]Loading models...", total=len(mpaths))
-            with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
-                futures = {exe.submit(_w_load_model, (str(p), str(self.base_dir))): p for p in mpaths}
-                for fut in as_completed(futures):
-                    try:
-                        model, metrics, dataset, dataset_associations, validation_datasets, network_data_pairs, training_set_links = fut.result()
-                        models.append(model)
-                        all_metrics.extend(metrics)
-                        if dataset:
-                            all_datasets.append(dataset)
-                        all_dataset_associations.extend(dataset_associations)
-                        # Add validation datasets
-                        all_datasets.extend(validation_datasets)
-                        # Add network data pairs and training set links
-                        all_network_data_pairs.extend(network_data_pairs)
-                        all_training_set_links.extend(training_set_links)
-                    except ModelLoadError as e:
-                        self._logger.error(f"Error loading model: {e}")  # e already has path
-                    except Exception as e:
-                        self._logger.error(
-                            f"Critical error getting result for model {futures[fut]}", exc_info=e
-                        )
-                    progress.update(tid, advance=1)
-            progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
-            self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(models)} models")
-            return models, all_metrics, all_datasets, all_dataset_associations, all_network_data_pairs, all_training_set_links
+    def _load_models(
+        self, progress: Progress
+    ) -> Tuple[
+        List[md.TrainedModel],
+        List[md.Metric],
+        List[md.DataSet],
+        List[md.DataSetNetworkDataPair],
+        List[md.NetworkDataPair],
+        List[md.TrainingSetLink],
+    ]:
+        self._logger.info("loading models...")
+        if not self.models_dir.is_dir():
+            self._logger.info(f"Models dir {self.models_dir} not found")
+            return [], [], [], [], [], []
+        mpaths = [
+            p
+            for p in self.models_dir.rglob('*model.p*kl*')
+            if 'checkpoints/' not in p.as_posix() and not self._should_ignore_path(p)
+        ]
+        self._logger.info(f"found {len(mpaths)} model files in {self.models_dir}")
+        if not mpaths:
+            return [], [], [], [], [], []
 
+        models: List[md.TrainedModel] = []
+        all_metrics: List[md.Metric] = []
+        all_datasets: List[md.DataSet] = []
+        all_dataset_associations: List[md.DataSetNetworkDataPair] = []
+        all_network_data_pairs: List[md.NetworkDataPair] = []
+        all_training_set_links: List[md.TrainingSetLink] = []
+        tid = progress.add_task("[magenta]Loading models...", total=len(mpaths))
+        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+            futures = {exe.submit(_w_load_model, (str(p), str(self.base_dir))): p for p in mpaths}
+            for fut in as_completed(futures):
+                try:
+                    (
+                        model,
+                        metrics,
+                        dataset,
+                        dataset_associations,
+                        validation_datasets,
+                        network_data_pairs,
+                        training_set_links,
+                    ) = fut.result()
+                    models.append(model)
+                    all_metrics.extend(metrics)
+                    if dataset:
+                        all_datasets.append(dataset)
+                    all_dataset_associations.extend(dataset_associations)
+                    # Add validation datasets
+                    all_datasets.extend(validation_datasets)
+                    # Add network data pairs and training set links
+                    all_network_data_pairs.extend(network_data_pairs)
+                    all_training_set_links.extend(training_set_links)
+                except ModelLoadError as e:
+                    self._logger.error(f"Error loading model: {e}")  # e already has path
+                except Exception as e:
+                    self._logger.error(
+                        f"Critical error getting result for model {futures[fut]}", exc_info=e
+                    )
+                progress.update(tid, advance=1)
+        progress.update(tid, description="[magenta]Models loaded.", completed=len(mpaths))
+        self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(models)} models")
+        return (
+            models,
+            all_metrics,
+            all_datasets,
+            all_dataset_associations,
+            all_network_data_pairs,
+            all_training_set_links,
+        )
 
-
-    def _load_figs(self, progress: Progress) -> Tuple[List[md.Figure], List[md.Plot], List[md.Metric]]:
-            self._logger.info("loading figures...")
-            figs, plots, all_metrics = [], [], []
-            if not self.plots_dir.is_dir():
-                self._logger.warning(f"Plots dir {self.plots_dir} not found")
-                return figs, plots, all_metrics
-    
-            fig_paths = [
-                p
-                for pat in ['**/*.pdf', '**/*.png']
-                for p in self.plots_dir.rglob(pat)
-                if not self._should_ignore_path(p)
-            ]
-            self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
-            if not fig_paths:
-                return figs, plots, all_metrics
-    
-            tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
-            with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
-                args_list = [
-                    (str(fp), str(self.base_dir), self._metadata_exclusion_patterns) for fp in fig_paths
-                ]
-                futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
-                for fut in as_completed(futures):
-                    try:
-                        fig_obj, plots_list, metrics_list = fut.result()
-                        if fig_obj:
-                            figs.append(fig_obj)
-                            plots.extend(plots_list)
-                            all_metrics.extend(metrics_list)
-                    except FigureProcessingError as e:
-                        self._logger.warning(f"Error processing figure: {e}")
-                        self._logger.exception(e)
-                    except Exception as e:
-                        self._logger.error(
-                            f"Critical error processing figure future for {futures[fut]}"
-                        )
-                        self._logger.exception(e)
-                    progress.update(tid, advance=1)
-            progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
-            self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(figs)} figures")
+    def _load_figs(
+        self, progress: Progress
+    ) -> Tuple[List[md.Figure], List[md.Plot], List[md.Metric]]:
+        self._logger.info("loading figures...")
+        figs, plots, all_metrics = [], [], []
+        if not self.plots_dir.is_dir():
+            self._logger.warning(f"Plots dir {self.plots_dir} not found")
             return figs, plots, all_metrics
 
+        fig_paths = [
+            p
+            for pat in ['**/*.pdf', '**/*.png']
+            for p in self.plots_dir.rglob(pat)
+            if not self._should_ignore_path(p)
+        ]
+        self._logger.info(f"found {len(fig_paths)} figure files in {self.plots_dir}")
+        if not fig_paths:
+            return figs, plots, all_metrics
 
+        tid = progress.add_task("[yellow]Loading figures...", total=len(fig_paths))
+        with ProcessPoolExecutor(max_workers=self.nworkers) as exe:
+            args_list = [
+                (str(fp), str(self.base_dir), self._metadata_exclusion_patterns) for fp in fig_paths
+            ]
+            futures = {exe.submit(_w_proc_fig_path, arg_set): arg_set[0] for arg_set in args_list}
+            for fut in as_completed(futures):
+                try:
+                    fig_obj, plots_list, metrics_list = fut.result()
+                    if fig_obj:
+                        figs.append(fig_obj)
+                        plots.extend(plots_list)
+                        all_metrics.extend(metrics_list)
+                except FigureProcessingError as e:
+                    self._logger.warning(f"Error processing figure: {e}")
+                    self._logger.exception(e)
+                except Exception as e:
+                    self._logger.error(
+                        f"Critical error processing figure future for {futures[fut]}"
+                    )
+                    self._logger.exception(e)
+                progress.update(tid, advance=1)
+        progress.update(tid, description="[yellow]Figures loaded.", completed=len(fig_paths))
+        self._logger.info(f"Extracted {len(all_metrics)} metrics from {len(figs)} figures")
+        return figs, plots, all_metrics
 
     def _build_nets_task_tpe(
         self, recipe: md.Recipe, lib: Any, cache_path: Path
@@ -1023,8 +1112,19 @@ class BiocompDBUpdater(BaseModel):
             self._logger.warning("nothing to process.")
             return
 
-        lib, xps_map, cals_map, models_list, model_metrics_list, datasets_list, dataset_associations_list, figs_list, plots_list, fig_metrics_list = (
-            ut.load_lib(),
+        (
+            lib,
+            xps_map,
+            cals_map,
+            models_list,
+            model_metrics_list,
+            datasets_list,
+            dataset_associations_list,
+            figs_list,
+            plots_list,
+            fig_metrics_list,
+        ) = (
+            load_lib(),
             {},
             {},
             [],
@@ -1165,7 +1265,14 @@ class BiocompDBUpdater(BaseModel):
                     self._logger.warning("no experiments loaded to process.")
 
             if self.process_models:
-                models_list, model_metrics_list, datasets_list, dataset_associations_list, network_data_pairs_list, training_set_links_list = self._load_models(progress)
+                (
+                    models_list,
+                    model_metrics_list,
+                    datasets_list,
+                    dataset_associations_list,
+                    network_data_pairs_list,
+                    training_set_links_list,
+                ) = self._load_models(progress)
             if self.process_figures:
                 figs_list, plots_list, fig_metrics_list = self._load_figs(progress)
 

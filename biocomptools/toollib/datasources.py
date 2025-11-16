@@ -10,7 +10,7 @@ import biocomp as bc
 from biocomp.plotutils import PlotData
 import biocomp.plotutils as pu
 
-from biocomptools.toollib.networkselector import NetworkSet, NetworkSelector, NetworkDataPair
+from biocomptools.toollib.networkselector import NetworkSet
 
 import biocomptools.toollib.common as cm
 from biocomptools.toollib.common import maybetqdm, make_pretty_input_names
@@ -32,7 +32,7 @@ def detach_object_tree(obj):
     # Process all relationship attributes
     for relationship_prop in mapper.relationships:
         # Skip unloaded relationships to avoid triggering lazy loads
-        if not relationship_prop.key in inspect(obj).unloaded:
+        if relationship_prop.key not in inspect(obj).unloaded:
             related_obj = getattr(obj, relationship_prop.key)
 
             # Handle collections (lists, etc.)
@@ -134,10 +134,12 @@ class DBSource(DataSource, NetworkSet):
         def get_XY(_):
             logger.debug(f"DBSource: getting XY data for network {network.name}")
             try:
-                X, Y = bc.recipe.get_network_XY(actual_network, datafile_path)
-                if X.shape[1] != actual_network.get_nb_inputs():
+                from biocomp.datautils import get_network_XY
+
+                X, Y = get_network_XY(actual_network, datafile_path)
+                if X.shape[1] != actual_network.nb_inputs:
                     raise ValueError(
-                        f"Input size mismatch for network {network.name}: expected {actual_network.get_nb_inputs()} inputs, got {X.shape[1]} inputs"
+                        f"Input size mismatch for network {network.name}: expected {actual_network.nb_inputs} inputs, got {X.shape[1]} inputs"
                     )
             except Exception as e:
                 logger.error(f"Error getting XY data for network {network.name}: {e}")
