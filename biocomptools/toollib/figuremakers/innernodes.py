@@ -4,7 +4,10 @@ from biocomptools.toollib.networkprediction import NetworkPrediction, reconstruc
 from biocomptools.logging_config import get_logger
 from biocomp.plotutils import FigureSpec, FigureLayout, FigAx, PlotData
 from biocomp.plotting.plotting_core import knn_stats, DEFAULT_CMAP_NAME, build_tree
-from biocomp.old_network.network import Network, CoTransfection, Unit
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit as Unit, Slot
+from biocomp.network import recipe_to_networks, Network
+from biocomp.library import LibraryContext
+import biocomp.biorules as br
 
 from typing import Optional, List, Dict, Tuple, Union, Literal, TypeVar, TypeAlias, Annotated, Any
 from pydantic import Field, ConfigDict, BaseModel, BeforeValidator
@@ -288,6 +291,16 @@ class InnerNodesFigure(Figure):
             cleaned_names.append(name)
         return {k: float(v[0]) for k, v in zip(cleaned_names, uorf_values)}
 
+    def _build_network(self, cotx_list: List[CoTransfection]) -> Network:
+        """Helper to build a network from a list of CoTransfection objects"""
+        from biocomp.library import load_lib
+        lib = load_lib()
+        with LibraryContext.with_library(lib):
+            recipe = Recipe(content=cotx_list)
+            networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+            assert len(networks) == 1, f"Expected 1 network, got {len(networks)}"
+            return networks[0]
+
     def prepare_all_networks_and_specs(
         self, *, n_samples: int = N_PREDICT_SAMPLES
     ) -> Tuple[List[Network], List[NodeSpec], List[np.ndarray]]:
@@ -298,20 +311,17 @@ class InnerNodesFigure(Figure):
         # ERN nodes ----------------------------------------------------------------
         ern_embeddings = self.extract_ern_embeddings()
         for name in ern_embeddings.keys():
-            net = Network(
-                cotx=[
-                    CoTransfection(
-                        units=[Unit(slots=["hEF1a", name]), Unit(slots=["hEF1a", "mKO2"])]
-                    ),
-                    CoTransfection(
-                        units=[
-                            Unit(slots=["hEF1a", f"{name}_rec", "eYFP"]),
-                            Unit(slots=["hEF1a", "eBFP2"]),
-                        ]
-                    ),
-                ],
-                invert_on_build=True,
-            )
+            net = self._build_network([
+                CoTransfection(
+                    units=[Unit(slots=["hEF1a", name]), Unit(slots=["hEF1a", "mKO2"])]
+                ),
+                CoTransfection(
+                    units=[
+                        Unit(slots=["hEF1a", f"{name}_rec", "eYFP"]),
+                        Unit(slots=["hEF1a", "eBFP2"]),
+                    ]
+                ),
+            ])
 
             all_networks.append(net)
             all_node_specs.append(
@@ -336,14 +346,11 @@ class InnerNodesFigure(Figure):
         ]
         uorf_names_clean = list(uorf_embeddings.keys())
         for name_raw, name_clean in zip(uorf_names_raw, uorf_names_clean):
-            net = Network(
-                cotx=[
-                    CoTransfection(
-                        units=[Unit(slots=["hEF1a", name_raw]), Unit(slots=["hEF1a", "mKO2"])]
-                    )
-                ],
-                invert_on_build=True,
-            )
+            net = self._build_network([
+                CoTransfection(
+                    units=[Unit(slots=["hEF1a", name_raw, "mKO2"]), Unit(slots=["hEF1a", "eBFP2"])]
+                )
+            ])
             all_networks.append(net)
             all_node_specs.append(
                 NodeSpec(
@@ -361,38 +368,34 @@ class InnerNodesFigure(Figure):
             all_inputs.append(np.random.uniform(0.01, 0.8, (n_samples, 1)))
 
         # Core source/transcription/output nodes -----------------------------------
-        basic_network = Network(
-            cotx=[
-                CoTransfection(
-                    units=[
-                        Unit(slots=["hEF1a", "eYFP"], source="plsmd0"),
-                        Unit(slots=["hEF1a", "eBFP2"], source="plsmd0"),
-                    ]
-                )
-            ],
-            invert_on_build=True,
-        )
+        basic_network = self._build_network([
+            CoTransfection(
+                units=[
+                    Unit(slots=["hEF1a", "eYFP"], source="plsmd0"),
+                    Unit(slots=["hEF1a", "eBFP2"], source="plsmd0"),
+                ]
+            )
+        ])
         basic_node_configs: List[Dict[str, Any]] = [
             {"name": "Source", "node_id": 7, "display_name": "plasmid count → DNA"},
             {"name": "Transcription", "node_id": 3, "display_name": "DNA → mRNA"},
             {"name": "Output", "node_id": 0, "display_name": "PRT → fluo"},
         ]
-        basic_network.build()
 
         # Add inverse nodes when requested ----------------------------------------
         if SHOW_INVERSE_NODES:
-            for row_id, row in basic_network.compute_graph.iterrows():
-                if getattr(row, "is_inverse_of", None) is not None:
+            for node_id, node in basic_network.compute_graph.nodes.items():
+                if node.is_inverse_of is not None:
                     type_map = {
                         "inv_source": "DNA → plasmid count",
                         "inv_transcription": "mRNA → DNA",
                         "inv_translation": "Fluo → mRNA",
                     }
-                    display_name = type_map.get(row.type, f"Inverse {row.type}")
+                    display_name = type_map.get(node.node_type, f"Inverse {node.node_type}")
                     basic_node_configs.append(
                         {
-                            "name": row.type.title().replace("_", " "),
-                            "node_id": row_id,
+                            "name": node.node_type.title().replace("_", " "),
+                            "node_id": node_id,
                             "display_name": display_name,
                         }
                     )
