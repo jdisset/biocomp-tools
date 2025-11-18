@@ -1,5 +1,5 @@
 from biocomp.library import PartsLibrary
-from biocomp.recipe import get_network_XY
+from biocomp.datautils import get_network_XY
 from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
 from pydantic import BaseModel, Field, BeforeValidator, model_validator, field_validator, ConfigDict
@@ -11,7 +11,7 @@ from biocomptools.toollib.models import NetworkDataPair, Recipe, DataFile, Netwo
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
-from biocomp.utils import load_lib
+from biocomp.library import load_lib
 from dracon.utils import ser_debug, list_like, dict_like
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
@@ -751,6 +751,8 @@ class CleanupFilter(NetworkFilter):
 
     def _find_missing_complementary_parts(self, net_info, lib):
         missing = {}
+        if 'all_parts' not in net_info or not net_info['all_parts']:
+            return missing
         all_parts = net_info['all_parts'].values()
 
         def find_missing_part(part_name, part_col, complementary_col, valid_types=None):
@@ -780,6 +782,8 @@ class CleanupFilter(NetworkFilter):
         invalid_pairs = []
         if valid_types is None:
             valid_types = ['ERN']
+        if 'all_parts' not in net_info or not net_info['all_parts']:
+            return invalid_pairs
         invalid_types = set(lib.sequestrons.type.unique()) - set(valid_types)
         invalid_rows = lib.sequestrons.type.isin(invalid_types)
         invalid_parts = []
@@ -804,6 +808,8 @@ class CleanupFilter(NetworkFilter):
                 'recombinase_fwd',
                 'ERN_recog_site_3p',
             ]
+        if 'all_parts' not in net_info or not net_info['all_parts']:
+            return invalid_parts
         all_parts = net_info['all_parts'].values()
         for tp in all_parts:
             for p, c in tp.items():

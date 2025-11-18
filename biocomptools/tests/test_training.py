@@ -15,7 +15,7 @@ print("Current matplotlib backend:", plt.get_backend())
 import time
 import json
 from biocomptools.toollib.networkselector import CleanupFilter, build_data_manager
-from biocomp.utils import load_lib
+from biocomp.library import load_lib
 import biocomptools.toollib.models as md
 from biocomptools.toollib.common import config
 from biocomptools.run_training import TrainingProgram

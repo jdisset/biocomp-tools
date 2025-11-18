@@ -33,7 +33,7 @@ from biocomp.library import PartsLibrary
 from sqlmodel import Session
 from biocomp.utils import PartialFunction
 
-from biocomp.utils import load_lib
+from biocomp.library import load_lib
 
 from biocomptools.toollib.networkselector import (
     build_data_manager,

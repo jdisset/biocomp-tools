@@ -2,7 +2,8 @@ from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.trainutils import make_unique_dir, make_json_ready, plot_loss, print_matadata
-from biocomp.utils import load_lib, PartialFunction
+from biocomp.utils import PartialFunction
+from biocomp.library import load_lib
 from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
 from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger

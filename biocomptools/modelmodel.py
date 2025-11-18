@@ -13,7 +13,8 @@ import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config, dict_like
-from biocomp.utils import load_lib, ArbitraryModel
+from biocomp.library import load_lib
+from biocomp.utils import ArbitraryModel
 from tqdm import tqdm
 
 logger = get_logger(__name__)

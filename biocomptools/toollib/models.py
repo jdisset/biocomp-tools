@@ -12,29 +12,40 @@ from biocomptools.logging_config import get_logger
 
 
 def extract_network_info(net: bc.network.Network) -> dict:
-    markers = tuple(sorted(net.get_inverted_input_proteins()))
-    all_outputs = tuple(sorted(net.get_output_proteins()))
-    dependent_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+    try:
+        # Use the full generate_network_info method which includes all fields
+        info = net.generate_network_info()
+    except Exception as e:
+        # Fallback to basic info if generate_network_info fails
+        logger.warning(f"Failed to generate full network info: {e}")
+        markers = tuple(sorted(net.get_inverted_input_proteins()))
+        all_outputs = tuple(sorted(net.get_output_proteins()))
+        dependent_outputs = tuple(sorted(net.get_dependent_output_proteins()))
 
-    info = {
-        'markers': markers,
-        'all_outputs': all_outputs,
-        'dependent_outputs': dependent_outputs,
-        'nb_inputs': net.nb_inputs,
-        'nb_outputs': net.nb_outputs,
-    }
+        info = {
+            'markers': markers,
+            'all_outputs': all_outputs,
+            'output_proteins': all_outputs,
+            'dependent_outputs': dependent_outputs,
+            'nb_inputs': net.nb_inputs,
+            'nb_outputs': net.nb_outputs,
+            'sequestron_type': 'unknown',
+            'architecture': 'unknown',
+            'ern_names': [],
+            'uorf_values': (),
+            'uorf_names': [],
+            'genes': [],
+            'cotx': [],
+            'cotx_str': '',
+            'ern_names_str': '',
+            'all_parts': {}
+        }
 
-    if net.compute_graph:
-        ern_nodes = net.compute_graph.get_nodes_by_type("ern")
-        info['ern_names'] = [
-            n.extra.get('ern_name', '') for n in ern_nodes if 'ern_name' in n.extra
-        ]
-
-        agg_nodes = net.compute_graph.get_nodes_by_type("aggregation")
-        if agg_nodes:
-            info['architecture'] = f"{len(agg_nodes)}_aggregation"
-        else:
-            info['architecture'] = "simple"
+    # Always ensure nb_inputs and nb_outputs are included (for backward compatibility)
+    if 'nb_inputs' not in info:
+        info['nb_inputs'] = net.nb_inputs
+    if 'nb_outputs' not in info:
+        info['nb_outputs'] = net.nb_outputs
 
     return info
 

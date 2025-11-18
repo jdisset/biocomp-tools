@@ -3,7 +3,7 @@ from pydantic import model_validator
 from typing import Any, Optional, List, Union
 from sqlalchemy.orm.session import make_transient
 import numpy as np
-from biocomp.utils import load_lib
+from biocomp.library import load_lib
 
 from pathlib import Path
 import biocomp as bc

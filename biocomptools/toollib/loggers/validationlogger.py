@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Tuple, Callable, Optional, Dict, Any, Union, Literal
 from rich.console import Console
 from rich.table import Table
-from biocomp.utils import load_lib
+from biocomp.library import load_lib
 from biocomp.datautils import DataConfig, DataManager
 import matplotlib.pyplot as plt
 from collections import defaultdict
