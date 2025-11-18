@@ -148,6 +148,11 @@ class BaseOptimizationProgram(BaseModel, ABC):
             Path(self.base_dir) / self.experiment_name, suffix=self.run_name_suffix
         )
         self._run_name = self._save_dir.name
+        print(f"Base directory: {self.base_dir}")
+        print(f"Suffix: {self.run_name_suffix}")
+        print(f"Experiment: {self.experiment_name}")
+        print(f"Run name: {self._run_name}")
+        print(f"Outputs will be saved to {self._save_dir}")
 
         self._construct_loggers()
         self.gen_metadata()

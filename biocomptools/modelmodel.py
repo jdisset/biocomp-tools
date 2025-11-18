@@ -333,7 +333,7 @@ class NetworkModel(BaseModel):
             # create dummy inputs for precompilation with correct batch size
             dummy_x = jnp.zeros((effective_batch_size, self._stack.total_nb_of_inputs))
             dummy_z = jnp.zeros(
-                (effective_batch_size, self._params["global/number_of_quantile_variables"])
+                (effective_batch_size, self._params["global/number_of_random_variables"])
             )
             dummy_key = jax.random.PRNGKey(0)
             dummy_keys = jax.random.split(dummy_key, effective_batch_size)
@@ -546,7 +546,7 @@ class NetworkModel(BaseModel):
         outputs_per_sample = int(self._stack.total_nb_of_outputs)
         effective_batch_size = max(1, max_points_per_batch // outputs_per_sample)
 
-        num_z = self._params["global/number_of_quantile_variables"]
+        num_z = self._params["global/number_of_random_variables"]
         n_samples = X.shape[0]
         n_batches = (n_samples + effective_batch_size - 1) // effective_batch_size
 

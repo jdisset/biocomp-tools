@@ -125,6 +125,7 @@ class TrainingProgram(BaseOptimizationProgram):
     def save_outputs(self, all_params, all_losses, step_history=None):
         save_dir = self._save_dir / self.get_output_subdir()
 
+
         self.save_best(all_params, all_losses, save_dir)
 
         np.save(save_dir / 'loss_history.npy', all_losses)
