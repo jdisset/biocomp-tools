@@ -666,3 +666,64 @@ def create_biocompdb_sqlite(db_path, echo=False):
     logger.debug(f"create_biocompdb_sqlite({db_path}) was called")
     engine = get_biocompdb_sqlite_engine(db_path, echo=echo)
     BiocompDB.metadata.create_all(engine)
+
+
+def create_trained_model_from_file(
+    file_path: Path, base_dir: Optional[Path] = None
+) -> tuple[TrainedModel, Optional[DataSet], list[DataSetNetworkDataPair]]:
+    import pickle
+
+    file_path = Path(file_path).expanduser().resolve()
+    base_dir = base_dir or Path(config.paths.root)
+
+    with open(file_path, 'rb') as f:
+        biocomp_model = pickle.load(f)
+
+    metadata = getattr(biocomp_model, 'metadata', {})
+    ts_meta = metadata.get('training_set', {})
+    ts_content = ts_meta.get('content', []) if isinstance(ts_meta, dict) else []
+    ts_name = ts_meta.get('name', None) if isinstance(ts_meta, dict) else None
+
+    training_set = [
+        NetworkDataPair(**e)
+        for e in ts_content
+        if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
+    ]
+
+    training_dataset = None
+    dataset_assocs = []
+    if training_set:
+        ds_name = ts_name or f"training_{metadata.get('run_name', file_path.stem)}"
+        training_dataset = DataSet.from_network_data_pairs(training_set, name=ds_name)
+        dataset_assocs = [
+            DataSetNetworkDataPair(
+                dataset_name=training_dataset.name,
+                dataset_hash=training_dataset.hash,
+                network_name=pair.network_name,
+                datafile_path=pair.datafile_path,
+            )
+            for pair in training_set
+        ]
+
+    model_name = getattr(biocomp_model, 'signature', file_path.stem)
+    try:
+        rel_path = file_path.relative_to(base_dir).as_posix()
+    except ValueError:
+        rel_path = file_path.as_posix()
+
+    trained_model = TrainedModel(
+        name=model_name,
+        path_to_model=rel_path,
+        run_name=metadata.get('run_name'),
+        experiment_name=metadata.get('experiment_name'),
+        end_loss=metadata.get('training_loss'),
+        training_config=metadata,
+        training_dataset_name=training_dataset.name if training_dataset else None,
+        training_dataset_hash=training_dataset.hash if training_dataset else None,
+    )
+
+    if training_dataset:
+        trained_model.training_dataset = training_dataset
+        training_dataset.network_data_pairs = training_set
+
+    return trained_model, training_dataset, dataset_assocs

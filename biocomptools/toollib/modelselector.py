@@ -405,6 +405,16 @@ class ModelSelector(BaseModel):
         return result_models
 
     def get_model(self, session=None, raise_if_multiple: bool = True) -> TrainedModel:
+        from pathlib import Path
+        from biocomptools.toollib.models import create_trained_model_from_file
+
+        if self.name and isinstance(self.name, str):
+            if '/' in self.name or '\\' in self.name or self.name.endswith('.pickle'):
+                file_path = Path(self.name)
+                if file_path.exists():
+                    trained_model, _, _ = create_trained_model_from_file(file_path)
+                    return trained_model
+
         sess = session or self.db_session
         close_session_locally = session is None
 

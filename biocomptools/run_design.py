@@ -19,7 +19,7 @@ from biocomp.design import (
     plot_design_results,
     distance_loss,
 )
-from biocomp.old_network.network import Network
+from biocomp.network import Network
 from biocomp.jaxutils import tree_to_np, tree_get
 from biocomptools.configs.designs.networks import ALL_NETWORKS, TWO_AND_ONE_NETWORKS
 

@@ -6,7 +6,7 @@ import os
 
 from biocomptools.logging_config import get_logger, setup_logging
 import biocomp.utils as ut
-from biocomp.old_network.network import generate_network_info
+from biocomp.network import generate_network_info
 from biocomptools.modelmodel import BiocompModel
 from typing import TypeVar
 import pandas as pd
@@ -48,7 +48,7 @@ from biocomptools.toollib.networkselector import (
     UorfFilter,
 )
 
-from biocomptools.run_training import DEFAULT_TYPES
+from biocomptools.plot import DEFAULT_TYPES
 
 import biocomptools.toollib.models as md
 

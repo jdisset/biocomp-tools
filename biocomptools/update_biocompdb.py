@@ -124,60 +124,15 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
     mpath_s, base_dir_s = args
     mpath, base_dir = Path(mpath_s), Path(base_dir_s)
     try:
+        trained_model, training_dataset, dataset_associations = md.create_trained_model_from_file(
+            mpath, base_dir
+        )
+        model_name = trained_model.name
+
         with open(mpath, 'rb') as f:
             biocomp_model = pickle.load(f)
         metadata = getattr(biocomp_model, 'metadata', {})
 
-        # Create NetworkDataPair objects from training set
-        training_set_metadata = metadata.get('training_set', {})
-        training_set_content = (
-            training_set_metadata.get('content', [])
-            if isinstance(training_set_metadata, dict)
-            else []
-        )
-        training_set_name = (
-            training_set_metadata.get('name', None)
-            if isinstance(training_set_metadata, dict)
-            else None
-        )
-
-        training_set = [
-            md.NetworkDataPair(**e)
-            for e in training_set_content
-            if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
-        ]
-
-        # Create dataset from training set
-        training_dataset = None
-        dataset_associations = []
-        if training_set:
-            dataset_name = training_set_name or f"training_{metadata.get('run_name', mpath.stem)}"
-            training_dataset = md.DataSet.from_network_data_pairs(training_set, name=dataset_name)
-
-            # Create DataSetNetworkDataPair associations
-            for pair in training_set:
-                dataset_associations.append(
-                    md.DataSetNetworkDataPair(
-                        dataset_name=training_dataset.name,
-                        dataset_hash=training_dataset.hash,
-                        network_name=pair.network_name,
-                        datafile_path=pair.datafile_path,
-                    )
-                )
-
-        model_name = getattr(biocomp_model, 'signature', mpath.stem)
-        trained_model = md.TrainedModel(
-            name=model_name,
-            path_to_model=mpath.relative_to(base_dir).as_posix(),
-            run_name=metadata.get('run_name', None),
-            experiment_name=metadata.get('experiment_name', None),
-            end_loss=metadata.get('training_loss', None),
-            training_config=metadata,
-            training_dataset_name=training_dataset.name if training_dataset else None,
-            training_dataset_hash=training_dataset.hash if training_dataset else None,
-        )
-
-        # Extract metrics from metadata
         metrics = []
         validation_datasets = []
         all_network_data_pairs = []
@@ -337,7 +292,6 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                                     )
                                 )
 
-        # Create TrainingSetLink object for the training dataset
         if training_dataset:
             training_set_links.append(
                 md.TrainingSetLink(
@@ -346,10 +300,7 @@ def _w_load_model(args: Tuple[str, str]) -> ModelLoadResult:
                     dataset_hash=training_dataset.hash,
                 )
             )
-
-        # Add training set NetworkDataPair objects
-        if training_set:
-            all_network_data_pairs.extend(training_set)
+            all_network_data_pairs.extend(training_dataset.network_data_pairs)
 
         return (
             trained_model,
