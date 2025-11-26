@@ -36,4 +36,5 @@ biocomp-check = "biocomptools.test_dataset:main"
 biocomp-updatedb = "biocomptools.update_biocompdb:main"
 biocomp-updatepartsdb = "biocomptools.update_partsdb:main"
 biocomp-update-partsdb = "biocomptools.update_partsdb:main"
+biocomp-hyperopt = "biocomptools.optuna_hyperopt:main"
 
