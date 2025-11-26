@@ -18,10 +18,13 @@ from biocomp.design import (
     get_topk_replicate_network_pairs,
     plot_design_results,
     distance_loss,
+    SamplingConfigUnion,
+    UniformSampling,
 )
 from biocomp.network import Network
 from biocomp.jaxutils import tree_to_np, tree_get
 from biocomptools.configs.designs.networks import ALL_NETWORKS, TWO_AND_ONE_NETWORKS
+from biocomptools.configs.designs.design_recipes import DESIGN_TWOANDONE
 
 from dracon.commandline import Arg
 import asyncio
@@ -38,7 +41,7 @@ from functools import partial
 logger = get_logger(__name__)
 
 DEFAULT_NETWORKS = [TWO_AND_ONE_NETWORKS[0]]
-DEFAULT_NETWORKS = ALL_NETWORKS
+DEFAULT_NETWORKS = [DESIGN_TWOANDONE]
 
 
 class DesignProgram(BaseOptimizationProgram):
@@ -51,6 +54,11 @@ class DesignProgram(BaseOptimizationProgram):
     )
 
     networks: Annotated[Optional[list[Network] | Network], Arg(help='Networks to optimize')] = None
+
+    # Sampling configuration
+    sampling: Annotated[SamplingConfigUnion, Arg(help='Sampling strategy configuration')] = Field(
+        default_factory=UniformSampling
+    )
 
     # Network subset configuration
     network_subset_size: Annotated[Optional[int], Arg(help='Limit networks to first N')] = None
@@ -126,9 +134,10 @@ class DesignProgram(BaseOptimizationProgram):
         if isinstance(self.targets, Target):
             self.targets = [self.targets]
         logger.info(
-            f"Creating DesignManager with {len(self.targets)} targets and {len(networks)} networks"
+            f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
+            f"and {self.sampling.strategy} sampling"
         )
-        self._dmanager = DesignManager(targets=self.targets, networks=networks)
+        self._dmanager = DesignManager(targets=self.targets, networks=networks, sampling=self.sampling)
 
     def _get_logger_context(self) -> dict:
         context = super()._get_logger_context()
@@ -159,6 +168,8 @@ class DesignProgram(BaseOptimizationProgram):
             "n_epochs": self.design_conf.n_epochs,
             "batch_size": self.design_conf.batch_size,
             "n_batches_per_epoch": self.design_conf.n_batches_per_epoch,
+            "sampling_strategy": self.sampling.strategy,
+            "sampling_config": self.sampling.model_dump(),
         }
 
         self._metadata.update(

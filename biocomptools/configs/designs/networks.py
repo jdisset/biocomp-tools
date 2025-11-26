@@ -1,6 +1,13 @@
-from biocomp.network import Network
-from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Unit
+from biocomp.network import Network, recipe_to_networks
+from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Unit, Recipe
 import itertools as it
+
+# Helper function to convert old-style network definitions to new Networks
+def _make_network_from_cotx(name: str, cotx: list[CoTransfection]) -> list[Network]:
+    """Convert CoTransfection list to Network objects using the new system"""
+    recipe = Recipe(name=name, content=cotx)
+    networks = recipe_to_networks(recipe, invert=True, inversion_mode="all")
+    return networks
 
 ## {{{                      --     net generation     --
 P = "hEF1a"
@@ -77,24 +84,22 @@ def make_units(tu_name, erns=None, mask=None):
 
 def make_twoandone_network(erns=None):
     ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
-    return Network(
-        name=f"two_and_one ({ern_names})",
-        cotx=[
-            CoTransfection(
-                name="x1",
-                units=make_units("x1", erns=erns),
-            ),
-            CoTransfection(
-                name="x2",
-                units=make_units("x2", erns=erns),
-            ),
-            CoTransfection(
-                name="b",
-                units=make_units("b", erns=erns),
-            ),
-        ],
-        invert_on_build=True,
-    )
+    name = f"two_and_one ({ern_names})"
+    cotx = [
+        CoTransfection(
+            name="x1",
+            units=make_units("x1", erns=erns),
+        ),
+        CoTransfection(
+            name="x2",
+            units=make_units("x2", erns=erns),
+        ),
+        CoTransfection(
+            name="b",
+            units=make_units("b", erns=erns),
+        ),
+    ]
+    return _make_network_from_cotx(name, cotx)
 
 
 def make_units_withskip(tu_name, erns=None, direct=True):
@@ -121,24 +126,22 @@ def make_units_withskip(tu_name, erns=None, direct=True):
 
 def make_twoandoneskip_network(erns=None):
     ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
-    return Network(
-        name=f"two_and_one_skip ({ern_names})",
-        cotx=[
-            CoTransfection(
-                name="x1",
-                units=make_units_withskip("x1", erns=erns),
-            ),
-            CoTransfection(
-                name="x2",
-                units=make_units_withskip("x2", erns=erns),
-            ),
-            CoTransfection(
-                name="b",
-                units=make_units_withskip("b", erns=erns),
-            ),
-        ],
-        invert_on_build=True,
-    )
+    name = f"two_and_one_skip ({ern_names})"
+    cotx = [
+        CoTransfection(
+            name="x1",
+            units=make_units_withskip("x1", erns=erns),
+        ),
+        CoTransfection(
+            name="x2",
+            units=make_units_withskip("x2", erns=erns),
+        ),
+        CoTransfection(
+            name="b",
+            units=make_units_withskip("b", erns=erns),
+        ),
+    ]
+    return _make_network_from_cotx(name, cotx)
 
 
 def make_units_three(tu_name, erns=None, direct=True):
@@ -182,42 +185,38 @@ def make_units_two(tu_name, erns=None, direct=True):
 
 def make_three_network(erns=None):
     ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
-    return Network(
-        name=f"three ({ern_names})",
-        cotx=[
-            CoTransfection(
-                name="x1",
-                units=make_units_three("x1", erns=erns),
-            ),
-            CoTransfection(
-                name="x2",
-                units=make_units_three("x2", erns=erns),
-            ),
-            CoTransfection(
-                name="b",
-                units=make_units_three("b", erns=erns),
-            ),
-        ],
-        invert_on_build=True,
-    )
+    name = f"three ({ern_names})"
+    cotx = [
+        CoTransfection(
+            name="x1",
+            units=make_units_three("x1", erns=erns),
+        ),
+        CoTransfection(
+            name="x2",
+            units=make_units_three("x2", erns=erns),
+        ),
+        CoTransfection(
+            name="b",
+            units=make_units_three("b", erns=erns),
+        ),
+    ]
+    return _make_network_from_cotx(name, cotx)
 
 
 def make_two_network(erns=None):
     ern_names = ', '.join(erns) if erns else ', '.join(ERNS)
-    return Network(
-        name=f"two ({ern_names})",
-        cotx=[
-            CoTransfection(
-                name="x1",
-                units=make_units_two("x1", erns=erns),
-            ),
-            CoTransfection(
-                name="x2",
-                units=make_units_two("x2", erns=erns),
-            ),
-        ],
-        invert_on_build=True,
-    )
+    name = f"two ({ern_names})"
+    cotx = [
+        CoTransfection(
+            name="x1",
+            units=make_units_two("x1", erns=erns),
+        ),
+        CoTransfection(
+            name="x2",
+            units=make_units_two("x2", erns=erns),
+        ),
+    ]
+    return _make_network_from_cotx(name, cotx)
 
 
 def make_all_networks():
@@ -227,12 +226,15 @@ def make_all_networks():
     networks = []
     rotations = [ERNS[i:] + ERNS[:i] for i in range(len(ERNS))]
     permutations = list(it.permutations(ERNS))
-    networks += [make_twoandone_network(erns=rot) for rot in rotations]
-    networks += [make_twoandoneskip_network(erns=per) for per in permutations]
-    networks += [make_three_network(erns=ERNS)]
+    for rot in rotations:
+        networks.extend(make_twoandone_network(erns=rot))
+    for per in permutations:
+        networks.extend(make_twoandoneskip_network(erns=per))
+    networks.extend(make_three_network(erns=ERNS))
     # for net in networks:
     #     net.set_input_as_bias('mMaroon1')
-    networks += [make_two_network(erns=rot) for rot in rotations]
+    for rot in rotations:
+        networks.extend(make_two_network(erns=rot))
     return networks
 
 
