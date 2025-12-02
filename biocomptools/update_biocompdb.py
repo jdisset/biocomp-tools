@@ -26,6 +26,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from sqlmodel import Session
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 import pandas as pd
 from PIL import Image
 import pikepdf
@@ -710,9 +711,9 @@ class BiocompDBUpdater(BaseModel):
         "Plots/Figures"
     )
     verbose: Annotated[bool, Arg(short="v", help="Enable verbose logging.")] = True
-    process_experiments: Annotated[bool, Arg(help="Process experiments and recipes")] = True
-    process_models: Annotated[bool, Arg(help="Process trained models")] = True
-    process_figures: Annotated[bool, Arg(help="Process figures and plots")] = True
+    no_experiments: Annotated[bool, Arg(help="Skip processing experiments and recipes")] = False
+    no_models: Annotated[bool, Arg(help="Skip processing trained models")] = False
+    no_figures: Annotated[bool, Arg(help="Skip processing figures and plots")] = False
     nworkers: Annotated[int, Arg(help="Number of parallel workers")] = 8
     ignore_dirs: Annotated[List[str], Arg(help="List of directory names to ignore")] = Field(
         default_factory=lambda: ["__archived"]
@@ -1000,6 +1001,67 @@ class BiocompDBUpdater(BaseModel):
             self._logger.error(f"Exception in build_networks for {recipe.name}: {e}")
             return recipe, traceback.format_exc(limit=1)
 
+    def _bulk_upsert(self, sess: Session, model_cls: type, items: List[Any]) -> int:
+        """Bulk upsert items of a single model type using SQLite INSERT OR REPLACE."""
+        if not items:
+            return 0
+
+        table = model_cls.__table__
+        col_names = {c.name for c in table.columns}
+
+        # find auto-increment PK columns (should be excluded when None)
+        autoincrement_cols = {
+            c.name for c in table.columns if c.autoincrement is True and c.primary_key
+        }
+        has_autoincrement_pk = bool(autoincrement_cols)
+
+        # convert to dicts, excluding relationship fields, private attrs, and None autoincrement PKs
+        data = []
+        for item in items:
+            item_dict = {}
+            for k, v in item.model_dump().items():
+                if k not in col_names:
+                    continue
+                # skip autoincrement PK if None (let DB assign)
+                if k in autoincrement_cols and v is None:
+                    continue
+                item_dict[k] = v
+            data.append(item_dict)
+
+        if not data:
+            return 0
+
+        # SQLite has a limit on variables per statement (SQLITE_MAX_VARIABLE_NUMBER)
+        # Default is often 999 or 32766. Be conservative and batch accordingly.
+        n_cols = len(data[0]) if data else len(col_names)
+        max_vars = 900  # conservative limit
+        batch_size = max(1, max_vars // max(n_cols, 1))
+
+        # For tables with autoincrement PK (like Metric), we need to handle deduplication.
+        # Delete existing metrics for the same trained_model before inserting.
+        if has_autoincrement_pk and model_cls == md.Metric:
+            model_names = {d.get('trained_model_name') for d in data if d.get('trained_model_name')}
+            if model_names:
+                from sqlalchemy import delete
+
+                del_stmt = delete(table).where(table.c.trained_model_name.in_(model_names))
+                sess.execute(del_stmt)
+
+        # batch the inserts
+        # For tables with autoincrement PK, just INSERT (after cleanup above)
+        # For tables with natural PKs, use INSERT OR REPLACE to update existing rows.
+        total = 0
+        for i in range(0, len(data), batch_size):
+            batch = data[i : i + batch_size]
+            if has_autoincrement_pk:
+                stmt = sqlite_insert(table).values(batch)
+            else:
+                stmt = sqlite_insert(table).values(batch).prefix_with('OR REPLACE')
+            sess.execute(stmt)
+            total += len(batch)
+
+        return total
+
     def _commit_db(self, items: List[Any], progress: Progress) -> None:
         db_p = self._resolve_path(config.db.sqlite.path, self.base_dir)
         if getattr(self, "delete_existing", False) and db_p.exists():
@@ -1013,29 +1075,79 @@ class BiocompDBUpdater(BaseModel):
 
         engine = md.get_biocompdb_sqlite_engine(db_p, echo=False)
         self._logger.info("--- starting database commit ---")
+
+        # group items by type
+        by_type: Dict[type, List[Any]] = {}
+        for item in items:
+            by_type.setdefault(type(item), []).append(item)
+
+        # define insertion order based on foreign key dependencies
+        # tables without dependencies first, then tables that depend on them
+        type_order = [
+            md.Experiment,
+            md.Calibration,
+            md.Recipe,
+            md.Network,
+            md.DataFile,
+            md.DataSet,
+            md.NetworkDataPair,
+            md.TrainedModel,
+            md.DataSetNetworkDataPair,
+            md.TrainingSetLink,
+            md.Figure,
+            md.Plot,
+            md.Metric,
+        ]
+
+        # add any types not in order list (shouldn't happen but be safe)
+        for t in by_type:
+            if t not in type_order:
+                type_order.append(t)
+
+        total_types = sum(1 for t in type_order if by_type.get(t))
         with Session(engine) as sess:
             try:
                 tid_commit = progress.add_task(
-                    "[db]Merging items...", total=len(items), visible=self.verbose
+                    "[db]Bulk upserting...", total=total_types, visible=self.verbose
                 )
-                for item in items:
+                total_upserted = 0
+                for model_cls in type_order:
+                    model_items = by_type.get(model_cls, [])
+                    if not model_items:
+                        continue
                     try:
-                        sess.merge(item)
+                        count = self._bulk_upsert(sess, model_cls, model_items)
+                        total_upserted += count
+                        self._logger.debug(
+                            f"Bulk upserted {count} {model_cls.__name__} items"
+                        )
                     except Exception:
                         self._logger.error(
-                            f"Error merging {type(item).__name__} '{getattr(item, 'name', getattr(item, 'fullname', str(item)))}'",
+                            f"Error bulk upserting {model_cls.__name__} ({len(model_items)} items)",
                             exc_info=True,
                         )
+                        # fallback to individual merge for this type
+                        self._logger.info(f"Falling back to individual merge for {model_cls.__name__}")
+                        for item in model_items:
+                            try:
+                                sess.merge(item)
+                            except Exception:
+                                self._logger.error(
+                                    f"Error merging {type(item).__name__} "
+                                    f"'{getattr(item, 'name', getattr(item, 'fullname', str(item)))}'",
+                                    exc_info=True,
+                                )
                     if self.verbose:
                         progress.advance(tid_commit)
+
                 progress.update(
                     tid_commit,
-                    description="[db]Items merged.",
-                    completed=len(items),
+                    description=f"[db]Upserted {total_upserted} items.",
+                    completed=total_types,
                     visible=False,
                 )
                 sess.commit()
-                self._logger.info("database transaction committed.")
+                self._logger.info(f"database transaction committed ({total_upserted} items).")
             except Exception:
                 self._logger.critical(
                     "critical error during final db commit. rolled back.", exc_info=True
@@ -1050,9 +1162,9 @@ class BiocompDBUpdater(BaseModel):
         proc_cats = [
             c
             for c, f in [
-                ("experiments", self.process_experiments),
-                ("models", self.process_models),
-                ("figures", self.process_figures),
+                ("experiments", not self.no_experiments),
+                ("models", not self.no_models),
+                ("figures", not self.no_figures),
             ]
             if f
         ]
@@ -1071,6 +1183,8 @@ class BiocompDBUpdater(BaseModel):
             model_metrics_list,
             datasets_list,
             dataset_associations_list,
+            network_data_pairs_list,
+            training_set_links_list,
             figs_list,
             plots_list,
             fig_metrics_list,
@@ -1085,10 +1199,12 @@ class BiocompDBUpdater(BaseModel):
             [],
             [],
             [],
+            [],
+            [],
         )
 
         with Progress(*RICH_PROGRESS_COLUMNS, refresh_per_second=4, transient=False) as progress:
-            if self.process_experiments:
+            if not self.no_experiments:
                 xps_map = self._load_xps(progress)
                 if xps_map:
                     self._logger.info(
@@ -1215,7 +1331,7 @@ class BiocompDBUpdater(BaseModel):
                 else:
                     self._logger.warning("no experiments loaded to process.")
 
-            if self.process_models:
+            if not self.no_models:
                 (
                     models_list,
                     model_metrics_list,
@@ -1224,7 +1340,7 @@ class BiocompDBUpdater(BaseModel):
                     network_data_pairs_list,
                     training_set_links_list,
                 ) = self._load_models(progress)
-            if self.process_figures:
+            if not self.no_figures:
                 figs_list, plots_list, fig_metrics_list = self._load_figs(progress)
 
             items_commit = [
