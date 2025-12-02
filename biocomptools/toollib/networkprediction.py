@@ -137,10 +137,21 @@ def _calculate_single_network_stats(
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
-        # Apply same slicing to gt as was applied to yhat
-        if latent_gt.shape[1] > 1:  # but only if gt has more than one column
+        # Handle dimension mismatch between gt and yhat. This can happen when:
+        # - force_single_output=True was applied to gt, reducing it to 1 column
+        # - yhat has multiple outputs that were sliced with dependent_output_pos
+        if latent_gt.shape[1] > 1:
+            # gt has multiple columns, apply the same slicing as yhat
             latent_gt = latent_gt[:, dependent_output_pos]
-        assert latent_gt.shape[1] == latent_yhat.shape[1]
+        elif latent_yhat.shape[1] > 1 and latent_gt.shape[1] == 1:
+            # gt was pre-transformed to single column, slice yhat to match
+            # use only the first column of yhat for comparison
+            latent_yhat = latent_yhat[:, :1]
+        # Now dimensions should match
+        assert latent_gt.shape[1] == latent_yhat.shape[1], (
+            f"After dimension adjustment, latent_gt.shape[1]={latent_gt.shape[1]} "
+            f"!= latent_yhat.shape[1]={latent_yhat.shape[1]}"
+        )
 
         # Debug traces for validation investigation
         from biocomptools.logging_config import get_logger
@@ -340,6 +351,27 @@ class NetworkPrediction(DataSource):
                 f"number of predict_at arrays ({len(self.predict_at)}) "
                 f"does not match number of networks ({len(self.network_model.network)})"
             )
+
+        # validate and fix input dimensions for each network
+        fixed_predict_at = []
+        for i, (x, net) in enumerate(zip(self.predict_at, self.network_model.network)):
+            expected_inputs = net.nb_inputs
+            actual_inputs = x.shape[1] if x.ndim > 1 else 1
+            if actual_inputs > expected_inputs:
+                logger.warning(
+                    f"Network {i} ({net.name}): predict_at has {actual_inputs} columns but "
+                    f"network expects {expected_inputs} inputs. Truncating to first {expected_inputs} columns. "
+                    f"(This typically happens when force_single_output=True reshapes the data for plotting.)"
+                )
+                fixed_predict_at.append(x[:, :expected_inputs])
+            elif actual_inputs < expected_inputs:
+                raise ValueError(
+                    f"Network {i} ({net.name}): predict_at has {actual_inputs} columns but "
+                    f"network expects {expected_inputs} inputs."
+                )
+            else:
+                fixed_predict_at.append(x)
+        self.predict_at = fixed_predict_at
 
         if self.ground_truth is None:
             self.ground_truth = [None] * len(self.predict_at)
@@ -591,11 +623,8 @@ class NetworkPrediction(DataSource):
 
             network = self.network_model.network[network_idx]
 
-            # get output position for this network
+            # get output position for this network (can be int for single output or list for multiple outputs)
             _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
-            assert isinstance(dependent_output_pos, int), (
-                f"dependent_output_pos should be an int, got {type(dependent_output_pos)}: {dependent_output_pos}"
-            )
             if self.verbose:
                 logger.info(f"dep_output_pos: {dependent_output_pos}")
 
