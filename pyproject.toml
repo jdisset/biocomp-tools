@@ -10,6 +10,7 @@ authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
 dependencies = [
 	"biocomp",
+	"jeanplot",
 	"ray",
 	"pympler",
 	"memray",
@@ -37,4 +38,5 @@ biocomp-updatedb = "biocomptools.update_biocompdb:main"
 biocomp-updatepartsdb = "biocomptools.update_partsdb:main"
 biocomp-update-partsdb = "biocomptools.update_partsdb:main"
 biocomp-hyperopt = "biocomptools.optuna_hyperopt:main"
+biocomp-circuitplot = "biocomptools.circuitplot:main"
 

@@ -9,6 +9,7 @@ import memray
 
 import dracon as dr
 from dracon.utils import ser_debug
+from dracon.diagnostics import DraconError, handle_dracon_error
 from pympler.asizeof import asizeof
 import os
 
@@ -37,7 +38,7 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
 )
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 
-from biocomptools.modelmodel import BiocompModel, get_shared_params
+from biocomptools.modelmodel import BiocompModel, get_shared_params, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
@@ -104,6 +105,7 @@ DEFAULT_TYPES = [
     iRegex,
     ModelSelector,
     BiocompModel,
+    NetworkModel,
     NetworkPrediction,
     NetworkSelector,
     NetworkSet,
@@ -186,6 +188,9 @@ def construct_figure(figure_node):
         if dict_like(figure):
             figure = Figure(**figure)  # type: ignore
         assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
+    except DraconError:
+        # let DraconErrors propagate - they'll be formatted nicely at the top level
+        raise
     except Exception as e:
         logger.error(f"Error constructing figure: {e}")
         logger.exception(e)
@@ -359,7 +364,18 @@ def main():
         enable_shorthand_vars=False,
     )
 
-    pj.run()
+    try:
+        pj.run()
+    except DraconError as e:
+        handle_dracon_error(e, exit_code=1)
+    except Exception as e:
+        # check if root cause is a DraconError
+        root = e
+        while root.__cause__ is not None:
+            root = root.__cause__
+        if isinstance(root, DraconError):
+            handle_dracon_error(root, exit_code=1)
+        raise
 
 
 if __name__ == '__main__':
