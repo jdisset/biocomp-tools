@@ -89,6 +89,7 @@ class NetworkSelector(BaseModel):
     recipe_short_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
+    weight: float = 1.0
 
     def get_networkdata_ids(self, session) -> List[NetworkDataPair]:
         """
@@ -229,6 +230,7 @@ class NetworkSelector(BaseModel):
                             ndp = NetworkDataPair(
                                 network_name=network.name, datafile_path=datafile.file
                             )
+                            ndp.weight = self.weight
                             logger.debug(f"NetworkDataId created: {ndp}")
                             if ndp.network is None:
                                 ndp.network = network
@@ -394,6 +396,7 @@ class NetworkSelector(BaseModel):
 class NetworkSet(BaseModel):
     content: List[Union[NetworkDataPair, NetworkSelector, "NetworkSet"]] = []
     name: Optional[str] = None
+    weight: Optional[float] = None  # if set, overrides weight on all content items
 
     @property
     def _engine(self):
@@ -467,15 +470,16 @@ class NetworkSet(BaseModel):
                 ncontent = n.get_networkdata_ids(sess)
                 new_content.extend(ncontent)
                 logger.debug(f"Found {len(ncontent)} matching networks")
-
             elif isinstance(n, NetworkSet):
-                # Recursively run selectors on nested NetworkSets
                 logger.debug(f"Running nested NetworkSet: {n}")
                 n.run_selectors(sess)
                 new_content.extend(n.content)
             else:
                 assert isinstance(n, NetworkDataPair), f"Expected NetworkDataPair but got {type(n)}"
                 new_content.append(n)
+        if self.weight is not None:
+            for ndp in new_content:
+                ndp.weight = self.weight
         self.content = new_content
         logger.debug(f"Finished running selectors. Found {len(self.content)} items")
         if session is None:
@@ -693,6 +697,9 @@ class NetworkFilter(NetworkSet):
             self.content = [
                 net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
             ]
+            if self.weight is not None:
+                for ndp in self.content:
+                    ndp.weight = self.weight
             self._size_diff = len(self.source_set.content) - len(self.content)
             self.update_name()
         except Exception as e:
@@ -897,8 +904,11 @@ def build_data_manager(
         raise ValueError("No networks and data found in the dataset. Please check your selectors.")
 
     networks, datafiles = zip(*net_data)
+    ndp_weights = {ndp.network_name: ndp.weight for ndp in dataset.content}
+
     data = []
     actual_networks = []
+    weights = []
 
     for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
         n.build(lib)
@@ -916,6 +926,7 @@ def build_data_manager(
             net.metadata['calibration_name'] = f.calibration.name
             net.metadata['recipe_name'] = f.recipe_name
             actual_networks.append(net)
+            weights.append(ndp_weights.get(n.name, 1.0))
 
     X, Y = zip(*data)
 
@@ -923,6 +934,7 @@ def build_data_manager(
         X,
         Y,
         actual_networks,
+        weights=weights,
         data_cfg=data_conf,
         cache_location=data_cache,
         jax_sampling=jax_sampling,

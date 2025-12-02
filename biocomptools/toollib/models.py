@@ -38,7 +38,7 @@ def extract_network_info(net: bc.network.Network) -> dict:
             'cotx': [],
             'cotx_str': '',
             'ern_names_str': '',
-            'all_parts': {}
+            'all_parts': {},
         }
 
     # Always ensure nb_inputs and nb_outputs are included (for backward compatibility)
@@ -525,11 +525,15 @@ class NetworkDataPair(BiocompDB, table=True):
     network: Optional["Network"] = Relationship()
     datafile: Optional["DataFile"] = Relationship()
 
-    # Remove old many-to-many relationship with TrainedModel
-    # trained_models: List["TrainedModel"] = Relationship(...)
+    _weight: float = 1.0  # runtime-only, not in DB
 
-    # metrics computed on this specific network-data pair
-    # metrics: List["Metric"] = Relationship()
+    @property
+    def weight(self) -> float:
+        return self._weight
+
+    @weight.setter
+    def weight(self, value: float):
+        self._weight = value
 
     def __hash__(self):
         return hash((self.network_name, self.datafile_path))
