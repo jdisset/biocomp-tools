@@ -19,6 +19,12 @@ Usage:
     # Check status of existing study
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.show_best true
 
+    # Launch Optuna dashboard web interface
+    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.dashboard true
+
+    # Launch dashboard on custom port
+    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.dashboard true --define.dashboard_port 9000
+
     # Resume existing study (just run the same command again)
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset
 """
@@ -31,7 +37,7 @@ import time
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any, Annotated, Optional
+from typing import Any, Annotated
 
 import numpy as np
 import optuna
@@ -40,14 +46,13 @@ from pydantic import Field, ConfigDict, BaseModel
 
 from dracon.commandline import Arg, make_program
 from dracon.deferred import DeferredNode
-import dracon as dr
 
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
 from biocomp.train import TrainingConfig, start
 from biocomp.library import load_lib
 from biocomptools.toollib.common import config
-from biocomptools.toollib.networkselector import CleanupFilter, build_data_manager, NetworkSet
+from biocomptools.toollib.networkselector import build_data_manager, NetworkSet
 from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
@@ -147,6 +152,8 @@ class HyperoptProgram(BaseModel):
     # info-only modes
     show_best: Annotated[bool, Arg(help='Show best results and exit')] = False
     export_only: Annotated[bool, Arg(help='Export results and exit')] = False
+    dashboard: Annotated[bool, Arg(help='Launch Optuna dashboard web interface and exit')] = False
+    dashboard_port: Annotated[int, Arg(help='Port for Optuna dashboard')] = 8080
 
     # internal state
     _lib: Any = None
@@ -221,7 +228,7 @@ class HyperoptProgram(BaseModel):
         if n_complete > 0:
             print(f"\nBest trial: #{study.best_trial.number}")
             print(f"Best loss: {study.best_value:.6f}")
-            print(f"\nBest hyperparameters:")
+            print("\nBest hyperparameters:")
             for k, v in study.best_params.items():
                 print(f"  {k}: {v:.6g}" if isinstance(v, float) else f"  {k}: {v}")
         print(f"{'=' * 60}\n")
@@ -246,6 +253,29 @@ class HyperoptProgram(BaseModel):
             current[final_key] = value
         else:
             raise ValueError(f"Cannot set {final_key} in {type(current).__name__}")
+
+    def _launch_dashboard(self):
+        """Launch Optuna dashboard web interface."""
+        storage = self._get_storage_path()
+
+        try:
+            import optuna_dashboard
+
+            print(f"\n{'=' * 60}")
+            print("Launching Optuna Dashboard")
+            print(f"Storage: {storage}")
+            print(f"URL: http://localhost:{self.dashboard_port}")
+            print("Press Ctrl+C to stop")
+            print(f"{'=' * 60}\n")
+
+            optuna_dashboard.run_server(storage, port=self.dashboard_port)
+
+        except ImportError:
+            print("ERROR: optuna-dashboard not installed")
+            print("Install with: pip install optuna-dashboard")
+            print("\nAlternatively, run manually:")
+            print(f"  optuna-dashboard {storage}")
+            sys.exit(1)
 
     def _save_results(self, study: optuna.Study):
         results_dir = Path(self.output_dir) / self.study_name
@@ -346,6 +376,10 @@ class HyperoptProgram(BaseModel):
     async def run(self):
         """Main entry point."""
         # handle info-only modes
+        if self.dashboard:
+            self._launch_dashboard()
+            return
+
         if self.show_best:
             self._show_study_status()
             return
@@ -425,7 +459,7 @@ async def main_async():
         deferred_paths=['/training_conf', '/compute_conf'],
         context=context,
         capture_globals=False,
-        enable_shorthand_vars=False
+        enable_shorthand_vars=False,
     )
     assert isinstance(program, HyperoptProgram)
     await program.run()
