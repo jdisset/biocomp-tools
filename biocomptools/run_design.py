@@ -21,10 +21,9 @@ from biocomp.design import (
     SamplingConfigUnion,
     UniformSampling,
 )
-from biocomp.network import Network
+from biocomp.network import Network, recipe_to_networks
+from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
-from biocomptools.configs.designs.networks import ALL_NETWORKS, TWO_AND_ONE_NETWORKS
-from biocomptools.configs.designs.design_recipes import DESIGN_TWOANDONE
 
 from dracon.commandline import Arg
 import asyncio
@@ -40,9 +39,6 @@ from functools import partial
 
 logger = get_logger(__name__)
 
-DEFAULT_NETWORKS = [TWO_AND_ONE_NETWORKS[0]]
-DEFAULT_NETWORKS = [DESIGN_TWOANDONE]
-
 
 class DesignProgram(BaseOptimizationProgram):
     design_conf: Annotated[DesignConfig, Arg(help='Design optimization config')] = Field(
@@ -54,6 +50,7 @@ class DesignProgram(BaseOptimizationProgram):
     )
 
     networks: Annotated[Optional[list[Network] | Network], Arg(help='Networks to optimize')] = None
+    recipes: Annotated[Optional[list[Recipe] | Recipe], Arg(help='Recipes to convert to networks')] = None
 
     # Sampling configuration
     sampling: Annotated[SamplingConfigUnion, Arg(help='Sampling strategy configuration')] = Field(
@@ -63,9 +60,9 @@ class DesignProgram(BaseOptimizationProgram):
     # Network subset configuration
     network_subset_size: Annotated[Optional[int], Arg(help='Limit networks to first N')] = None
 
-    model_selector: Annotated[ModelSelector, Arg(help='Model selector for pre-trained model')] = (
-        Field(default_factory=ModelSelector)
-    )
+    # Model can be specified by path/name directly, or via model_selector for complex queries
+    model_name: Annotated[Optional[str], Arg(help='Model path or signature (simpler alternative to model_selector)')] = None
+    model_selector: Annotated[Optional[ModelSelector], Arg(help='Model selector for complex queries')] = None
 
     experiment_name: str = 'default_design_xp'
 
@@ -102,34 +99,62 @@ class DesignProgram(BaseOptimizationProgram):
 
     def initialize_context(self):
         logger.info("Initializing design context...")
-        logger.debug(f"Model selector: {self.model_selector}")
 
-        with self.db_session as session:
-            selected_model = self.model_selector.get_model(session)
-            logger.info(f"Loading model: {selected_model.name if selected_model else 'None'}")
-            self._model = selected_model.load() if selected_model else None
-            session.expunge_all()
-            session.close()
+        if self.model_name and self.model_name.strip():
+            model_path = Path(self.model_name)
+            if model_path.exists() and model_path.suffix == '.pickle':
+                logger.info(f"Loading model directly from path: {model_path}")
+                self._model = BiocompModel.load(model_path)
+            else:
+                logger.debug(f"Using model_name for DB lookup: {self.model_name}")
+                effective_selector = ModelSelector(name=self.model_name)
+                with self.db_session as session:
+                    selected_model = effective_selector.get_model(session)
+                    logger.info(f"Loading model: {selected_model.name if selected_model else 'None'}")
+                    self._model = selected_model.load() if selected_model else None
+                    session.expunge_all()
+                    session.close()
+        elif self.model_selector:
+            logger.debug(f"Using model_selector: {self.model_selector}")
+            effective_selector = self.model_selector
+            with self.db_session as session:
+                selected_model = effective_selector.get_model(session)
+                logger.info(f"Loading model: {selected_model.name if selected_model else 'None'}")
+                self._model = selected_model.load() if selected_model else None
+                session.expunge_all()
+                session.close()
+        else:
+            logger.warning("No model specified - model_name or model_selector required")
+            return
 
         if self._model is None:
-            raise ValueError(f"Could not load model using selector: {self.model_selector}")
+            raise ValueError(f"Could not load model: model_name={self.model_name}, model_selector={self.model_selector}")
 
         logger.info(f"Successfully loaded model with signature: {self._model.signature}")
 
-        # Use default networks if none specified
+        # Build networks from recipes or use directly specified networks
         if isinstance(self.networks, Network):
             self.networks = [self.networks]
+        if isinstance(self.recipes, Recipe):
+            self.recipes = [self.recipes]
 
+        networks = []
         if self.networks is not None:
-            networks = self.networks
-            logger.debug(f"Using {len(networks)} user-specified networks")
-        else:
-            networks = DEFAULT_NETWORKS
-            logger.debug(f"Using {len(networks)} default networks")
-            # Apply subset if specified
-            if self.network_subset_size is not None:
-                networks = networks[: self.network_subset_size]
-                logger.info(f"Limited networks to first {self.network_subset_size}")
+            networks.extend(self.networks)
+            logger.debug(f"Using {len(self.networks)} directly specified networks")
+
+        if self.recipes is not None:
+            for recipe in self.recipes:
+                recipe_networks = recipe_to_networks(recipe, invert=True, inversion_mode="main")
+                networks.extend(recipe_networks)
+            logger.debug(f"Generated {len(networks)} networks from {len(self.recipes)} recipes")
+
+        if not networks:
+            raise ValueError("No networks or recipes specified. Use --networks or --recipes, or set recipes in config.")
+
+        if self.network_subset_size is not None:
+            networks = networks[: self.network_subset_size]
+            logger.info(f"Limited networks to first {self.network_subset_size}")
 
         if isinstance(self.targets, Target):
             self.targets = [self.targets]
@@ -178,7 +203,8 @@ class DesignProgram(BaseOptimizationProgram):
                 'run_name': self._run_name,
                 'experiment_name': self.experiment_name,
                 'model_signature': self._model.signature if self._model else 'unknown',
-                'model_selector': self.model_selector.model_dump(),
+                'model_name': self.model_name,
+                'model_selector': self.model_selector.model_dump() if self.model_selector else None,
                 'design_info': design_info,
                 'design_conf': self.design_conf.model_dump(),
                 'targets': [t.model_dump() for t in self.targets],
@@ -407,19 +433,24 @@ class DesignProgram(BaseOptimizationProgram):
             self._metadata['logger_metrics_all_replicates'] = make_json_ready(logger_metrics)
 
         if loss_history:
-            # Convert loss_history to the expected format
-            if isinstance(loss_history, list) and len(loss_history) > 0:
-                # Each element in loss_history is shape (n_replicates, batches_per_step)
-                # plot_loss expects a list of arrays to concatenate along axis=1
-                if len(loss_history) == 1:
-                    # Single step, wrap in a list
-                    self.save_loss_plot([loss_history[0]], save_dir)
-                else:
-                    # Multiple steps, let plot_loss concatenate them
-                    self.save_loss_plot(loss_history, save_dir)
-            elif isinstance(loss_history, np.ndarray):
-                # Wrap single array in a list for plot_loss
-                self.save_loss_plot([loss_history], save_dir)
+            # design loss_history elements have shape (n_replicates, n_targets, ...)
+            # plot_loss expects list of (n_replicates, n_steps) - average over targets
+            try:
+                processed = []
+                for lh in loss_history:
+                    arr = np.array(lh)
+                    if arr.ndim == 2:
+                        # (n_replicates, n_targets) -> average over targets -> (n_replicates, 1)
+                        processed.append(np.nanmean(arr, axis=1, keepdims=True))
+                    elif arr.ndim >= 3:
+                        # (n_replicates, n_targets, ...) -> average over targets
+                        processed.append(np.nanmean(arr, axis=1))
+                    else:
+                        processed.append(arr.reshape(-1, 1) if arr.ndim == 1 else arr)
+                if processed:
+                    self.save_loss_plot(processed, save_dir)
+            except Exception as e:
+                logger.warning(f"Failed to save loss plot: {e}")
         logger.debug("Saving metadata...")
         self.save_metadata(save_dir)
         logger.info("All outputs saved successfully.")
