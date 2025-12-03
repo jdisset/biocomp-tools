@@ -8,7 +8,9 @@ from biocomptools.toollib.common import config
 from biocomptools.toollib.hashutils import pronounceable_hash32
 import biocomp as bc
 from biocomp.library import load_lib
+from biocomp.utils import get_cache
 from biocomptools.logging_config import get_logger
+import json
 
 
 def extract_network_info(net: bc.network.Network) -> dict:
@@ -378,7 +380,7 @@ class Recipe(BiocompDB, table=True):
     def build_networks(
         self,
         lib=None,
-        use_cache=None,
+        use_cache=config.paths.cache.networks,
         inverse='all',
         add_to_self=False,
     ) -> list["Network"]:
@@ -387,6 +389,7 @@ class Recipe(BiocompDB, table=True):
         (e.g. using different "inversions" i.e. input vs output markers).
 
         we build directly from the recipe content, without parsing the recipe file.
+        Caching is enabled by default using config.paths.cache.networks.
         """
         import biocomp.biorules as br
         from biocomp.network import recipe_to_networks
@@ -398,7 +401,10 @@ class Recipe(BiocompDB, table=True):
         lib = lib or load_lib()
         assert lib is not None
 
-        try:
+        # generate cache signature from recipe content and inversion mode
+        cache_sig = f"recipe:{self.name}:inv={inverse}:{json.dumps(self.content, sort_keys=True)}"
+
+        def _build_networks():
             with LibraryContext.with_library(lib):
                 from biocomp.recipe import dict_to_recipe
 
@@ -420,7 +426,10 @@ class Recipe(BiocompDB, table=True):
                     raise ValueError(f"Unexpected recipe content type: {type(self.content)}")
 
                 invert = inverse == 'all' or inverse is True
-                networks = recipe_to_networks(recipe_obj, br.ALL_RULES, invert=invert)
+                return recipe_to_networks(recipe_obj, br.ALL_RULES, invert=invert)
+
+        try:
+            networks = get_cache(_build_networks, cache_sig, use_cache)
 
         except Exception as e:
             import traceback

@@ -27,6 +27,9 @@ Usage:
 
     # Resume existing study (just run the same command again)
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset
+
+    # Dataset weight optimization with validation-based objective
+    biocomp-hyperopt +biocomp-jobs/hyperopt/dataset_weights --use_validation_loss true
 """
 
 from __future__ import annotations
@@ -41,21 +44,25 @@ from typing import Any, Annotated
 
 import numpy as np
 import optuna
-from optuna.samplers import TPESampler
+from optuna.samplers import TPESampler, CmaEsSampler
 from pydantic import Field, ConfigDict, BaseModel
+from typing import Literal
 
 from dracon.commandline import Arg, make_program
 from dracon.deferred import DeferredNode
 
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
-from biocomp.train import TrainingConfig, start
+from biocomp.train import TrainingConfig, start, CompiledTrainingStep, compile_training_step
 from biocomp.library import load_lib
+from biocomp.jaxutils import tree_get
 from biocomptools.toollib.common import config
-from biocomptools.toollib.networkselector import build_data_manager, NetworkSet
+from biocomptools.toollib.networkselector import build_data_manager, NetworkSet, NetworkDataPair
 from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
+from biocomptools.modelmodel import BiocompModel, NetworkModel
+from biocomptools.toollib.networkprediction import NetworkPrediction
 
 logger = get_logger(__name__)
 
@@ -127,9 +134,18 @@ class HyperoptProgram(BaseModel):
     # study configuration
     study_name: Annotated[str, Arg(help='Study name for persistence')] = "biocomp_hyperopt"
     n_trials: Annotated[int, Arg(help='Number of trials to run')] = 100
-    n_startup_trials: Annotated[int, Arg(help='Random trials before TPE')] = 20
+    n_startup_trials: Annotated[int, Arg(help='Random trials before sampler kicks in')] = 20
     pruning: Annotated[bool, Arg(help='Enable early stopping of bad trials')] = True
     seed: Annotated[int | None, Arg(help='Random seed')] = None
+
+    # sampler configuration
+    sampler: Annotated[
+        Literal["tpe", "cmaes", "hybrid"],
+        Arg(help='Sampler: tpe (Tree-Parzen), cmaes (CMA-ES), or hybrid (TPE then CMA-ES)')
+    ] = "tpe"
+    hybrid_switch_trial: Annotated[
+        int, Arg(help='For hybrid sampler: switch from TPE to CMA-ES after this many trials')
+    ] = 100
 
     # output configuration
     output_dir: Annotated[str, Arg(help='Directory to save results')] = Field(
@@ -140,9 +156,18 @@ class HyperoptProgram(BaseModel):
     training_conf: Annotated[DeferredNode[TrainingConfig], Arg(help='Base training config')]
     compute_conf: Annotated[DeferredNode[ComputeConfig], Arg(help='Base compute config')]
     data_conf: Annotated[DataConfig, Arg(help='Data config')] = Field(default_factory=DataConfig)
-    training_set: Annotated[NetworkSet, Arg(help='Networks in training set')] = Field(
+    # training_set can be either a NetworkSet (for standard use) or DeferredNode (for weight optimization)
+    training_set: Annotated[NetworkSet | DeferredNode[NetworkSet], Arg(help='Networks in training set')] = Field(
         default_factory=NetworkSet
     )
+
+    # validation configuration (for validation-based objective)
+    validation_set: Annotated[NetworkSet | None, Arg(help='Networks for validation')] = None
+    use_validation_loss: Annotated[bool, Arg(help='Use validation loss as objective')] = False
+    n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 2048
+
+    # per-trial dataset weight support (for optimizing dataset weights)
+    rebuild_dman_per_trial: Annotated[bool, Arg(help='Rebuild data manager each trial')] = False
 
     # hyperparameters to optimize
     hyperparams: Annotated[list[HyperparamSpec], Arg(help='Hyperparameters to optimize')] = Field(
@@ -158,6 +183,10 @@ class HyperoptProgram(BaseModel):
     # internal state
     _lib: Any = None
     _training_dman: Any = None
+    _validation_predictor: Any = None
+    _validation_xynetworks: Any = None
+    _network_weight_mapping: list[str] | None = None  # network_idx -> ndp.network_name
+    _cached_step: CompiledTrainingStep | None = None  # cached compiled step for JIT reuse
 
     def model_post_init(self, __context):
         self._lib = load_lib()
@@ -175,22 +204,151 @@ class HyperoptProgram(BaseModel):
     def path_prefix(self):
         return Path(config.paths.root).expanduser().resolve()
 
-    def _prepare_data_manager(self):
-        """Build data manager (done once, reused across trials)."""
-        if self._training_dman is not None:
+    def _prepare_data_manager(self, hyperparams: dict | None = None):
+        """Build data manager. If rebuild_dman_per_trial, update weights only (fast path)."""
+        # fast path: if we have a DataManager and just need to update weights
+        if self._training_dman is not None and self.rebuild_dman_per_trial and hyperparams is not None:
+            if self._network_weight_mapping is not None:
+                # update weights using the mapping
+                self._update_weights_from_hyperparams(hyperparams)
+                return
+
+        if self._training_dman is not None and not self.rebuild_dman_per_trial:
             return
 
         print("Preparing data manager (this takes a moment)...")
+
+        # resolve training_set if it's a DeferredNode
+        if isinstance(self.training_set, DeferredNode):
+            # construct with hyperparameters as context for weight interpolation
+            context = hyperparams or {}
+            resolved_training_set = self.training_set.construct(context=context)
+        else:
+            resolved_training_set = self.training_set
+
         with self.db_session as session:
-            self.training_set.run_selectors(session)
+            resolved_training_set.run_selectors(session)
             self._training_dman = build_data_manager(
                 lib=self._lib,
                 db_session=session,
                 path_prefix=self.path_prefix,
                 data_conf=self.data_conf,
-                dataset=self.training_set,
+                dataset=resolved_training_set,
             )
-        print("Data manager ready.")
+            # build weight mapping for fast updates on subsequent trials
+            if self.rebuild_dman_per_trial:
+                self._build_weight_mapping(resolved_training_set, session)
+        print(f"Data manager ready ({len(resolved_training_set.content)} network-data pairs).")
+
+    def _build_weight_mapping(self, dataset: NetworkSet, session):
+        """Build mapping from network indices to NetworkDataPair names for weight updates."""
+        net_data = dataset.get_networks_and_data(session)
+        networks, _ = zip(*net_data)
+
+        # map network_idx -> ndp.network_name (respecting network splitting)
+        self._network_weight_mapping = []
+        for n in networks:
+            n.build(self._lib)  # ensure built (should be cached)
+            network_list = n._network if isinstance(n._network, list) else [n._network]
+            for _ in network_list:
+                self._network_weight_mapping.append(n.name)
+
+    def _update_weights_from_hyperparams(self, hyperparams: dict):
+        """Update DataManager weights based on hyperparameters (fast path)."""
+        # find which hyperparam controls each network's weight
+        # hyperparams keys are like "dataweight_1_Single_CasE_no_ratios"
+        # we need to match these to network names
+
+        # rebuild the ndp_weights by resolving the training_set with new context
+        if isinstance(self.training_set, DeferredNode):
+            resolved = self.training_set.construct(context=hyperparams)
+            with self.db_session as session:
+                resolved.run_selectors(session)
+                ndp_weights = {ndp.network_name: ndp.weight for ndp in resolved.content}
+        else:
+            # no deferred node, weights don't change
+            return
+
+        # apply weights using the mapping
+        new_weights = [ndp_weights.get(name, 1.0) for name in self._network_weight_mapping]
+        self._training_dman.set_weights(new_weights)
+
+    def _compile_cached_step(self, training_conf: TrainingConfig, compute_conf: ComputeConfig):
+        """Compile and cache the training step for reuse across trials.
+
+        This is called once on the first trial. The compiled step can then be
+        reused across subsequent trials since only the weights change (not the
+        network structure or training configuration).
+        """
+        if self._cached_step is not None:
+            return  # already compiled
+
+        print("Compiling training step for caching (first trial only)...")
+
+        self._cached_step = compile_training_step(
+            dman=self._training_dman,
+            training_config=training_conf,
+            compute_config=compute_conf,
+        )
+        print("Training step compiled and cached.")
+
+    def _prepare_validation(self, compute_conf: ComputeConfig):
+        """Initialize validation predictor (done once)."""
+        if self._validation_predictor is not None:
+            return
+        if self.validation_set is None:
+            return
+
+        print("Preparing validation predictor (this takes a moment)...")
+        with self.db_session as session:
+            self.validation_set.run_selectors(session)
+            val_dman = build_data_manager(
+                lib=self._lib,
+                db_session=session,
+                path_prefix=self.path_prefix,
+                data_conf=self.data_conf,
+                dataset=self.validation_set,
+                jax_sampling=False,
+            )
+
+        self._validation_xynetworks = val_dman.get_per_network_xy_samples(self.n_validation_evals)
+        xs, ys, networks = self._validation_xynetworks
+
+        model = BiocompModel(compute_config=compute_conf, rescaler=self.data_conf.rescaler)
+        network_model = NetworkModel(model=model, network=networks)
+
+        per_prediction_info = [
+            {'network_name': n.name, 'networkdatapair': {'network_name': n.name}}
+            for n in networks
+        ]
+
+        self._validation_predictor = NetworkPrediction(
+            predict_at=xs,
+            network_model=network_model,
+            ground_truth=ys,
+            seed=self.seed or 42,
+            disable_variational=True,
+            max_evals=self.n_validation_evals,
+            already_latent=True,
+            n_stats_workers=1,
+            per_prediction_info=per_prediction_info,
+            device='cpu',
+        )
+        print(f"Validation predictor ready ({len(networks)} networks).")
+
+    def _compute_validation_loss(self, params) -> float:
+        """Compute validation loss using trained params."""
+        if self._validation_predictor is None:
+            return float('inf')
+
+        # get stats for first replicate
+        stats = self._validation_predictor.get_network_stats(with_shared_params=tree_get(params, 0))
+        valid_stats = [s for s in stats if s.get('rmse') is not None]
+
+        if not valid_stats:
+            return float('inf')
+
+        return float(np.mean([s['rmse'] for s in valid_stats]))
 
     def _get_storage_path(self) -> str:
         output_path = Path(self.output_dir)
@@ -253,6 +411,35 @@ class HyperoptProgram(BaseModel):
             current[final_key] = value
         else:
             raise ValueError(f"Cannot set {final_key} in {type(current).__name__}")
+
+    def _create_sampler(self, n_completed_trials: int = 0) -> optuna.samplers.BaseSampler:
+        """Create sampler based on configuration.
+
+        For hybrid mode, returns TPE if below switch threshold, CMA-ES otherwise.
+        CMA-ES is particularly effective for continuous hyperparameters in high dimensions
+        once we have some good samples to initialize from.
+        """
+        if self.sampler == "tpe":
+            return TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed)
+        elif self.sampler == "cmaes":
+            return CmaEsSampler(
+                n_startup_trials=self.n_startup_trials,
+                seed=self.seed,
+                warn_independent_sampling=False,  # suppress warnings for categoricals
+            )
+        elif self.sampler == "hybrid":
+            if n_completed_trials < self.hybrid_switch_trial:
+                logger.info(f"Hybrid mode: using TPE (trial {n_completed_trials} < {self.hybrid_switch_trial})")
+                return TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed)
+            else:
+                logger.info(f"Hybrid mode: switched to CMA-ES (trial {n_completed_trials} >= {self.hybrid_switch_trial})")
+                return CmaEsSampler(
+                    n_startup_trials=0,  # don't need random trials, we have TPE samples
+                    seed=self.seed,
+                    warn_independent_sampling=False,
+                )
+        else:
+            raise ValueError(f"Unknown sampler: {self.sampler}")
 
     def _launch_dashboard(self):
         """Launch Optuna dashboard web interface."""
@@ -334,8 +521,28 @@ class HyperoptProgram(BaseModel):
                     value = hyperparams[spec.name]
                     self._set_nested_value(training_conf, path_parts, value)
 
-            # create pruning logger
-            pruning_logger = OptunaPruningLogger(trial=trial) if self.pruning else None
+            # update weights if needed (for dataset weight optimization)
+            # _prepare_data_manager uses fast path when DataManager exists
+            if self.rebuild_dman_per_trial:
+                self._prepare_data_manager(hyperparams)
+
+            # compile and cache step on first trial (for dataset weight optimization)
+            # only do this when rebuild_dman_per_trial is True (dataset weights only change)
+            # and hyperparams are only dataset weights (no structural hyperparams)
+            use_cached_step = self.rebuild_dman_per_trial and all(
+                spec.name.startswith("dataweight_") for spec in self.hyperparams
+            )
+            if use_cached_step:
+                self._compile_cached_step(training_conf, compute_conf)
+
+            # init validation predictor on first trial if needed
+            if self.use_validation_loss and self._validation_predictor is None:
+                self._prepare_validation(compute_conf)
+
+            # create pruning logger (only for training loss, not validation)
+            pruning_logger = None
+            if self.pruning and not self.use_validation_loss:
+                pruning_logger = OptunaPruningLogger(trial=trial)
             logger_callbacks = []
             if pruning_logger:
                 pruning_logger.initialize(None)
@@ -347,21 +554,30 @@ class HyperoptProgram(BaseModel):
                 training_config=training_conf,
                 compute_config=compute_conf,
                 loggers=logger_callbacks,
+                cached_step=self._cached_step if use_cached_step else None,
             )
-            elapsed = time.time() - t0
+            train_elapsed = time.time() - t0
 
-            # get final loss
-            if pruning_logger:
+            # determine final loss
+            if self.use_validation_loss:
+                # use validation RMSE as objective
+                t_val = time.time()
+                loss = self._compute_validation_loss(params)
+                val_elapsed = time.time() - t_val
+                print(f"Trial {trial.number}: val_loss={loss:.6f} (train={train_elapsed:.1f}s, val={val_elapsed:.1f}s)")
+            elif pruning_logger:
                 loss = pruning_logger.get_final_loss()
+                print(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
             elif loss_history:
                 losses = np.asarray(loss_history)
                 mean_losses = losses.mean(axis=(1, 2))
                 n_final = max(1, len(mean_losses) // 20)
                 loss = float(mean_losses[-n_final:].mean())
+                print(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
             else:
                 loss = float('inf')
+                print(f"Trial {trial.number}: loss=inf (no data)")
 
-            print(f"Trial {trial.number}: loss={loss:.6f} ({elapsed:.1f}s)")
             return loss
 
         except optuna.TrialPruned:
@@ -396,8 +612,9 @@ class HyperoptProgram(BaseModel):
         # prepare data manager
         self._prepare_data_manager()
 
-        # check for existing study
+        # check for existing study and count completed trials
         existing = self._load_existing_study()
+        n_complete = 0
         if existing is not None:
             n_complete = len(
                 [t for t in existing.trials if t.state == optuna.trial.TrialState.COMPLETE]
@@ -408,11 +625,8 @@ class HyperoptProgram(BaseModel):
             if n_complete > 0:
                 print(f"Current best loss: {existing.best_value:.6f}")
 
-        # create study
-        sampler = TPESampler(
-            n_startup_trials=self.n_startup_trials,
-            seed=self.seed,
-        )
+        # create sampler based on config and current progress
+        sampler = self._create_sampler(n_complete)
         pruner = (
             optuna.pruners.MedianPruner(n_startup_trials=self.n_startup_trials, n_warmup_steps=5)
             if self.pruning
@@ -430,11 +644,35 @@ class HyperoptProgram(BaseModel):
 
         print(f"\nStarting optimization: {self.n_trials} new trials")
         print(f"Study: {self.study_name}")
+        print(f"Sampler: {self.sampler}" + (f" (switch at {self.hybrid_switch_trial})" if self.sampler == "hybrid" else ""))
         print(f"Hyperparameters: {[h.name for h in self.hyperparams]}")
         print("(Progress saved after each trial - safe to interrupt with Ctrl+C)\n")
 
         try:
-            study.optimize(self._run_single_trial, n_trials=self.n_trials, show_progress_bar=True)
+            if self.sampler == "hybrid":
+                # run in batches to allow switching sampler mid-optimization
+                remaining = self.n_trials
+                while remaining > 0:
+                    n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+                    # check if we need to switch sampler
+                    new_sampler = self._create_sampler(n_complete)
+                    if type(new_sampler) != type(study.sampler):
+                        logger.info(f"Switching sampler from {type(study.sampler).__name__} to {type(new_sampler).__name__}")
+                        # recreate study with new sampler (will load existing trials)
+                        study = optuna.create_study(
+                            study_name=self.study_name,
+                            storage=self._get_storage_path(),
+                            load_if_exists=True,
+                            direction="minimize",
+                            sampler=new_sampler,
+                            pruner=pruner,
+                        )
+                    # run batch
+                    batch_size = min(remaining, max(1, self.hybrid_switch_trial - n_complete))
+                    study.optimize(self._run_single_trial, n_trials=batch_size, show_progress_bar=True)
+                    remaining -= batch_size
+            else:
+                study.optimize(self._run_single_trial, n_trials=self.n_trials, show_progress_bar=True)
         except KeyboardInterrupt:
             print("\n\nOptimization interrupted. Progress saved.")
 
@@ -456,7 +694,7 @@ async def main_async():
 
     program, _ = cliprog.parse_args(
         sys.argv[1:],
-        deferred_paths=['/training_conf', '/compute_conf'],
+        deferred_paths=['/training_conf', '/compute_conf', '/training_set'],
         context=context,
         capture_globals=False,
         enable_shorthand_vars=False,
