@@ -3,11 +3,56 @@
 from typing import Optional, Any, Tuple, Literal
 from pydantic import Field
 import matplotlib.pyplot as plt
+import matplotlib.axes
 
 from biocomptools.toollib.plot import Figure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def render_circuit_to_ax(
+    network: Any,
+    ax: matplotlib.axes.Axes,
+    hide_marker_tus: bool = True,
+    grid_gap: Tuple[float, float] = (40.0, 20.0),
+    connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal",
+    style_overrides: Optional[dict] = None,
+    title: Optional[str] = None,
+    **_kwargs,  # absorb extra kwargs from PlotConfig
+):
+    """Render a genetic circuit schematic to an existing matplotlib axes."""
+    from jeanplot.network_schematic_v2 import NetworkGeneticSchematicV2
+    from jeanplot.container import Container
+    from jeanplot.models import LayoutConstraints
+    from jeanplot.matplotlib_renderer import MatplotlibRenderer
+    from jeanplot.style import jstyle
+
+    if style_overrides:
+        jstyle.update(style_overrides)
+
+    schematic = NetworkGeneticSchematicV2(
+        network=network,
+        hide_marker_tus=hide_marker_tus,
+        grid_gap=grid_gap,
+        connection_style=connection_style,
+    )
+
+    root = Container(
+        children=[schematic],
+        layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
+    )
+    jstyle.apply(root)
+
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_facecolor("none")
+
+    renderer = MatplotlibRenderer()
+    renderer.render_component(ax, root, adjust_lims=True)
+
+    if title:
+        ax.set_title(title, fontsize=12, fontweight="bold")
 
 
 class GeneticCircuitFigure(Figure):
