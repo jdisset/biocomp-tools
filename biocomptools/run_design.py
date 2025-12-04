@@ -13,6 +13,8 @@ from biocomp.design import (
     DesignManager,
     DesignConfig,
     Target,
+    DataTarget,
+    TargetUnion,
     sample_for_evaluation,
     evaluate_design,
     get_topk_replicate_network_pairs,
@@ -45,7 +47,7 @@ class DesignProgram(BaseOptimizationProgram):
         default_factory=lambda: DesignConfig()
     )
 
-    targets: Annotated[list[Target] | Target, Arg(help='Design targets (SVG files)')] = Field(
+    targets: Annotated[list[TargetUnion] | TargetUnion, Arg(help='Design targets (SVG files or DataTarget)')] = Field(
         default_factory=list
     )
 
@@ -79,6 +81,7 @@ class DesignProgram(BaseOptimizationProgram):
 
     plot_results: Annotated[bool, Arg(help='Generate result plots')] = True
     plot_n_samples: Annotated[int, Arg(help='Max samples to plot')] = 5000
+    skip_evaluation: Annotated[bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
 
     def model_post_init(self, __context):
@@ -156,7 +159,7 @@ class DesignProgram(BaseOptimizationProgram):
             networks = networks[: self.network_subset_size]
             logger.info(f"Limited networks to first {self.network_subset_size}")
 
-        if isinstance(self.targets, Target):
+        if isinstance(self.targets, (Target, DataTarget)):
             self.targets = [self.targets]
         logger.info(
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
@@ -184,9 +187,15 @@ class DesignProgram(BaseOptimizationProgram):
         # Use the networks from dmanager which has the resolved networks
         networks = self._dmanager.networks
 
+        def get_target_name(t):
+            if isinstance(t, DataTarget):
+                return t.name or "data_target"
+            else:
+                return t.name or Path(t.path).stem
+
         design_info = {
             "n_targets": self._dmanager.n_targets,
-            "target_names": [t.name or Path(t.path).stem for t in self.targets],
+            "target_names": [get_target_name(t) for t in self.targets],
             "n_networks": len(networks),
             "network_names": [n.name for n in networks],
             "n_replicates": self.design_conf.n_replicates,
@@ -223,7 +232,12 @@ class DesignProgram(BaseOptimizationProgram):
         assert self._dmanager is not None
 
         # Log target details
-        target_names = [t.name or Path(t.path).stem for t in self.targets]
+        def get_target_name(t):
+            if isinstance(t, DataTarget):
+                return t.name or "data_target"
+            else:
+                return t.name or Path(t.path).stem
+        target_names = [get_target_name(t) for t in self.targets]
         logger.info(f"Optimizing for {self._dmanager.n_targets} targets: {', '.join(target_names)}")
 
         # Log network details
@@ -260,7 +274,10 @@ class DesignProgram(BaseOptimizationProgram):
             f"Optimization completed. Final loss shape: {loss_history[-1].shape if loss_history else 'No loss history'}"
         )
 
-        await self._evaluate_and_save_results(final_params, loss_history)
+        if not self.skip_evaluation:
+            await self._evaluate_and_save_results(final_params, loss_history)
+        else:
+            logger.info("Skipping post-optimization evaluation (skip_evaluation=True)")
 
         return final_params, loss_history, step_history
 
@@ -315,10 +332,16 @@ class DesignProgram(BaseOptimizationProgram):
             k=self.topk_n,
         )
 
+        def get_target_name(t):
+            if isinstance(t, DataTarget):
+                return t.name or "data_target"
+            else:
+                return t.name or Path(t.path).stem
+
         logger.info("=" * 60)
         logger.info("RESULTS: Best replicate/network pairs for each target:")
         for tid, target in enumerate(self._dmanager.targets):
-            target_name = target.name or Path(target.path).stem
+            target_name = get_target_name(target)
             rep_id, net_id, loss_val = topk[tid][0]
             network_name = self._dmanager.networks[net_id].name
             logger.info(
@@ -331,7 +354,7 @@ class DesignProgram(BaseOptimizationProgram):
             'losses_shape': losses.shape,
             'topk_results': [
                 {
-                    'target': self.targets[tid].name or Path(self.targets[tid].path).stem,
+                    'target': get_target_name(self.targets[tid]),
                     'best_designs': [
                         {
                             'replicate_id': rep_id,
@@ -392,9 +415,15 @@ class DesignProgram(BaseOptimizationProgram):
 
                 assert self._dmanager is not None
 
+                def get_target_name(t):
+                    if isinstance(t, DataTarget):
+                        return t.name or "data_target"
+                    else:
+                        return t.name or Path(t.path).stem
+
                 # Create target-specific plot subdirectories and plot each target separately
                 for tid, target in enumerate(self._dmanager.targets):
-                    target_name = target.name or Path(target.path).stem
+                    target_name = get_target_name(target)
                     target_plot_dir = plot_dir / target_name
                     target_plot_dir.mkdir(exist_ok=True)
 
@@ -473,6 +502,12 @@ class DesignProgram(BaseOptimizationProgram):
             stack = None
             logger.warning("Cannot commit networks: final_params or model not available")
 
+        def get_target_name(t):
+            if isinstance(t, DataTarget):
+                return t.name or "data_target"
+            else:
+                return t.name or Path(t.path).stem
+
         with open(summary_file, 'w') as f:
             f.write("BEST DESIGN SUMMARY\n")
             f.write("=" * 50 + "\n\n")
@@ -480,7 +515,7 @@ class DesignProgram(BaseOptimizationProgram):
             best_per_target = {}
 
             for tid, target in enumerate(self.targets):
-                target_name = target.name or Path(target.path).stem
+                target_name = get_target_name(target)
                 f.write(f"Target: {target_name}\n")
                 f.write("-" * 30 + "\n")
 
