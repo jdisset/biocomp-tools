@@ -233,7 +233,7 @@ class Network(BiocompDB, table=True):
     @classmethod
     def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
         network_info = extract_network_info(network)
-        print(f"Network markers: {network_info['markers']}")
+        logger.debug(f"Network markers: {network_info['markers']}")
         if recipe_name is None:
             recipe_name = 'unknown'
         obj = cls(

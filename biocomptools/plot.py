@@ -167,7 +167,7 @@ def debug_figures(figures):
             enable_colors=True,
             show_biggest_context=5,
         )
-        print(nr)
+        logger.debug(nr)
 
 
 def get_pretty_axis_label(i: int, d: DataSource) -> str:

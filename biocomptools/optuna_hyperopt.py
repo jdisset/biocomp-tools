@@ -370,7 +370,7 @@ class HyperoptProgram(BaseModel):
         if self._training_dman is not None and not self.rebuild_dman_per_trial:
             return
 
-        print("Preparing data manager (this takes a moment)...")
+        logger.info("Preparing data manager...")
 
         # resolve training_set if it's a DeferredNode
         if isinstance(self.training_set, DeferredNode):
@@ -392,7 +392,7 @@ class HyperoptProgram(BaseModel):
             # build weight mapping for fast updates on subsequent trials
             if self.rebuild_dman_per_trial:
                 self._build_weight_mapping(resolved_training_set, session)
-        print(f"Data manager ready ({len(resolved_training_set.content)} network-data pairs).")
+        logger.info(f"Data manager ready ({len(resolved_training_set.content)} network-data pairs)")
 
     def _build_weight_mapping(self, dataset: NetworkSet, session):
         """Build mapping from network indices to NetworkDataPair names for weight updates."""
@@ -437,14 +437,14 @@ class HyperoptProgram(BaseModel):
         if self._cached_step is not None:
             return  # already compiled
 
-        print("Compiling training step for caching (first trial only)...")
+        logger.info("Compiling training step (first trial only)...")
 
         self._cached_step = compile_training_step(
             dman=self._training_dman,
             training_config=training_conf,
             compute_config=compute_conf,
         )
-        print("Training step compiled and cached.")
+        logger.info("Training step compiled")
 
     def _prepare_validation(self, compute_conf: ComputeConfig):
         """Initialize validation predictor (done once)."""
@@ -453,7 +453,7 @@ class HyperoptProgram(BaseModel):
         if self.validation_set is None:
             return
 
-        print("Preparing validation predictor (this takes a moment)...")
+        logger.info("Preparing validation predictor...")
         with self.db_session as session:
             self.validation_set.run_selectors(session)
             val_dman = build_data_manager(
@@ -488,7 +488,7 @@ class HyperoptProgram(BaseModel):
             device='cpu',
             enable_gridstats=False,  # skip expensive KNN grid stats for hyperopt validation
         )
-        print(f"Validation predictor ready ({len(networks)} networks).")
+        logger.info(f"Validation predictor ready ({len(networks)} networks)")
 
     def _compute_validation_loss(self, params) -> float:
         """Compute validation loss using trained params."""
@@ -521,29 +521,22 @@ class HyperoptProgram(BaseModel):
     def _show_study_status(self) -> bool:
         study = self._load_existing_study()
         if study is None:
-            print(f"No existing study found with name '{self.study_name}'")
+            logger.info(f"No existing study found with name '{self.study_name}'")
             return False
 
         n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
         n_pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
         n_failed = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
 
-        print(f"\n{'=' * 60}")
-        print(f"Study: {self.study_name}")
-        print(f"Storage: {self._get_storage_path()}")
-        print(f"{'=' * 60}")
-        print(f"Total trials: {len(study.trials)}")
-        print(f"  - Completed: {n_complete}")
-        print(f"  - Pruned: {n_pruned}")
-        print(f"  - Failed: {n_failed}")
-
+        lines = [
+            f"Study: {self.study_name} | Storage: {self._get_storage_path()}",
+            f"Trials: {len(study.trials)} total ({n_complete} complete, {n_pruned} pruned, {n_failed} failed)",
+        ]
         if n_complete > 0:
-            print(f"\nBest trial: #{study.best_trial.number}")
-            print(f"Best loss: {study.best_value:.6f}")
-            print("\nBest hyperparameters:")
-            for k, v in study.best_params.items():
-                print(f"  {k}: {v:.6g}" if isinstance(v, float) else f"  {k}: {v}")
-        print(f"{'=' * 60}\n")
+            params = ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                               for k, v in study.best_params.items())
+            lines.append(f"Best: #{study.best_trial.number} loss={study.best_value:.6f} [{params}]")
+        logger.info("\n".join(lines))
         return True
 
     def _set_nested_value(self, obj: Any, path: list[str], value: Any):
@@ -747,21 +740,11 @@ class HyperoptProgram(BaseModel):
 
         try:
             import optuna_dashboard
-
-            print(f"\n{'=' * 60}")
-            print("Launching Optuna Dashboard")
-            print(f"Storage: {storage}")
-            print(f"URL: http://localhost:{self.dashboard_port}")
-            print("Press Ctrl+C to stop")
-            print(f"{'=' * 60}\n")
-
+            logger.info(f"Launching Optuna Dashboard at http://localhost:{self.dashboard_port} (Ctrl+C to stop)")
             optuna_dashboard.run_server(storage, port=self.dashboard_port)
-
         except ImportError:
-            print("ERROR: optuna-dashboard not installed")
-            print("Install with: pip install optuna-dashboard")
-            print("\nAlternatively, run manually:")
-            print(f"  optuna-dashboard {storage}")
+            logger.error(f"optuna-dashboard not installed. Install with: pip install optuna-dashboard")
+            logger.error(f"Or run manually: optuna-dashboard {storage}")
             sys.exit(1)
 
     def _save_results(self, study: optuna.Study):
@@ -788,8 +771,7 @@ class HyperoptProgram(BaseModel):
         with open(results_dir / "summary.json", "w") as f:
             json.dump(summary, f, indent=2)
 
-        print(f"\nResults saved to {results_dir}")
-        print(f"Best loss: {study.best_value:.6f}")
+        logger.info(f"Results saved to {results_dir} (best loss: {study.best_value:.6f})")
 
     def _run_single_trial(self, trial: optuna.Trial) -> float:
         """Run a single training trial with sampled hyperparameters."""
@@ -871,31 +853,26 @@ class HyperoptProgram(BaseModel):
                 t_val = time.time()
                 loss = self._compute_validation_loss(params)
                 val_elapsed = time.time() - t_val
-                print(
-                    f"Trial {trial.number}: val_loss={loss:.6f} (train={train_elapsed:.1f}s, val={val_elapsed:.1f}s)"
-                )
+                logger.info(f"Trial {trial.number}: val_loss={loss:.6f} (train={train_elapsed:.1f}s, val={val_elapsed:.1f}s)")
             elif pruning_logger:
                 loss = pruning_logger.get_final_loss()
-                print(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
+                logger.info(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
             elif loss_history:
                 losses = np.asarray(loss_history)
                 mean_losses = losses.mean(axis=(1, 2))
                 n_final = max(1, len(mean_losses) // 20)
                 loss = float(mean_losses[-n_final:].mean())
-                print(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
+                logger.info(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
             else:
                 loss = float('inf')
-                print(f"Trial {trial.number}: loss=inf (no data)")
+                logger.warning(f"Trial {trial.number}: loss=inf (no data)")
 
             return loss
 
         except optuna.TrialPruned:
             raise
         except Exception as e:
-            import traceback
-
-            print(f"Trial {trial.number} failed: {e}")
-            traceback.print_exc()
+            logger.exception(f"Trial {trial.number} failed: {e}")
             return float('inf')
 
     async def run(self):
@@ -912,7 +889,7 @@ class HyperoptProgram(BaseModel):
         if self.export_only:
             study = self._load_existing_study()
             if study is None:
-                print(f"No existing study found with name '{self.study_name}'")
+                logger.warning(f"No existing study found with name '{self.study_name}'")
                 return
             self._save_results(study)
             self._show_study_status()
@@ -930,11 +907,9 @@ class HyperoptProgram(BaseModel):
                 t for t in existing.trials if t.state == optuna.trial.TrialState.COMPLETE
             ]
             n_complete = len(completed_trials)
-            print(
-                f"Resuming existing study with {len(existing.trials)} trials ({n_complete} complete)"
-            )
+            logger.info(f"Resuming study: {len(existing.trials)} trials ({n_complete} complete)")
             if n_complete > 0:
-                print(f"Current best loss: {existing.best_value:.6f}")
+                logger.info(f"Current best loss: {existing.best_value:.6f}")
                 # use completed trials for warm starting CMA-ES
                 if self.cmaes_warm_start and self.sampler in ("cmaes", "hybrid"):
                     source_trials = completed_trials
@@ -956,8 +931,6 @@ class HyperoptProgram(BaseModel):
             pruner=pruner,
         )
 
-        print(f"\nStarting optimization: {self.n_trials} new trials")
-        print(f"Study: {self.study_name}")
         sampler_info = self.sampler
         if self.sampler == "hybrid":
             sampler_info += f" (switch at {self.hybrid_switch_trial})"
@@ -973,12 +946,13 @@ class HyperoptProgram(BaseModel):
                 cmaes_opts.append(f"popsize={self.cmaes_popsize}")
             if cmaes_opts:
                 sampler_info += f" [{', '.join(cmaes_opts)}]"
-        print(f"Sampler: {sampler_info}")
-        print(f"Hyperparameters: {[h.name for h in self.hyperparams]}")
+        parallel_info = ""
         if self.n_jobs != 1:
-            n_jobs_str = "all CPUs" if self.n_jobs == -1 else f"{self.n_jobs} workers"
-            print(f"Parallel: {n_jobs_str}")
-        print("(Progress saved after each trial - safe to interrupt with Ctrl+C)\n")
+            parallel_info = f" | {'all CPUs' if self.n_jobs == -1 else f'{self.n_jobs} workers'}"
+        logger.info(
+            f"Starting optimization: {self.n_trials} trials | {self.study_name} | {sampler_info}{parallel_info}\n"
+            f"Hyperparameters: {[h.name for h in self.hyperparams]}"
+        )
 
         # show_progress_bar doesn't work well with n_jobs > 1
         show_progress = self.n_jobs == 1
@@ -1029,7 +1003,7 @@ class HyperoptProgram(BaseModel):
                     show_progress_bar=show_progress,
                 )
         except KeyboardInterrupt:
-            print("\n\nOptimization interrupted. Progress saved.")
+            logger.info("Optimization interrupted. Progress saved.")
 
         self._save_results(study)
 

@@ -13,6 +13,9 @@ from biocomp.plotutils import FigureSpec
 
 from biocomptools.toollib.figuremakers.geneticcircuit import GeneticCircuitFigure
 from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagramFigure
+from biocomptools.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class CircuitPlotConfig(BaseModel):
@@ -106,7 +109,7 @@ def run_circuitplot(config: CircuitPlotConfig):
         axes[1].set_title("Genetic Circuit")
         fig.savefig(output, dpi=config.dpi, bbox_inches="tight", pad_inches=0.1)
         plt.close(fig)
-        print(f"Saved plot to {output}")
+        logger.info(f"Saved plot to {output}")
 
     elif config.plot_type == "card":
         _render_card(network, recipe, output, config)
@@ -214,7 +217,7 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
     MatplotlibRenderer().render_component(ax, root, adjust_lims=True)
     fig.savefig(output, dpi=config.dpi, bbox_inches="tight", pad_inches=0.1)
     plt.close(fig)
-    print(f"Saved plot to {output}")
+    logger.info(f"Saved plot to {output}")
 
 
 def main():

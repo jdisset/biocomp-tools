@@ -589,19 +589,17 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
             )
             should_debug = True
 
+        _dblogger = logging.getLogger('biocomp_db')
         for i, task_data in enumerate(ptasks):
             plot, task_metrics = _proc_plot_task(task_data, rel_path, i, meta_exclude_patterns)
             if plot:
                 plots.append(plot)
                 all_metrics.extend(task_metrics)
                 if should_debug:
-                    print(f"Processed plot {i + 1}/{len(ptasks)}: {plot}")
-                    print(f"Plot extracted {len(task_metrics)} metrics")
+                    _dblogger.debug(f"Processed plot {i + 1}/{len(ptasks)}: {plot} ({len(task_metrics)} metrics)")
 
         if should_debug:
-            print(
-                f"Processed {len(plots)} plots and {len(all_metrics)} metrics from {fig_path.name}."
-            )
+            _dblogger.debug(f"Processed {len(plots)} plots and {len(all_metrics)} metrics from {fig_path.name}")
 
         return figure, plots, all_metrics
     except Exception as e:

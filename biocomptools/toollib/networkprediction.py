@@ -588,9 +588,7 @@ class NetworkPrediction(DataSource):
 
         def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
             if self.verbose:
-                print(
-                    f"getting xy for network {network_idx} with model {self.network_model.signature}"
-                )
+                logger.debug(f"getting xy for network {network_idx} with model {self.network_model.signature}")
 
             # compute predictions if not already computed
             if (
@@ -615,9 +613,7 @@ class NetworkPrediction(DataSource):
             gt = self._gtruths[network_idx]
 
             if self.verbose:
-                print(
-                    f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
-                )
+                logger.debug(f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}")
 
             assert isinstance(self.network_model.network, list)
 
@@ -638,15 +634,15 @@ class NetworkPrediction(DataSource):
                 x = self.network_model.model.rescaler.inv(x)
                 yhat = self.network_model.model.rescaler.inv(yhat)
                 if self.verbose:
-                    print("applied inverse rescaling to x and yhat")
+                    logger.debug("applied inverse rescaling to x and yhat")
 
             if self.use_output_as_input:
                 if self.verbose:
-                    print("using output as input, returning yhat as both x and y")
+                    logger.debug("using output as input, returning yhat as both x and y")
                 return yhat, yhat
             else:
                 if self.verbose:
-                    print("using original input, returning x and yhat")
+                    logger.debug("using original input, returning x and yhat")
                 return x, yhat
 
         return get_xy
@@ -1045,17 +1041,13 @@ class NetworkPrediction(DataSource):
                 pdata.metadata['output_shapes'] = output_shapes
 
                 if self.verbose:
-                    print(f"self._collected_in shape: {self._collected_in.shape}")
-                    print(f"self._collected_out shape: {self._collected_out.shape}")
-                    print(f"collection point = {collection_point_nodespec}")
-                    print(f"collection point {i} collected_in_idx: {collect_in_idx[i]}")
-                    print(f"collection point {i} collected_out_idx: {collect_out_idx[i]}")
-                    print(f"collected node input shapes: {input_shapes}")
-                    print(f"collected node output shapes: {output_shapes}")
-                    print(f"flatx shape: {flatx.shape}")
-                    print(f"flatx: {flatx}")
-                    print(f"flaty shape: {flaty.shape}")
-                    print(f"flaty: {flaty}")
+                    logger.debug(
+                        f"collection point {i}: {collection_point_nodespec}\n"
+                        f"  in_shape={self._collected_in.shape}, out_shape={self._collected_out.shape}\n"
+                        f"  in_idx={collect_in_idx[i]}, out_idx={collect_out_idx[i]}\n"
+                        f"  node_input_shapes={input_shapes}, node_output_shapes={output_shapes}\n"
+                        f"  flatx={flatx.shape}, flaty={flaty.shape}"
+                    )
 
                 return flatx, flaty
 

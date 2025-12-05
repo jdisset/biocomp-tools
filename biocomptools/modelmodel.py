@@ -151,7 +151,7 @@ class BiocompModel(ArbitraryModel):
             tags_group = params_group.create_group('tags')
             pr.save_ptree_to_hdf5_group(self.shared_params.tags, tags_group)
 
-            print(f"Saved {self.__class__.__name__} to {filename}")
+            logger.info(f"Saved {self.__class__.__name__} to {filename}")
 
     @classmethod
     def load_h5(cls: Type[M], filename: str) -> M:
