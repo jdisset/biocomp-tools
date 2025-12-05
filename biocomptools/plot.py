@@ -23,7 +23,7 @@ from dracon.deferred import DeferredNode
 
 from biocomp.utils import PartialFunction
 from biocomp.datautils import DataRescaler
-from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout
+from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout, MergeSpec
 from biocomptools.toollib.datasources import DataSource, DBSource
 
 from biocomptools.toollib.networkprediction import NetworkPrediction
@@ -37,6 +37,7 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
     extract_uorf_info,
 )
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
+from biocomptools.toollib.figuremakers.benchmarkutils import BenchmarkData, BenchmarkItem
 
 from biocomptools.modelmodel import BiocompModel, get_shared_params, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
@@ -101,6 +102,7 @@ DEFAULT_TYPES = [
     FigureSpec,
     FigAx,
     SimpleLayout,
+    MergeSpec,
     Regex,
     iRegex,
     ModelSelector,
@@ -118,6 +120,8 @@ DEFAULT_TYPES = [
     UORFMatrixFigure,
     InnerNodesFigure,
     InnerNodesFigureSpec,
+    BenchmarkData,
+    BenchmarkItem,
     bundle_uorf_data,
     get_uorf_values,
     extract_uorf_info,
@@ -228,6 +232,10 @@ class PlotJob(BaseModel):
 
     max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 32
 
+    merge_spec: Annotated[
+        MergeSpec | None, Arg(help='Merge all figures into a single output')
+    ] = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def run(self):
@@ -241,13 +249,17 @@ class PlotJob(BaseModel):
                     del fig.context[k]
 
         t0 = time.time()
+        out_paths = []
 
-        random_order = np.random.permutation(total_figures)
+        if self.merge_spec:
+            order = list(range(total_figures))
+        else:
+            order = list(np.random.permutation(total_figures))
 
         if self.nworkers <= 1 or self.parallel_mode == 'none' or total_figures <= 1:
             fig_copies = [
                 self.figures[i].copy(reroot=True)
-                for i in maybetqdm(random_order, min_len=20, desc='Copying figure tasks')
+                for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
             ]
             constructed_figures = [
                 construct_figure(fig)
@@ -294,7 +306,7 @@ class PlotJob(BaseModel):
                 fig_copies = [
                     self.figures[i].copy(reroot=True)
                     for i in maybetqdm(
-                        random_order[batch_start : batch_start + batch_len],
+                        order[batch_start : batch_start + batch_len],
                         min_len=20,
                         desc=f'Copying figure tasks for batch {batch_idx}/{num_batches}',
                     )
@@ -330,12 +342,77 @@ class PlotJob(BaseModel):
                         desc=f'Generating figures in batch {batch_idx}/{num_batches}',
                     )
                 )
+                out_paths.extend(results)
 
                 fpaths = '\n  - ' + '\n  - '.join(results)
                 logger.debug(f"Generated {len(results)} figures:{fpaths}")
 
         t1 = time.time()
         logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
+
+        if self.merge_spec and out_paths:
+            self._merge_figures(out_paths)
+
+    def _merge_figures(self, paths: List[str]):
+        """Merge generated figures into single output per MergeSpec."""
+        from PIL import Image
+        import tempfile
+
+        spec = self.merge_spec
+        images = []
+        for p in paths:
+            if p.lower().endswith('.pdf'):
+                import subprocess
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    subprocess.run(['pdftoppm', '-png', '-singlefile', p, tmp.name[:-4]], check=True)
+                    images.append(Image.open(tmp.name))
+            else:
+                images.append(Image.open(p))
+
+        if not images:
+            return
+
+        n = len(images)
+        rows, cols = spec.rows, spec.cols
+
+        if spec.row_heights:
+            row_h = [int(h * sum(im.height for im in images[:rows])) for h in spec.row_heights]
+        else:
+            row_h = [images[i].height if i < n else images[0].height for i in range(rows)]
+
+        if spec.col_widths:
+            col_w = [int(w * max(im.width for im in images)) for w in spec.col_widths]
+        else:
+            col_w = [max(im.width for im in images)] * cols
+
+        total_w = sum(col_w) + spec.hspace * (cols - 1)
+        total_h = sum(row_h) + spec.vspace * (rows - 1)
+
+        merged = Image.new('RGB', (total_w, total_h), spec.bg_color)
+
+        y_offset = 0
+        idx = 0
+        for r in range(rows):
+            x_offset = 0
+            for c in range(cols):
+                if idx < n:
+                    im = images[idx].resize((col_w[c], row_h[r]), Image.LANCZOS)
+                    merged.paste(im, (x_offset, y_offset))
+                    idx += 1
+                x_offset += col_w[c] + spec.hspace
+            y_offset += row_h[r] + spec.vspace
+
+        spec.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if str(spec.output_path).lower().endswith('.pdf'):
+            merged.save(spec.output_path, 'PDF', resolution=150)
+        else:
+            merged.save(spec.output_path)
+
+        logger.info(f"Merged {n} figures to {spec.output_path}")
+
+        for im in images:
+            im.close()
 
 
 DEFAULT_CONTEXT = {
