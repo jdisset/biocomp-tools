@@ -26,6 +26,7 @@ dependencies = [
 	"pynvml",
 	"psutil",
 	"gspread",
+	"pypdf",
 ]
 
 

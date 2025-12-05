@@ -323,7 +323,7 @@ class HyperoptProgram(BaseModel):
     # validation configuration (for validation-based objective)
     validation_set: Annotated[NetworkSet | None, Arg(help='Networks for validation')] = None
     use_validation_loss: Annotated[bool, Arg(help='Use validation loss as objective')] = False
-    n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 2048
+    n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 8192
 
     # per-trial dataset weight support (for optimizing dataset weights)
     rebuild_dman_per_trial: Annotated[bool, Arg(help='Rebuild data manager each trial')] = False
@@ -433,6 +433,7 @@ class HyperoptProgram(BaseModel):
                 ndp_weights = {ndp.network_name: ndp.weight for ndp in resolved.content}
         else:
             # no deferred node, weights don't change
+            logger.error("training set is not deferred!!")
             return
 
         # apply weights using the mapping

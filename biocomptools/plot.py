@@ -353,66 +353,151 @@ class PlotJob(BaseModel):
         if self.merge_spec and out_paths:
             self._merge_figures(out_paths)
 
-    def _merge_figures(self, paths: List[str]):
+    def _merge_figures(self, paths: list[str]):
         """Merge generated figures into single output per MergeSpec."""
-        from PIL import Image
-        import tempfile
-
         spec = self.merge_spec
-        images = []
-        for p in paths:
-            if p.lower().endswith('.pdf'):
-                import subprocess
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    subprocess.run(['pdftoppm', '-png', '-singlefile', p, tmp.name[:-4]], check=True)
-                    images.append(Image.open(tmp.name))
-            else:
-                images.append(Image.open(p))
-
-        if not images:
+        if not paths:
             return
 
-        n = len(images)
-        rows, cols = spec.rows, spec.cols
+        spec.output_path.parent.mkdir(parents=True, exist_ok=True)
+        all_pdfs = all(p.lower().endswith('.pdf') for p in paths)
+        output_is_pdf = str(spec.output_path).lower().endswith('.pdf')
 
-        if spec.row_heights:
-            row_h = [int(h * sum(im.height for im in images[:rows])) for h in spec.row_heights]
+        if all_pdfs and output_is_pdf:
+            self._merge_pdfs_lossless(paths)
         else:
-            row_h = [images[i].height if i < n else images[0].height for i in range(rows)]
+            self._merge_as_images(paths)
+
+        if spec.delete_intermediates:
+            for p in paths:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
+
+        logger.info(f"Merged {len(paths)} figures to {spec.output_path}")
+
+    def _merge_pdfs_lossless(self, paths: list[str]):
+        """Merge PDFs into grid layout without rasterization using pypdf."""
+        from pypdf import PdfReader, PdfWriter, PageObject, Transformation
+
+        spec = self.merge_spec
+        rows, cols = spec.rows, spec.cols
+        n = len(paths)
+
+        readers = [PdfReader(p) for p in paths]
+        pages = [r.pages[0] for r in readers]
+
+        # get dimensions from source pages (in points, 72pt = 1 inch)
+        widths = [float(p.mediabox.width) for p in pages]
+        heights = [float(p.mediabox.height) for p in pages]
 
         if spec.col_widths:
-            col_w = [int(w * max(im.width for im in images)) for w in spec.col_widths]
+            col_w = [w * max(widths) for w in spec.col_widths]
         else:
-            col_w = [max(im.width for im in images)] * cols
+            col_w = [max(widths)] * cols
+
+        if spec.row_heights:
+            row_h = [h * max(heights) for h in spec.row_heights]
+        else:
+            row_h = [max(heights)] * rows
 
         total_w = sum(col_w) + spec.hspace * (cols - 1)
         total_h = sum(row_h) + spec.vspace * (rows - 1)
 
-        merged = Image.new('RGB', (total_w, total_h), spec.bg_color)
+        merged_page = PageObject.create_blank_page(width=total_w, height=total_h)
 
-        y_offset = 0
+        y_offset = total_h  # PDF coords: origin at bottom-left
         idx = 0
         for r in range(rows):
+            y_offset -= row_h[r]
             x_offset = 0
             for c in range(cols):
                 if idx < n:
-                    im = images[idx].resize((col_w[c], row_h[r]), Image.LANCZOS)
-                    merged.paste(im, (x_offset, y_offset))
+                    page = pages[idx]
+                    pw, ph = float(page.mediabox.width), float(page.mediabox.height)
+                    scale_x, scale_y = col_w[c] / pw, row_h[r] / ph
+                    scale = min(scale_x, scale_y)  # preserve aspect ratio
+                    # center within cell
+                    dx = x_offset + (col_w[c] - pw * scale) / 2
+                    dy = y_offset + (row_h[r] - ph * scale) / 2
+                    merged_page.merge_transformed_page(
+                        page, Transformation().scale(scale).translate(dx, dy)
+                    )
                     idx += 1
                 x_offset += col_w[c] + spec.hspace
-            y_offset += row_h[r] + spec.vspace
+            y_offset -= spec.vspace
 
-        spec.output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = PdfWriter()
+        writer.add_page(merged_page)
+        with open(spec.output_path, 'wb') as f:
+            writer.write(f)
 
-        if str(spec.output_path).lower().endswith('.pdf'):
-            merged.save(spec.output_path, 'PDF', resolution=150)
-        else:
-            merged.save(spec.output_path)
+    def _merge_as_images(self, paths: list[str]):
+        """Merge figures as images (fallback for non-PDF or mixed inputs)."""
+        from PIL import Image
+        import subprocess
+        import tempfile
 
-        logger.info(f"Merged {n} figures to {spec.output_path}")
+        spec = self.merge_spec
+        rows, cols = spec.rows, spec.cols
+        n = len(paths)
 
-        for im in images:
-            im.close()
+        images = []
+        temp_files = []
+        try:
+            for p in paths:
+                if p.lower().endswith('.pdf'):
+                    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    temp_files.append(tmp.name)
+                    tmp.close()
+                    subprocess.run(
+                        ['pdftoppm', '-png', '-singlefile', '-r', '300', p, tmp.name[:-4]],
+                        check=True
+                    )
+                    images.append(Image.open(tmp.name))
+                else:
+                    images.append(Image.open(p))
+
+            if spec.row_heights:
+                row_h = [int(h * sum(im.height for im in images[:rows])) for h in spec.row_heights]
+            else:
+                row_h = [images[i].height if i < n else images[0].height for i in range(rows)]
+
+            if spec.col_widths:
+                col_w = [int(w * max(im.width for im in images)) for w in spec.col_widths]
+            else:
+                col_w = [max(im.width for im in images)] * cols
+
+            total_w = sum(col_w) + spec.hspace * (cols - 1)
+            total_h = sum(row_h) + spec.vspace * (rows - 1)
+
+            merged = Image.new('RGB', (total_w, total_h), spec.bg_color)
+
+            y_offset = 0
+            idx = 0
+            for r in range(rows):
+                x_offset = 0
+                for c in range(cols):
+                    if idx < n:
+                        im = images[idx].resize((col_w[c], row_h[r]), Image.LANCZOS)
+                        merged.paste(im, (x_offset, y_offset))
+                        idx += 1
+                    x_offset += col_w[c] + spec.hspace
+                y_offset += row_h[r] + spec.vspace
+
+            if str(spec.output_path).lower().endswith('.pdf'):
+                merged.save(spec.output_path, 'PDF', resolution=300)
+            else:
+                merged.save(spec.output_path)
+        finally:
+            for im in images:
+                im.close()
+            for tmp in temp_files:
+                try:
+                    Path(tmp).unlink()
+                except OSError:
+                    pass
 
 
 DEFAULT_CONTEXT = {
