@@ -21,6 +21,27 @@ logger = get_logger(__name__)
 lib = load_lib()
 
 
+def _hash_array(hasher, arr):
+    arr = np.ascontiguousarray(arr) if isinstance(arr, np.ndarray) else np.asarray(arr)
+    hasher.update(np.array(arr.shape, dtype=np.int64).tobytes())
+    hasher.update(arr.tobytes())
+
+
+def _model_hash(compute_config, rescaler, params: pr.ParameterTree) -> bytes:
+    """Deterministic hash of model components (config JSON + sorted param paths/values)."""
+    import json
+    hasher = xxhash.xxh64()
+    for model in (compute_config, rescaler):
+        hasher.update(json.dumps(model.model_dump(mode='json'), sort_keys=True, separators=(',', ':')).encode())
+    for path, val in sorted(params.data.iter_leaves(), key=lambda x: str(x[0])):
+        hasher.update(str(path).encode())
+        if isinstance(val, (np.ndarray,)) or hasattr(val, 'tobytes'):
+            _hash_array(hasher, val)
+        elif isinstance(val, (int, float)):
+            hasher.update(np.array([val]).tobytes())
+    return hasher.digest()
+
+
 def load_params(maybe_path):
     """load parameters from file or use directly if already a parameter tree"""
     from biocomp.jaxutils import tree_to_np
@@ -95,12 +116,9 @@ class BiocompModel(ArbitraryModel):
 
     @property
     def signature(self):
-        """compute unique signature for this model"""
         import biocomptools.toollib.hashutils as bch
-
-        paramspickle = pickle.dumps(self.shared_params)
-        this_str = str(self.compute_config) + str(self.rescaler) + str(paramspickle)
-        return bch.pronounceable_hash64(this_str)
+        digest = _model_hash(self.compute_config, self.rescaler, self.shared_params)
+        return bch.pronounceable_hash(64, int.from_bytes(digest, 'little'), nwords=3, join_with='-')
 
     @classmethod
     def load(cls, path):

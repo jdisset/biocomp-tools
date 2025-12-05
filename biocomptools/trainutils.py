@@ -215,13 +215,21 @@ def make_json_ready(obj):
     from dracon.dracontainer import Mapping, Sequence
     import numpy as np
 
+    def sanitize_keys(o):
+        """Recursively sanitize dict keys (convert tuples to strings)."""
+        if isinstance(o, dict):
+            return {str(k) if isinstance(k, tuple) else k: sanitize_keys(v) for k, v in o.items()}
+        elif isinstance(o, (list, tuple)):
+            return [sanitize_keys(i) for i in o]
+        return o
+
     def convert(o):
         if isinstance(o, DeferredNode):
             return {f'{o.value.tag}': 'deferred'}
         elif isinstance(o, BaseModel):
             return o.model_dump()
         elif isinstance(o, Mapping):
-            return {k: v for k, v in o.items()}
+            return {str(k) if isinstance(k, tuple) else k: v for k, v in o.items()}
         elif isinstance(o, Sequence):
             return [i for i in o]
         elif isinstance(o, np.ndarray):
@@ -232,7 +240,9 @@ def make_json_ready(obj):
             logger.debug(f"Unhandled type during json serialization: {type(o)}")
             return str(type(o))
 
-    dmp = json.dumps(obj, default=convert)
+    # First sanitize keys, then dump
+    sanitized = sanitize_keys(obj)
+    dmp = json.dumps(sanitized, default=convert)
 
     return json.loads(dmp)
 

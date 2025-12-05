@@ -22,6 +22,7 @@ from biocomp.design import (
     distance_loss,
     SamplingConfigUnion,
     UniformSampling,
+    compute_baseline_loss,
 )
 from biocomp.network import Network, recipe_to_networks
 from biocomp.recipe import Recipe
@@ -175,6 +176,8 @@ class DesignProgram(BaseOptimizationProgram):
                 'targets': self.targets,
                 'networks': self.networks,
                 'dmanager': self._dmanager,
+                'model': self._model,
+                'output_dir': str(self._save_dir),
             }
         )
         return context
@@ -304,7 +307,7 @@ class DesignProgram(BaseOptimizationProgram):
 
         logger.debug(f"Sampled evaluation data shapes: xraw={xraw.shape}, yraw={yraw.shape}")
 
-        logger.debug(f"Running design evaluation with max chunk size={self.max_eval_chunk_size}...")
+        logger.info(f"Running design evaluation with max chunk size={self.max_eval_chunk_size}...")
 
         yhatdep, losses = evaluate_design(
             dmanager=self._dmanager,
@@ -316,6 +319,7 @@ class DesignProgram(BaseOptimizationProgram):
             key=eval_key,
             max_eval_size=self.max_eval_chunk_size,
             max_loss_size=self.max_eval_loss_size,
+            store_predictions=self.plot_results,  # only store if we're plotting
         )
 
         logger.debug(f"Evaluation complete. Losses shape: {losses.shape}")
@@ -338,23 +342,48 @@ class DesignProgram(BaseOptimizationProgram):
             else:
                 return t.name or Path(t.path).stem
 
+        # Compute baseline loss for DataTargets with original networks
+        try:
+            baseline_results = compute_baseline_loss(
+                dmanager=self._dmanager,
+                model=self._model,
+                n_samples=self.n_eval_samples,
+                seed=self.eval_seed,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to compute baseline loss: {e}")
+            baseline_results = {}
+
         logger.info("=" * 60)
         logger.info("RESULTS: Best replicate/network pairs for each target:")
         for tid, target in enumerate(self._dmanager.targets):
             target_name = get_target_name(target)
             rep_id, net_id, loss_val = topk[tid][0]
             network_name = self._dmanager.networks[net_id].name
-            logger.info(
-                f"  {target_name}: Rep {rep_id}, Net '{network_name}' (loss={loss_val:.4f})"
-            )
+
+            # Show baseline comparison if available
+            baseline_info = baseline_results.get(target_name, {})
+            if baseline_info.get('has_original_network'):
+                baseline_loss = baseline_info['model_prediction_loss']
+                improvement = (baseline_loss - loss_val) / baseline_loss * 100 if baseline_loss > 0 else 0
+                logger.info(
+                    f"  {target_name}: Rep {rep_id}, Net '{network_name}' "
+                    f"(loss={loss_val:.4f}, baseline={baseline_loss:.4f}, improvement={improvement:+.1f}%)"
+                )
+            else:
+                logger.info(
+                    f"  {target_name}: Rep {rep_id}, Net '{network_name}' (loss={loss_val:.4f})"
+                )
 
         self._evaluation_results = (final_params, loss_history, topk, losses, xraw, yraw, yhatdep)
 
         self._metadata['evaluation_results'] = {
             'losses_shape': losses.shape,
+            'baseline_results': baseline_results,
             'topk_results': [
                 {
                     'target': get_target_name(self.targets[tid]),
+                    'baseline': baseline_results.get(get_target_name(self.targets[tid]), {}),
                     'best_designs': [
                         {
                             'replicate_id': rep_id,
@@ -621,6 +650,8 @@ async def main_async():
 
 
 def main():
+    from biocomptools.logging_config import setup_logging
+    setup_logging()
     asyncio.run(main_async())
 
 

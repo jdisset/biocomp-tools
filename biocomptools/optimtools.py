@@ -8,6 +8,7 @@ from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
 from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
 from biocomptools.toollib.loggers.checkpointlogger import CheckpointLogger
+from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
 from biocomptools.modelmodel import BiocompModel
 from biocomptools.toollib.datasources import DataSource, DBSource
 from biocomptools.toollib.modelselector import ModelSelector
@@ -31,7 +32,7 @@ from dracon.commandline import make_program, Arg
 from biocomp.train import TrainingConfig
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
-from biocomp.design import DesignManager, DesignConfig, Target
+from biocomp.design import DesignManager, DesignConfig, Target, DataTarget
 from biocomp.network import Network
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot
 
@@ -149,11 +150,8 @@ class BaseOptimizationProgram(BaseModel, ABC):
             Path(self.base_dir) / self.experiment_name, suffix=self.run_name_suffix
         )
         self._run_name = self._save_dir.name
-        print(f"Base directory: {self.base_dir}")
-        print(f"Suffix: {self.run_name_suffix}")
-        print(f"Experiment: {self.experiment_name}")
-        print(f"Run name: {self._run_name}")
-        print(f"Outputs will be saved to {self._save_dir}")
+        logger.info(f"Experiment: {self.experiment_name} | Run: {self._run_name}")
+        logger.info(f"Output directory: {self._save_dir}")
 
         self._construct_loggers()
         self.gen_metadata()
@@ -351,6 +349,7 @@ DEFAULT_TYPES = list(
             EnhancedConsoleLogger,
             ConsoleLogger,
             CheckpointLogger,
+            DesignSummaryLogger,
             # Configuration types
             TrainingConfig,
             ComputeConfig,
@@ -358,6 +357,7 @@ DEFAULT_TYPES = list(
             DesignConfig,
             DesignManager,
             Target,
+            DataTarget,
             Network,
             # Utility types
             PartialFunction,

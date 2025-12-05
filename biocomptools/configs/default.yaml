@@ -100,14 +100,13 @@ logging:
 
     !if ${getenv('BC_DEBUG', 0)}:
       then:
-        # biocomp: DEBUG
         biocomp.train: DEBUG
         biocomp.nodes: DEBUG
         biocomp.quantization: DEBUG
         biocomp.compute: DEBUG
-        # biocomp.network: DEBUG
-        # biocomp.networks: DEBUG
-        # biocomp.plotutils: DEBUG
+        biocomp.design: DEBUG
+        biocomp.optimutils: DEBUG
+        biocomp.plotutils: DEBUG
       else:
         biocomp: INFO
         biocomp.train: INFO
@@ -117,6 +116,8 @@ logging:
         biocomp.network: INFO
         biocomp.networks: INFO
         biocomp.plotutils: INFO
+        biocomp.design: INFO
+        biocomp.optimutils: INFO
 
     dracon.commandline: INFO
     dracon.interpolation: INFO
