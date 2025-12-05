@@ -147,9 +147,7 @@ class DBSource(DataSource, NetworkSet):
                 return None, None
             assert isinstance(X, np.ndarray)
             assert isinstance(Y, np.ndarray)
-            print(
-                f"DBSource: got XY data for network {network.name} with shapes {X.shape}, {Y.shape}"
-            )
+            logger.debug(f"DBSource: XY data for {network.name}: X{X.shape}, Y{Y.shape}")
             return X, Y
 
         try:
