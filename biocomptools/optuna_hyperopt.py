@@ -31,6 +31,15 @@ Usage:
     # Dataset weight optimization with validation-based objective
     biocomp-hyperopt +biocomp-jobs/hyperopt/dataset_weights --use_validation_loss true
 
+    # Disable model saving (default keeps top 10)
+    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset ++n_top_models 0
+
+Model Saving:
+    By default, the top 10 models (by loss) are saved as BiocompModel pickle files
+    in {output_dir}/{study_name}/top_models/. This allows you to use the best
+    hyperparameter configurations without re-training. Worse models are automatically
+    evicted as better ones are found. Set n_top_models=0 to disable.
+
 Parallel Execution:
     # Run multiple processes manually (each in separate terminal/tmux pane)
     # They coordinate via shared SQLite storage automatically
@@ -323,6 +332,9 @@ class HyperoptProgram(BaseModel):
     hyperparams: Annotated[list[HyperparamSpec], Arg(help='Hyperparameters to optimize')] = Field(
         default_factory=list
     )
+
+    # model saving configuration
+    n_top_models: Annotated[int, Arg(help='Number of top models to keep (0 to disable)')] = 10
 
     # info-only modes
     show_best: Annotated[bool, Arg(help='Show best results and exit')] = False
@@ -773,6 +785,77 @@ class HyperoptProgram(BaseModel):
 
         logger.info(f"Results saved to {results_dir} (best loss: {study.best_value:.6f})")
 
+    def _get_top_models_dir(self) -> Path:
+        """Get directory for top models."""
+        return Path(self.output_dir) / self.study_name / "top_models"
+
+    def _save_model_if_top(
+        self,
+        trial_number: int,
+        loss: float,
+        params,
+        compute_conf: ComputeConfig,
+        hyperparams: dict,
+    ):
+        """Save model if it's among the top N, evicting the worst if needed."""
+        if self.n_top_models <= 0 or loss == float('inf'):
+            return
+
+        from biocomp.jaxutils import tree_to_np
+        from biocomptools.run_training import get_shared_params
+
+        models_dir = self._get_top_models_dir()
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        # get existing models and their losses
+        existing = []
+        for f in models_dir.glob("*.pickle"):
+            try:
+                # parse loss from filename: trial_NNN_loss_X.XXXXXX.pickle
+                parts = f.stem.split("_")
+                idx = parts.index("loss")
+                file_loss = float(parts[idx + 1])
+                existing.append((file_loss, f))
+            except (ValueError, IndexError):
+                continue
+
+        existing.sort(key=lambda x: x[0])  # sort by loss ascending
+
+        # check if this model should be saved
+        if len(existing) >= self.n_top_models and loss >= existing[-1][0]:
+            return  # not good enough
+
+        # create model
+        shared_params = get_shared_params(pickle.loads(pickle.dumps(tree_get(params, 0))))
+        if shared_params is None:
+            logger.warning(f"Trial {trial_number}: could not extract shared params")
+            return
+
+        model = BiocompModel(
+            compute_config=compute_conf,
+            rescaler=self.data_conf.rescaler,
+            shared_params=tree_to_np(shared_params),
+            metadata={
+                'hyperopt_trial': trial_number,
+                'hyperopt_loss': loss,
+                'hyperopt_study': self.study_name,
+                'hyperparams': {k: v for k, v in hyperparams.items() if not k.startswith('_')},
+            },
+        )
+
+        # save model
+        fname = models_dir / f"trial_{trial_number:04d}_loss_{loss:.6f}.pickle"
+        model.save(fname)
+        logger.debug(f"Saved model {model.signature} (trial {trial_number}, loss {loss:.6f})")
+
+        # evict worst if over limit
+        existing.append((loss, fname))
+        existing.sort(key=lambda x: x[0])
+        while len(existing) > self.n_top_models:
+            _, worst_file = existing.pop()
+            worst_file.unlink()
+            logger.debug(f"Evicted model {worst_file.name}")
+
     def _run_single_trial(self, trial: optuna.Trial) -> float:
         """Run a single training trial with sampled hyperparameters."""
         # sample hyperparameters
@@ -866,6 +949,9 @@ class HyperoptProgram(BaseModel):
             else:
                 loss = float('inf')
                 logger.warning(f"Trial {trial.number}: loss=inf (no data)")
+
+            # save model if among top N
+            self._save_model_if_top(trial.number, loss, params, compute_conf, hyperparams)
 
             return loss
 
