@@ -29,11 +29,13 @@ from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
 
 from dracon.commandline import Arg
+import dracon
 import asyncio
 
 import sys
 import numpy as np
 import jax
+import yaml
 from pathlib import Path
 from typing import Annotated, Optional, Literal, Any
 from pydantic import Field
@@ -586,22 +588,21 @@ class DesignProgram(BaseOptimizationProgram):
                             if rank == 1:
                                 best_per_target[target_name] = design_info
 
-                            # Generate pretty recipe
-                            network_recipe = cnet.to_pretty_recipe()
-
-                            # Save recipe to file with rank prefix
+                            # Save recipe as YAML using dracon
+                            recipe = cnet.to_recipe()
                             recipe_filename = (
                                 target_recipes_dir
-                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.txt"
+                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.yaml"
                             )
+                            recipe_yaml = dracon.dump(recipe)
+                            metadata_yaml = yaml.dump({
+                                '_metadata': {
+                                    'target': target_name, 'rank': rank,
+                                    'network': network_name, 'replicate': rep_id, 'loss': float(loss_val),
+                                }
+                            }, default_flow_style=False)
                             with open(recipe_filename, 'w') as rf:
-                                rf.write(f"# Design for target: {target_name}\n")
-                                rf.write(f"# Rank: {rank}\n")
-                                rf.write(f"# Network: {network_name}\n")
-                                rf.write(f"# Replicate: {rep_id}\n")
-                                rf.write(f"# Loss: {loss_val:.6f}\n")
-                                rf.write("#" + "=" * 59 + "\n\n")
-                                rf.write(network_recipe)
+                                rf.write(metadata_yaml + '\n' + recipe_yaml)
 
                             f.write(
                                 f"           Recipe saved: {target_name}/{recipe_filename.name}\n"
