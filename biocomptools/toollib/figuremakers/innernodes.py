@@ -501,7 +501,7 @@ class InnerNodesFigure(Figure):
             if norm:
                 ax.axhline(1, color='gray', linestyle='--', alpha=0.5)
                 ax.axhline(0.5, color='gray', linestyle=':', alpha=0.3)
-                ax.set(ylim=(0.3, 1.05))
+                ax.set(ylim=(-0.05, 1.05))
             ax.set(xlabel="ERN Protein Amount", ylabel=yl)
             ax.set_title(
                 "Relative Repression" if norm else "Output vs ERN Protein",
