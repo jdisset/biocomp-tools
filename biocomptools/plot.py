@@ -5,13 +5,10 @@ from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from tqdm import tqdm
 from biocomptools.toollib.common import maybetqdm
 import numpy as np
-import memray
 
 import dracon as dr
 from dracon.utils import ser_debug
 from dracon.diagnostics import DraconError, handle_dracon_error
-from pympler.asizeof import asizeof
-import os
 
 import matplotlib.pyplot as plt
 import sys
@@ -232,9 +229,9 @@ class PlotJob(BaseModel):
 
     max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 32
 
-    merge_spec: Annotated[
-        MergeSpec | None, Arg(help='Merge all figures into a single output')
-    ] = None
+    merge_spec: Annotated[MergeSpec | None, Arg(help='Merge all figures into a single output')] = (
+        None
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -358,7 +355,20 @@ class PlotJob(BaseModel):
     def _merge_figures(self, paths: list[str]):
         """Merge generated figures into single output per MergeSpec."""
         spec = self.merge_spec
-        if not paths:
+        images = []
+        for p in paths:
+            if p.lower().endswith('.pdf'):
+                import subprocess
+
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    subprocess.run(
+                        ['pdftoppm', '-png', '-singlefile', p, tmp.name[:-4]], check=True
+                    )
+                    images.append(Image.open(tmp.name))
+            else:
+                images.append(Image.open(p))
+
+        if not images:
             return
 
         spec.output_path.parent.mkdir(parents=True, exist_ok=True)
