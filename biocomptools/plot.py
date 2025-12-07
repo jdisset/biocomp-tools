@@ -253,6 +253,8 @@ class PlotJob(BaseModel):
 
         if self.merge_spec:
             order = list(range(total_figures))
+            merge_out_dir = Path(self.merge_spec.output_path).parent
+            merge_out_dir.mkdir(parents=True, exist_ok=True)
         else:
             order = list(np.random.permutation(total_figures))
 

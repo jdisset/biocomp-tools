@@ -11,6 +11,7 @@ from biocomptools.logging_config import get_logger
 import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomp.plotting.plotting_core import knn_stats, build_tree
+from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
 from pathlib import Path
 import time
 
@@ -42,6 +43,122 @@ def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) 
     assert res > 0, "res must be greater than 0"
     grid = np.meshgrid(*[np.linspace(xmin, xmax, res) for _ in range(ndim)])
     return np.vstack([g.ravel() for g in grid]).T
+
+
+def _compute_split_half_nrmse(
+    latent_x: NdArray,
+    latent_gt: NdArray,
+    params: Dict[str, Any],
+    n_bootstraps: int = 3,
+    seed: int = 42,
+) -> float:
+    """
+    Compute intrinsic noise floor via split-half nRMSE.
+
+    Splits data randomly into two halves, computes local means for each half
+    independently at shared grid points, then measures the nRMSE between them.
+    This estimates the irreducible noise in the data.
+    """
+    rng = np.random.RandomState(seed)
+    latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
+    n_points = len(latent_x)
+
+    if n_points < 200:
+        return np.nan
+
+    # Filter valid points
+    valid_mask = np.all(np.isfinite(latent_x), axis=1) & np.all(np.isfinite(latent_gt), axis=1)
+    latent_x = np.asarray(latent_x[valid_mask])
+    latent_gt = np.asarray(latent_gt[valid_mask])
+    n_points = len(latent_x)
+
+    if n_points < 200:
+        return np.nan
+
+    # Create shared grid
+    grid = make_hypercube(
+        latent_x.shape[1],
+        res=params['hypercube_res'],
+        xmin=params['hypercube_min'],
+        xmax=params['hypercube_max'],
+    )
+
+    scores = []
+    for _ in range(n_bootstraps):
+        perm = rng.permutation(n_points)
+        mid = n_points // 2
+        idx_a, idx_b = perm[:mid], perm[mid:2*mid]
+
+        x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
+        x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
+
+        # Build separate trees for each half
+        tree_a = build_tree(x_a)
+        tree_b = build_tree(x_b)
+
+        # Get KNN for each half at the SAME grid points
+        indices_a, weights_a = get_gaussian_weighted_knn(
+            grid, tree=tree_a, k=params['k'], min_points=params['min_points'],
+            adaptive_sigma=True, max_radius=params['radius'], normed_w=False
+        )
+        indices_b, weights_b = get_gaussian_weighted_knn(
+            grid, tree=tree_b, k=params['k'], min_points=params['min_points'],
+            adaptive_sigma=True, max_radius=params['radius'], normed_w=False
+        )
+
+        # Effective sample sizes
+        n_eff_a = np.nansum(weights_a, axis=1, keepdims=True)
+        n_eff_b = np.nansum(weights_b, axis=1, keepdims=True)
+
+        # Normalize weights
+        with np.errstate(divide='ignore', invalid='ignore'):
+            norm_weights_a = weights_a / n_eff_a
+            norm_weights_b = weights_b / n_eff_b
+
+        # Compute local means and stds for each half using their own indices
+        _, std_a, mean_a = knn_stats(
+            grid, y_a, iw=(indices_a, norm_weights_a),
+            stats=['iw', 'std', 'mean'], k=params['k'], min_points=params['min_points']
+        )
+        _, std_b, mean_b = knn_stats(
+            grid, y_b, iw=(indices_b, norm_weights_b),
+            stats=['iw', 'std', 'mean'], k=params['k'], min_points=params['min_points']
+        )
+
+        # Compute nRMSE between the two halves' local means
+        # Use pooled local variance as denominator
+        local_var_a = std_a**2
+        local_var_b = std_b**2
+        pooled_var = (local_var_a + local_var_b) / 2.0
+
+        sq_error = (mean_a - mean_b) ** 2
+
+        # Use same stabilization as _calculate_grid_stats
+        global_var = np.var(latent_gt)
+        PRIOR_STRENGTH = 100.0
+        n_eff_pooled = (n_eff_a + n_eff_b) / 2.0
+        smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (n_eff_pooled + PRIOR_STRENGTH)
+
+        global_range = np.ptp(latent_gt)
+        ROBUST_EPSILON = max(0.01, 0.01 * global_range)
+        safe_denom = np.maximum(np.sqrt(smoothed_var), ROBUST_EPSILON)
+
+        norm_sq_error = sq_error / (safe_denom**2)
+
+        # Weight by effective sample size (capped)
+        WEIGHT_CAP = 0.1 * params['k']
+        capped_weights = np.minimum(n_eff_pooled, WEIGHT_CAP)
+
+        weights_flat = capped_weights.flatten()
+        norm_sq_flat = norm_sq_error.flatten()
+        mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
+
+        if np.any(mask):
+            nrmse = np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask]))
+            if np.isfinite(nrmse):
+                scores.append(float(nrmse))
+
+    return float(np.mean(scores)) if scores else np.nan
 
 
 def validate_predict_at(v: Any) -> List[NdArray]:
@@ -196,6 +313,14 @@ def _calculate_single_network_stats(
             grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
             network_stats.update(grid_stats)
 
+            # Compute data noise floor (split-half nRMSE) and noise-relative error
+            data_nrmse = _compute_split_half_nrmse(latent_x, latent_gt, gridstats_params)
+            network_stats['data_nrmse'] = data_nrmse
+            if np.isfinite(data_nrmse) and data_nrmse > 0:
+                network_stats['noise_relative_error'] = grid_stats['grid_nrmse'] / data_nrmse
+            else:
+                network_stats['noise_relative_error'] = np.nan
+
     return network_stats
 
 
@@ -205,9 +330,7 @@ def _calculate_grid_stats(
     latent_x: NdArray,
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    calculate grid statistics (extracted for parallel processing)
-    """
+    """Calculate grid statistics with nRMSE and SNR."""
     grid = make_hypercube(
         latent_x.shape[1],
         res=params['hypercube_res'],
@@ -218,64 +341,125 @@ def _calculate_grid_stats(
     latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
 
-    # mask out NaN or inf values
     valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
     valid_latent_x = np.asarray(latent_x[valid_x_mask])
     valid_latent_yhat = np.asarray(latent_yhat[valid_x_mask])
     valid_latent_gt = np.asarray(latent_gt[valid_x_mask])
+    # dedup:
+    _, unique_idx = np.unique(valid_latent_x, axis=0, return_index=True)
+    valid_latent_x = valid_latent_x[unique_idx]
+    valid_latent_yhat = valid_latent_yhat[unique_idx]
+    valid_latent_gt = valid_latent_gt[unique_idx]
+
+    global_var = np.var(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
+    global_range = np.ptp(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
+    ROBUST_EPSILON = max(0.01, 0.01 * global_range)
+    EPSILON = 1e-9
 
     tree = build_tree(valid_latent_x)
-    iw, gt_stdev, gt_mean = knn_stats(
+
+    # raw gaussian weights, single tree query for both n_eff and knn_stats
+    # Use adaptive sigma ("leashed balloon"): sigma scales with local density for fair 2D/3D comparison
+    # max_radius acts as safety cutoff to prevent averaging over distant regions in voids
+    indices, raw_weights = get_gaussian_weighted_knn(
+        grid,
+        tree=tree,
+        k=params['k'],
+        min_points=params['min_points'],
+        adaptive_sigma=True,
+        max_radius=params['radius'],  # hard cutoff for safety
+        normed_w=False,
+    )
+
+    # effective sample size: sum of raw Gaussian weights (distance-aware confidence)
+    n_eff = np.nansum(raw_weights, axis=1, keepdims=True)
+
+    # normalize weights for knn_stats
+    with np.errstate(divide='ignore', invalid='ignore'):
+        norm_weights = raw_weights / n_eff
+    iw = (indices, norm_weights)
+
+    _, gt_stdev, gt_mean = knn_stats(
         grid,
         valid_latent_gt,
-        tree=tree,
+        iw=iw,
         stats=['iw', 'std', 'mean'],
         k=params['k'],
-        radius=params['radius'],
         min_points=params['min_points'],
-    )  # type: ignore
+    )
     yhat_stdev, yhat_mean = knn_stats(
         grid,
         valid_latent_yhat,
         iw=iw,
         stats=['std', 'mean'],
         k=params['k'],
-        radius=params['radius'],
         min_points=params['min_points'],
-    )  # type: ignore
+    )
 
-    grid_mse = np.nanmean((yhat_mean - gt_mean) ** 2)
+    sq_error = (yhat_mean - gt_mean) ** 2
+    grid_mse = np.nanmean(sq_error)
     grid_rmse = np.sqrt(grid_mse)
-
     grid_gt_var = np.nanvar(gt_mean)
-    EPSILON = 1e-9
     grid_r_squared = 1 - (grid_mse / (grid_gt_var + EPSILON))
 
-    # KL divergence
-    # All operations here are element-wise. kl_divergences will be a
-    # (n_grid_points, D) array. np.nanmean averages them all into a single scalar,
-    # representing the average KL divergence across all dimensions and grid points.
-    safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
+    # --- nRMSE calculation ---
+    local_var = gt_stdev**2
+
+    # Bayesian variance smoothing: stabilizes estimates in sparse regions
+    PRIOR_STRENGTH = 100.0
+    smoothed_var = (local_var * n_eff + global_var * PRIOR_STRENGTH) / (n_eff + PRIOR_STRENGTH)
+
+    # Intensity-scaled tolerance: allows error proportional to signal magnitude
+    REL_TOLERANCE = 0.05  # 5% relative error acceptable
+    ABS_TOLERANCE = 0.01  # absolute floor for near-zero regions
+    tolerance_var = (REL_TOLERANCE * np.abs(gt_mean) + ABS_TOLERANCE) ** 2
+
+    # Denominator: smoothed variance + tolerance
+    denom_var = smoothed_var + tolerance_var
+    safe_denom = np.maximum(np.sqrt(denom_var), ROBUST_EPSILON)
+
+    # Soft-capped density weights: after 10% of k, weights are essentially equal
+    # This prevents over-weighting dense regions while still down-weighting very sparse ones
+    WEIGHT_CAP = 0.1 * params['k']
+    capped_weights = np.minimum(n_eff, WEIGHT_CAP)
+
+    # nRMSE with capped density weighting
+    norm_sq_error = sq_error / (safe_denom**2)
+    weights_flat = capped_weights.flatten()
+    norm_sq_flat = norm_sq_error.flatten()
+    mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
+
+    if np.any(mask):
+        grid_nrmse = np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask]))
+    else:
+        grid_nrmse = np.nan
+
+    # --- SNR (Signal to Noise Ratio) in dB ---
+    local_var_safe = np.maximum(local_var, EPSILON)
+    avg_noise_power = np.nanmean(local_var_safe)
+    avg_signal_power = np.nanmean((gt_mean - np.nanmean(gt_mean)) ** 2)
+    grid_snr = 10 * np.log10((avg_signal_power / avg_noise_power) + EPSILON)
+
+    # KL divergence between prediction and ground truth distributions
     safe_yhat_stdev = np.maximum(yhat_stdev, EPSILON)
+    safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
     log_term = np.log(safe_yhat_stdev / safe_gt_stdev)
     numerator_term = safe_gt_stdev**2 + (gt_mean - yhat_mean) ** 2
     denominator_term = 2 * safe_yhat_stdev**2
-    kl_divergences = log_term + numerator_term / denominator_term - 0.5
-    kl_divergences = np.maximum(kl_divergences, 0.0)
+    kl_divergences = np.maximum(log_term + numerator_term / denominator_term - 0.5, 0.0)
     kl_mean = np.nanmean(kl_divergences)
-    kl_similarities = np.exp(-kl_divergences)
-    grid_kl_similarity = np.nanmean(kl_similarities) * 100
+    grid_kl_similarity = np.nanmean(np.exp(-kl_divergences)) * 100
 
-    stats = {
+    return {
         'grid_gt_var': grid_gt_var,
         'grid_mse': grid_mse,
         'grid_rmse': grid_rmse,
+        'grid_nrmse': grid_nrmse,
+        'grid_snr': grid_snr,
         'grid_kl': kl_mean,
         'grid_kl_similarity': grid_kl_similarity,
         'grid_r_squared': grid_r_squared,
     }
-
-    return stats
 
 
 class NetworkPrediction(DataSource):
@@ -315,11 +499,11 @@ class NetworkPrediction(DataSource):
     already_latent: bool = False  # no need to rescale if the input data is already in latent space
 
     enable_gridstats: bool = True  # enable grid statistics calculation
-    gridstats_hypercube_res: int = 40  # resolution for hypercube grid
+    gridstats_hypercube_res: int = 8  # resolution per dimension (8³=512 cells for 3D)
     gridstats_hypercube_min: float = 0.0  # minimum value for hypercube grid
-    gridstats_hypercube_max: float = 1.0  # maximum value for hypercube grid
-    gridstats_k: int = 400
-    gridstats_radius: float = 0.1
+    gridstats_hypercube_max: float = 0.8  # maximum value (avoid sparse edges)
+    gridstats_k: int = 1024  # neighbors for adaptive sigma (N_eff will be ~constant across dims)
+    gridstats_radius: float = 0.25  # max_radius safety cutoff for adaptive sigma
     gridstats_min_points: int = 40
 
     shuffle_inputs: bool = True  # shuffle inputs before prediction
@@ -426,6 +610,30 @@ class NetworkPrediction(DataSource):
         self.predict_at = new_predict_at
         self.ground_truth = new_gt
 
+    def _get_inverse_input_order(self, network) -> Optional[List[int]]:
+        """Get the inverse of input_order to map from alphabetical display order to network order.
+
+        PlotData.x columns are in alphabetical order (for display), but the model expects
+        columns in network input order. This function computes the permutation needed
+        to convert alphabetical back to network order.
+
+        Returns None if no reordering is needed (already in network order).
+        """
+        input_order, _, _, _ = get_reordered_protein_names(network)
+        # input_order maps network order -> alphabetical
+        # We need the inverse: alphabetical -> network order
+
+        # Check if already identity (no reordering needed)
+        if input_order == list(range(len(input_order))):
+            return None
+
+        # Compute inverse permutation
+        inverse_order = [0] * len(input_order)
+        for new_idx, old_idx in enumerate(input_order):
+            inverse_order[old_idx] = new_idx
+
+        return inverse_order
+
     def _prepare_inputs(self) -> Tuple[List[NdArray], List[Optional[NdArray]]]:
         """prepare inputs by padding or truncating to the same length"""
         max_prediction_length = max(len(x) for x in self.predict_at)
@@ -440,6 +648,13 @@ class NetworkPrediction(DataSource):
         aligned_ground_truth = []
 
         for i, (x, gt) in enumerate(zip(self.predict_at, self.ground_truth)):
+            network = self.network_model.network[i]
+            inverse_order = self._get_inverse_input_order(network)
+
+            # Reorder x columns from alphabetical to network order if needed
+            if inverse_order is not None:
+                logger.debug(f"network {i}: reordering input columns with inverse_order={inverse_order}")
+                x = x[:, inverse_order]
             logger.debug(
                 f"aligning network {i}: x.shape={x.shape}, gt={None if gt is None else gt.shape}"
             )
@@ -588,7 +803,9 @@ class NetworkPrediction(DataSource):
 
         def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
             if self.verbose:
-                logger.debug(f"getting xy for network {network_idx} with model {self.network_model.signature}")
+                logger.debug(
+                    f"getting xy for network {network_idx} with model {self.network_model.signature}"
+                )
 
             # compute predictions if not already computed
             if (
@@ -613,7 +830,9 @@ class NetworkPrediction(DataSource):
             gt = self._gtruths[network_idx]
 
             if self.verbose:
-                logger.debug(f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}")
+                logger.debug(
+                    f"x shape: {x.shape}, yhat shape: {yhat.shape}, gt: {None if gt is None else gt.shape}"
+                )
 
             assert isinstance(self.network_model.network, list)
 
@@ -704,7 +923,7 @@ class NetworkPrediction(DataSource):
 
             yhat = self._yhats[i]
             gt = self._gtruths[i]
-            x = self._x[i]
+            x = self._x[i]  # Already in network order from _prepare_inputs
 
             _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
 

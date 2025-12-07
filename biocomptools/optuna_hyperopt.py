@@ -324,6 +324,34 @@ class HyperoptProgram(BaseModel):
     validation_set: Annotated[NetworkSet | None, Arg(help='Networks for validation')] = None
     use_validation_loss: Annotated[bool, Arg(help='Use validation loss as objective')] = False
     n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 8192
+    validation_objective: Annotated[
+        Literal["mean_rmse", "softmax_nrmse", "geomean_nrmse", "geomean_nre"],
+        Arg(help='Validation objective: mean_rmse, softmax_nrmse, geomean_nrmse, geomean_nre (noise-relative error, default)'),
+    ] = "geomean_nre"
+    validation_softmax_alpha: Annotated[
+        float,
+        Arg(help='Sharpness parameter for soft-max objective (higher = closer to true max)'),
+    ] = 5.0
+    validation_enable_gridstats: Annotated[
+        bool,
+        Arg(help='Enable grid statistics for nRMSE-based objectives (slower but more accurate)'),
+    ] = True
+    validation_gridstats_res: Annotated[
+        int,
+        Arg(help='Grid resolution for validation gridstats per dimension'),
+    ] = 8
+    validation_gridstats_max: Annotated[
+        float,
+        Arg(help='Max value for validation gridstats hypercube'),
+    ] = 0.8
+    validation_gridstats_k: Annotated[
+        int,
+        Arg(help='Number of neighbors for validation gridstats KNN'),
+    ] = 1024
+    validation_gridstats_radius: Annotated[
+        float,
+        Arg(help='Max radius cutoff for validation gridstats adaptive sigma'),
+    ] = 0.25
 
     # per-trial dataset weight support (for optimizing dataset weights)
     rebuild_dman_per_trial: Annotated[bool, Arg(help='Rebuild data manager each trial')] = False
@@ -466,7 +494,13 @@ class HyperoptProgram(BaseModel):
         if self.validation_set is None:
             return
 
-        logger.info("Preparing validation predictor...")
+        # determine if we need gridstats based on objective type
+        needs_gridstats = (
+            self.validation_enable_gridstats
+            and self.validation_objective in ("softmax_nrmse", "geomean_nrmse")
+        )
+
+        logger.info(f"Preparing validation predictor (objective={self.validation_objective}, gridstats={needs_gridstats})...")
         with self.db_session as session:
             self.validation_set.run_selectors(session)
             val_dman = build_data_manager(
@@ -499,23 +533,77 @@ class HyperoptProgram(BaseModel):
             n_stats_workers=1,
             per_prediction_info=per_prediction_info,
             device='cpu',
-            enable_gridstats=False,  # skip expensive KNN grid stats for hyperopt validation
+            enable_gridstats=needs_gridstats,
+            gridstats_hypercube_res=self.validation_gridstats_res,
+            gridstats_hypercube_max=self.validation_gridstats_max,
+            gridstats_k=self.validation_gridstats_k,
+            gridstats_radius=self.validation_gridstats_radius,
         )
         logger.info(f"Validation predictor ready ({len(networks)} networks)")
 
     def _compute_validation_loss(self, params) -> float:
-        """Compute validation loss using trained params."""
+        """Compute validation loss using trained params.
+
+        Supports multiple objective types:
+        - mean_rmse: Mean RMSE across networks (simple, fast)
+        - softmax_nrmse: Soft-max of nRMSE (focuses on worst performer, fair across noise levels)
+        - geomean_nrmse: Geometric mean of nRMSE (balanced between mean and worst-case)
+        """
         if self._validation_predictor is None:
             return float('inf')
 
         # get stats for first replicate
         stats = self._validation_predictor.get_network_stats(with_shared_params=tree_get(params, 0))
-        valid_stats = [s for s in stats if s.get('rmse') is not None]
 
-        if not valid_stats:
-            return float('inf')
+        if self.validation_objective == "mean_rmse":
+            valid_stats = [s for s in stats if s.get('rmse') is not None]
+            if not valid_stats:
+                return float('inf')
+            return float(np.mean([s['rmse'] for s in valid_stats]))
 
-        return float(np.mean([s['rmse'] for s in valid_stats]))
+        elif self.validation_objective == "softmax_nrmse":
+            # soft-max of nRMSE (LogSumExp gives smooth approximation of max)
+            nrmses = np.array([
+                s['grid_nrmse'] for s in stats
+                if s.get('grid_nrmse') is not None and np.isfinite(s.get('grid_nrmse'))
+            ])
+            if len(nrmses) == 0:
+                return float('inf')
+            alpha = self.validation_softmax_alpha
+            # logsumexp for numerical stability
+            max_val = np.max(nrmses)
+            soft_max = max_val + (1 / alpha) * np.log(np.sum(np.exp(alpha * (nrmses - max_val))))
+            return float(soft_max)
+
+        elif self.validation_objective == "geomean_nrmse":
+            # geometric mean of nRMSE (less sensitive to outliers than arithmetic mean)
+            from scipy.stats import gmean
+            nrmses = np.array([
+                s['grid_nrmse'] for s in stats
+                if s.get('grid_nrmse') is not None
+                and np.isfinite(s.get('grid_nrmse'))
+                and s.get('grid_nrmse') > 0
+            ])
+            if len(nrmses) == 0:
+                return float('inf')
+            return float(gmean(nrmses))
+
+        elif self.validation_objective == "geomean_nre":
+            # geometric mean of noise-relative error (model error / data noise floor)
+            # This is the ultimate metric: invariant to data quality and dimensionality
+            from scipy.stats import gmean
+            nres = np.array([
+                s['noise_relative_error'] for s in stats
+                if s.get('noise_relative_error') is not None
+                and np.isfinite(s.get('noise_relative_error'))
+                and s.get('noise_relative_error') > 0
+            ])
+            if len(nres) == 0:
+                return float('inf')
+            return float(gmean(nres))
+
+        else:
+            raise ValueError(f"Unknown validation objective: {self.validation_objective}")
 
     def _get_storage_path(self) -> str:
         output_path = Path(self.output_dir)

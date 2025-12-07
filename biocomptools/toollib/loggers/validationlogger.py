@@ -26,7 +26,10 @@ class ValidationLossLogger(Logger):
     validation_set: Optional[NetworkSet] = None
     n_evals: int = 2048
     enable_gridstats: bool = False
-    gridstats_hypercube_res: int = 40
+    gridstats_hypercube_res: int = 8
+    gridstats_hypercube_max: float = 0.8
+    gridstats_k: int = 1024
+    gridstats_radius: float = 0.25
     seed: int = 42
     predictor_n_stats_workers: int = 1
     plot_training_losses: bool = False
@@ -111,7 +114,11 @@ class ValidationLossLogger(Logger):
             predict_at=xs, network_model=network_model, ground_truth=ys,
             seed=self.seed, disable_variational=True, max_evals=self.n_evals,
             already_latent=True, n_stats_workers=self.predictor_n_stats_workers,
-            enable_gridstats=self.enable_gridstats, gridstats_hypercube_res=self.gridstats_hypercube_res,
+            enable_gridstats=self.enable_gridstats,
+            gridstats_hypercube_res=self.gridstats_hypercube_res,
+            gridstats_hypercube_max=self.gridstats_hypercube_max,
+            gridstats_k=self.gridstats_k,
+            gridstats_radius=self.gridstats_radius,
             per_prediction_info=per_prediction_info, device=self.device,
         )
 
