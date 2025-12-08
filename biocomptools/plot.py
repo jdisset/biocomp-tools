@@ -1,7 +1,7 @@
 ## {{{                          --     imports     --
 
 from biocomptools.logging_config import get_logger, setup_logging
-from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from pydantic import BaseModel, ConfigDict
 from tqdm import tqdm
 from biocomptools.toollib.common import maybetqdm
 import numpy as np
@@ -36,7 +36,7 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 from biocomptools.toollib.figuremakers.benchmarkutils import BenchmarkData, BenchmarkItem
 
-from biocomptools.modelmodel import BiocompModel, get_shared_params, NetworkModel
+from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
     NetworkSelector,
@@ -183,12 +183,15 @@ def urlencoded(s: str) -> str:
     return urllib.parse.quote(s, safe='')
 
 
-def construct_figure(figure_node):
+def construct_figure(figure_node, output_path_override: str | None = None):
     try:
         figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
         if dict_like(figure):
             figure = Figure(**figure)  # type: ignore
         assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
+        if output_path_override:
+            figure.figure_spec.output_dir = str(Path(output_path_override).parent)
+            figure.figure_spec.output_file = Path(output_path_override).name
     except DraconError:
         # let DraconErrors propagate - they'll be formatted nicely at the top level
         raise
@@ -235,6 +238,14 @@ class PlotJob(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    def _get_temp_paths_for_merge(self, n: int) -> list[str | None]:
+        """Generate temp file paths for merge mode when figures don't have unique outputs."""
+        assert self.merge_spec is not None
+        merge_out_dir = Path(self.merge_spec.output_path).parent
+        # use same extension as final merge output
+        ext = Path(self.merge_spec.output_file).suffix or '.png'
+        return [str(merge_out_dir / f"_merge_tmp_{i:04d}{ext}") for i in range(n)]
+
     def run(self):
         overwrite = not self.skip_existing
         total_figures = len(self.figures)
@@ -247,11 +258,13 @@ class PlotJob(BaseModel):
 
         t0 = time.time()
         out_paths = []
+        temp_paths: list[str | None] = [None] * total_figures
 
         if self.merge_spec:
             order = list(range(total_figures))
             merge_out_dir = Path(self.merge_spec.output_path).parent
             merge_out_dir.mkdir(parents=True, exist_ok=True)
+            temp_paths = self._get_temp_paths_for_merge(total_figures)
         else:
             order = list(np.random.permutation(total_figures))
 
@@ -261,8 +274,10 @@ class PlotJob(BaseModel):
                 for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
             ]
             constructed_figures = [
-                construct_figure(fig)
-                for fig in maybetqdm(fig_copies, min_len=5, desc='Constructing figures')
+                construct_figure(fig, output_path_override=temp_paths[order[j]])
+                for j, fig in enumerate(
+                    maybetqdm(fig_copies, min_len=5, desc='Constructing figures')
+                )
             ]
 
             out_paths = [
@@ -302,10 +317,11 @@ class PlotJob(BaseModel):
             while batch_start < total_figures:
                 batch_idx += 1
                 batch_len = min(self.max_batch_size, total_figures - batch_start)
+                batch_order_indices = order[batch_start : batch_start + batch_len]
                 fig_copies = [
                     self.figures[i].copy(reroot=True)
                     for i in maybetqdm(
-                        order[batch_start : batch_start + batch_len],
+                        batch_order_indices,
                         min_len=20,
                         desc=f'Copying figure tasks for batch {batch_idx}/{num_batches}',
                     )
@@ -314,11 +330,13 @@ class PlotJob(BaseModel):
                 batch_start += batch_len
 
                 constructed_figures = [
-                    construct_figure(fig)
-                    for fig in maybetqdm(
-                        fig_copies,
-                        min_len=5,
-                        desc=f'Constructing figures for batch {batch_idx}/{num_batches}',
+                    construct_figure(fig, output_path_override=temp_paths[batch_order_indices[j]])
+                    for j, fig in enumerate(
+                        maybetqdm(
+                            fig_copies,
+                            min_len=5,
+                            desc=f'Constructing figures for batch {batch_idx}/{num_batches}',
+                        )
                     )
                 ]
 
@@ -355,30 +373,20 @@ class PlotJob(BaseModel):
     def _merge_figures(self, paths: list[str]):
         """Merge generated figures into single output per MergeSpec."""
         spec = self.merge_spec
-        images = []
-        for p in paths:
-            if p.lower().endswith('.pdf'):
-                import subprocess
-
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    subprocess.run(
-                        ['pdftoppm', '-png', '-singlefile', p, tmp.name[:-4]], check=True
-                    )
-                    images.append(Image.open(tmp.name))
-            else:
-                images.append(Image.open(p))
-
-        if not images:
+        if not paths:
             return
 
         spec.output_path.parent.mkdir(parents=True, exist_ok=True)
-        all_pdfs = all(p.lower().endswith('.pdf') for p in paths)
-        output_is_pdf = str(spec.output_path).lower().endswith('.pdf')
 
-        if all_pdfs and output_is_pdf:
-            self._merge_pdfs_lossless(paths)
-        else:
-            self._merge_as_images(paths)
+        if spec.mode == "pages":
+            self._merge_as_pdf_pages(paths)
+        else:  # grid mode
+            all_pdfs = all(p.lower().endswith('.pdf') for p in paths)
+            output_is_pdf = str(spec.output_path).lower().endswith('.pdf')
+            if all_pdfs and output_is_pdf:
+                self._merge_pdfs_lossless(paths)
+            else:
+                self._merge_as_images(paths)
 
         if spec.delete_intermediates:
             for p in paths:
@@ -445,6 +453,35 @@ class PlotJob(BaseModel):
         with open(spec.output_path, 'wb') as f:
             writer.write(f)
 
+    def _merge_as_pdf_pages(self, paths: list[str]):
+        """Merge figures as separate pages in a PDF."""
+        from pypdf import PdfReader, PdfWriter
+        from PIL import Image
+        import io
+
+        spec = self.merge_spec
+        writer = PdfWriter()
+
+        for p in paths:
+            if p.lower().endswith('.pdf'):
+                reader = PdfReader(p)
+                for page in reader.pages:
+                    writer.add_page(page)
+            else:
+                # convert image to PDF page
+                img = Image.open(p)
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                pdf_bytes = io.BytesIO()
+                img.save(pdf_bytes, format='PDF', resolution=300)
+                pdf_bytes.seek(0)
+                reader = PdfReader(pdf_bytes)
+                writer.add_page(reader.pages[0])
+                img.close()
+
+        with open(spec.output_path, 'wb') as f:
+            writer.write(f)
+
     def _merge_as_images(self, paths: list[str]):
         """Merge figures as images (fallback for non-PDF or mixed inputs)."""
         from PIL import Image
@@ -465,7 +502,7 @@ class PlotJob(BaseModel):
                     tmp.close()
                     subprocess.run(
                         ['pdftoppm', '-png', '-singlefile', '-r', '300', p, tmp.name[:-4]],
-                        check=True
+                        check=True,
                     )
                     images.append(Image.open(tmp.name))
                 else:
