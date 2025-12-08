@@ -40,4 +40,5 @@ biocomp-updatepartsdb = "biocomptools.update_partsdb:main"
 biocomp-update-partsdb = "biocomptools.update_partsdb:main"
 biocomp-hyperopt = "biocomptools.optuna_hyperopt:main"
 biocomp-circuitplot = "biocomptools.circuitplot:main"
+biocomp-hyperopt-analysis = "biocomptools.hyperopt_analysis:main"
 
