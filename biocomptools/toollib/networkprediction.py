@@ -87,7 +87,7 @@ def _compute_split_half_nrmse(
     for _ in range(n_bootstraps):
         perm = rng.permutation(n_points)
         mid = n_points // 2
-        idx_a, idx_b = perm[:mid], perm[mid:2*mid]
+        idx_a, idx_b = perm[:mid], perm[mid : 2 * mid]
 
         x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
         x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
@@ -98,12 +98,22 @@ def _compute_split_half_nrmse(
 
         # Get KNN for each half at the SAME grid points
         indices_a, weights_a = get_gaussian_weighted_knn(
-            grid, tree=tree_a, k=params['k'], min_points=params['min_points'],
-            adaptive_sigma=True, max_radius=params['radius'], normed_w=False
+            grid,
+            tree=tree_a,
+            k=params['k'],
+            min_points=params['min_points'],
+            adaptive_sigma=True,
+            max_radius=params['radius'],
+            normed_w=False,
         )
         indices_b, weights_b = get_gaussian_weighted_knn(
-            grid, tree=tree_b, k=params['k'], min_points=params['min_points'],
-            adaptive_sigma=True, max_radius=params['radius'], normed_w=False
+            grid,
+            tree=tree_b,
+            k=params['k'],
+            min_points=params['min_points'],
+            adaptive_sigma=True,
+            max_radius=params['radius'],
+            normed_w=False,
         )
 
         # Effective sample sizes
@@ -117,12 +127,20 @@ def _compute_split_half_nrmse(
 
         # Compute local means and stds for each half using their own indices
         _, std_a, mean_a = knn_stats(
-            grid, y_a, iw=(indices_a, norm_weights_a),
-            stats=['iw', 'std', 'mean'], k=params['k'], min_points=params['min_points']
+            grid,
+            y_a,
+            iw=(indices_a, norm_weights_a),
+            stats=['iw', 'std', 'mean'],
+            k=params['k'],
+            min_points=params['min_points'],
         )
         _, std_b, mean_b = knn_stats(
-            grid, y_b, iw=(indices_b, norm_weights_b),
-            stats=['iw', 'std', 'mean'], k=params['k'], min_points=params['min_points']
+            grid,
+            y_b,
+            iw=(indices_b, norm_weights_b),
+            stats=['iw', 'std', 'mean'],
+            k=params['k'],
+            min_points=params['min_points'],
         )
 
         # Compute nRMSE between the two halves' local means
@@ -137,7 +155,9 @@ def _compute_split_half_nrmse(
         global_var = np.var(latent_gt)
         PRIOR_STRENGTH = 100.0
         n_eff_pooled = (n_eff_a + n_eff_b) / 2.0
-        smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (n_eff_pooled + PRIOR_STRENGTH)
+        smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (
+            n_eff_pooled + PRIOR_STRENGTH
+        )
 
         global_range = np.ptp(latent_gt)
         ROBUST_EPSILON = max(0.01, 0.01 * global_range)
@@ -653,7 +673,9 @@ class NetworkPrediction(DataSource):
 
             # Reorder x columns from alphabetical to network order if needed
             if inverse_order is not None:
-                logger.debug(f"network {i}: reordering input columns with inverse_order={inverse_order}")
+                logger.debug(
+                    f"network {i}: reordering input columns with inverse_order={inverse_order}"
+                )
                 x = x[:, inverse_order]
             logger.debug(
                 f"aligning network {i}: x.shape={x.shape}, gt={None if gt is None else gt.shape}"
