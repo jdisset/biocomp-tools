@@ -1,5 +1,6 @@
 import logging
 import multiprocessing
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Union
 
@@ -7,6 +8,30 @@ from rich.logging import RichHandler
 from biocomptools.toollib.config import config
 
 _logging_setup_done = False
+
+
+class SafeRichHandler(RichHandler):
+    """RichHandler that falls back to basic stderr output on style corruption errors.
+
+    Works around a rare issue where rich's Style._color can become corrupted
+    (e.g., to a tuple instead of Color object) after multiprocessing, causing
+    AttributeError: 'tuple' object has no attribute 'downgrade'
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            super().emit(record)
+        except AttributeError as e:
+            if "downgrade" in str(e) or "_color" in str(e):
+                # Fall back to basic output on style corruption
+                try:
+                    msg = self.format(record)
+                    sys.stderr.write(f"{msg}\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+            else:
+                raise
 
 
 class LevelFilter(logging.Filter):
@@ -47,7 +72,7 @@ def setup_logging(
 
     # Create the appropriate handler.
     if log_config.use_rich_handler and not is_worker:
-        handler = RichHandler(
+        handler = SafeRichHandler(
             show_time=log_config.show_time,
             show_path=log_config.show_path,
             show_level=log_config.show_level,
