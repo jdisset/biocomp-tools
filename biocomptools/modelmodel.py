@@ -296,7 +296,9 @@ class NetworkModel(BaseModel):
             self._batch_apply = self._batch_apply_cpu
 
         except Exception as e:
-            logger.error(f"error building stack: {e}")
+            import traceback
+            logger.error(f"error building stack: {type(e).__name__}: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
             raise e
 
     def update_params(self):

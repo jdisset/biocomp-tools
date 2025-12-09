@@ -311,9 +311,9 @@ class HyperoptProgram(BaseModel):
         default_factory=lambda: str(Path(config.paths.root) / "hyperopt_results")
     )
 
-    # training configuration (deferred - reconstructed per trial with hyperparameters)
-    training_conf: Annotated[DeferredNode[TrainingConfig], Arg(help='Base training config')]
-    compute_conf: Annotated[DeferredNode[ComputeConfig], Arg(help='Base compute config')]
+    # training configuration (can be deferred for interpolation or direct configs)
+    training_conf: Annotated[DeferredNode[TrainingConfig] | TrainingConfig, Arg(help='Base training config')]
+    compute_conf: Annotated[DeferredNode[ComputeConfig] | ComputeConfig, Arg(help='Base compute config')]
     data_conf: Annotated[DataConfig, Arg(help='Data config')] = Field(default_factory=DataConfig)
     # training_set can be either a NetworkSet (for standard use) or DeferredNode (for weight optimization)
     training_set: Annotated[
@@ -960,9 +960,15 @@ class HyperoptProgram(BaseModel):
         hyperparams['seed'] = self.seed if self.seed is not None else trial.number
 
         try:
-            # construct configs with hyperparameters as context variables
-            training_conf = self.training_conf.construct(context=hyperparams)
-            compute_conf = self.compute_conf.construct(context=hyperparams)
+            if isinstance(self.training_conf, DeferredNode):
+                training_conf = self.training_conf.construct(context=hyperparams)
+            else:
+                training_conf = self.training_conf
+
+            if isinstance(self.compute_conf, DeferredNode):
+                compute_conf = self.compute_conf.construct(context=hyperparams)
+            else:
+                compute_conf = self.compute_conf
 
             # handle path-based hyperparameters (e.g., "compute_conf.node_functions.translation.kwargs.rate_dim")
             for spec in self.hyperparams:

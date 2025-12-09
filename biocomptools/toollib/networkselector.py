@@ -831,6 +831,13 @@ class CleanupFilter(NetworkFilter):
         net_info = netdata.network.network_info
         lib = load_lib()
 
+        split_sequestron = self._find_twice_same_rec_with_different_rna(net_info, lib)
+        if split_sequestron:
+            logger.info(
+                f"Network {netname} has split sequestron (same ERN rec site, different RNA): {split_sequestron}. Skipping."
+            )
+            return False
+
         missing_parts = self._find_missing_complementary_parts(net_info, lib)
         if missing_parts:
             logger.info(
