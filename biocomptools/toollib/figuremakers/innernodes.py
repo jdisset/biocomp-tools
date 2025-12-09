@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 
 
 CMAP = 'bc_blues'
-CMAP = 'bc_reds'
+# CMAP = 'bc_reds'
 # CMAP = 'bc_greens'
 
 N_SAMPLES, SHOW_INVERSE, CMAP_TRUNCATE_MIN = 100_000, True, 0.25
@@ -663,4 +663,6 @@ class InnerNodesFigure(Figure):
         plt.close(fig)
 
 
-InnerNodesFigureSpec = type("InnerNodesFigureSpec", (FigureSpec,), {})
+class InnerNodesFigureSpec(FigureSpec):
+    """Figure spec for inner nodes figure (subclass of FigureSpec for pickling compatibility)."""
+    pass
