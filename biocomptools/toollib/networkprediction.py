@@ -791,9 +791,10 @@ class NetworkPrediction(DataSource):
         self._gtruths = []
         assert isinstance(self.ground_truth, list)
         assert isinstance(self._aligned_ground_truth, list)
+        assert isinstance(self._aligned_x, list)
 
-        for i, (network_output, x) in enumerate(zip(network_outputs, self.predict_at)):
-            effective_max_evals = min(max_evals, len(x))
+        for i, (network_output, aligned_x) in enumerate(zip(network_outputs, self._aligned_x)):
+            effective_max_evals = min(max_evals, len(aligned_x))
 
             # store prediction results
             truncated_output = network_output[:effective_max_evals]
@@ -806,8 +807,9 @@ class NetworkPrediction(DataSource):
             else:
                 self._gtruths.append(None)
 
-            # store inputs
-            truncated_x = x[:effective_max_evals]
+            # store inputs in NETWORK order (not display order)
+            # extract_lazy_plot_data_from_network will apply input_order to convert to display
+            truncated_x = aligned_x[:effective_max_evals]
             self._x.append(np.asarray(truncated_x, dtype=np.float32))
 
         # validate results
