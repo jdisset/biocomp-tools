@@ -325,13 +325,17 @@ class HyperoptProgram(BaseModel):
     use_validation_loss: Annotated[bool, Arg(help='Use validation loss as objective')] = False
     n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 8192
     validation_objective: Annotated[
-        Literal["mean_rmse", "softmax_nrmse", "geomean_nrmse", "geomean_nre"],
-        Arg(help='Validation objective: mean_rmse, softmax_nrmse, geomean_nrmse, geomean_nre (noise-relative error, default)'),
-    ] = "geomean_nre"
+        Literal["mean_rmse", "softmax_nrmse", "geomean_nrmse", "geomean_nre", "powermean_nre"],
+        Arg(help='Validation objective: mean_rmse, softmax_nrmse, geomean_nrmse, geomean_nre, powermean_nre (default)'),
+    ] = "powermean_nre"
     validation_softmax_alpha: Annotated[
         float,
         Arg(help='Sharpness parameter for soft-max objective (higher = closer to true max)'),
     ] = 5.0
+    validation_powermean_p: Annotated[
+        float,
+        Arg(help='Exponent for power mean objective (p>1 emphasizes high values, p=2 is RMS)'),
+    ] = 2.0
     validation_enable_gridstats: Annotated[
         bool,
         Arg(help='Enable grid statistics for nRMSE-based objectives (slower but more accurate)'),
@@ -356,6 +360,12 @@ class HyperoptProgram(BaseModel):
     # per-trial dataset weight support (for optimizing dataset weights)
     rebuild_dman_per_trial: Annotated[bool, Arg(help='Rebuild data manager each trial')] = False
 
+    # vmap-trials mode: run n_jobs trials as vmapped pseudo-replicates
+    vmap_trials: Annotated[
+        bool,
+        Arg(help='Run n_jobs trials in parallel as vmapped pseudo-replicates (requires dataweight_* hyperparams only)')
+    ] = False
+
     # hyperparameters to optimize
     hyperparams: Annotated[list[HyperparamSpec], Arg(help='Hyperparameters to optimize')] = Field(
         default_factory=list
@@ -377,6 +387,9 @@ class HyperoptProgram(BaseModel):
     _validation_xynetworks: Any = None
     _network_weight_mapping: list[str] | None = None  # network_idx -> ndp.network_name
     _cached_step: CompiledTrainingStep | None = None  # cached compiled step for JIT reuse
+    _vmap_stack: Any = None  # cached stack for vmap-trials mode
+    _vmap_cached_step: CompiledTrainingStep | None = None  # cached step for vmap-trials mode
+    _batched_val_predict: Any = None  # cached JIT-compiled batched validation predictor
 
     def model_post_init(self, __context):
         self._lib = load_lib()
@@ -497,7 +510,7 @@ class HyperoptProgram(BaseModel):
         # determine if we need gridstats based on objective type
         needs_gridstats = (
             self.validation_enable_gridstats
-            and self.validation_objective in ("softmax_nrmse", "geomean_nrmse")
+            and self.validation_objective in ("softmax_nrmse", "geomean_nrmse", "geomean_nre", "powermean_nre")
         )
 
         logger.info(f"Preparing validation predictor (objective={self.validation_objective}, gridstats={needs_gridstats})...")
@@ -530,31 +543,229 @@ class HyperoptProgram(BaseModel):
             disable_variational=True,
             max_evals=self.n_validation_evals,
             already_latent=True,
-            n_stats_workers=1,
+            n_stats_workers=8,
             per_prediction_info=per_prediction_info,
-            device='cpu',
+            device='gpu',
             enable_gridstats=needs_gridstats,
             gridstats_hypercube_res=self.validation_gridstats_res,
             gridstats_hypercube_max=self.validation_gridstats_max,
             gridstats_k=self.validation_gridstats_k,
             gridstats_radius=self.validation_gridstats_radius,
         )
-        logger.info(f"Validation predictor ready ({len(networks)} networks)")
+        logger.info(f"Validation predictor ready ({len(networks)} networks, device=gpu, stats_workers=8)")
 
     def _compute_validation_loss(self, params) -> float:
-        """Compute validation loss using trained params.
+        """Compute validation loss using trained params (extracts first replicate)."""
+        if self._validation_predictor is None:
+            return float('inf')
+        stats = self._validation_predictor.get_network_stats(with_shared_params=tree_get(params, 0))
+        return self._compute_loss_from_stats(stats)
 
-        Supports multiple objective types:
-        - mean_rmse: Mean RMSE across networks (simple, fast)
-        - softmax_nrmse: Soft-max of nRMSE (focuses on worst performer, fair across noise levels)
-        - geomean_nrmse: Geometric mean of nRMSE (balanced between mean and worst-case)
-        """
+    def _compute_validation_loss_single(self, single_params) -> float:
+        """Compute validation loss for single-replicate params (no wrapping needed)."""
         if self._validation_predictor is None:
             return float('inf')
 
-        # get stats for first replicate
-        stats = self._validation_predictor.get_network_stats(with_shared_params=tree_get(params, 0))
+        stats = self._validation_predictor.get_network_stats(with_shared_params=single_params)
+        return self._compute_loss_from_stats(stats)
 
+    def _compute_validation_losses_batched(self, all_params) -> list[float]:
+        """Compute validation losses for all trial params using batched prediction.
+
+        Instead of calling get_network_stats N times (which triggers N prediction runs),
+        this method vmaps the prediction over all trial params at once, then computes
+        stats for each trial from the batched predictions.
+        """
+        import jax
+        import jax.numpy as jnp
+        from biocomp import parameters as pr
+
+        # Get n_trials from first array leaf
+        def get_n_trials(params):
+            for leaf in jax.tree.leaves(params):
+                if hasattr(leaf, 'shape') and len(leaf.shape) > 0:
+                    return leaf.shape[0]
+            raise ValueError("No array leaves with batch dim found in params")
+
+        if self._validation_predictor is None:
+            return [float('inf')] * get_n_trials(all_params)
+
+        predictor = self._validation_predictor
+        network_model = predictor.network_model
+
+        # Get validation inputs (same for all trials)
+        assert isinstance(predictor._aligned_x, list)
+        stacked_x = np.column_stack(predictor._aligned_x)
+        n_samples = len(predictor._aligned_x[0])
+
+        # Get the stack and prepare batched prediction
+        stack = network_model._stack
+        num_z_arr = all_params["global/number_of_random_variables"]
+        num_z = int(num_z_arr[0] if hasattr(num_z_arr, '__getitem__') else num_z_arr)
+        n_trials = get_n_trials(all_params)
+
+        print(f"[vmap-trials] Batched validation: {n_trials} trials × {n_samples} samples")
+        sys.stdout.flush()
+
+        # Prepare inputs for batched prediction
+        key = jax.random.PRNGKey(predictor.seed or 42)
+
+        # Generate Z values and keys for samples
+        z_value = predictor.z_value
+        if z_value == 'uniform':
+            Z = jax.random.uniform(key, (n_samples, num_z))
+        else:
+            Z = jnp.ones((n_samples, num_z)) * z_value
+        keys = jax.random.split(key, n_samples)
+
+        # Disable variational for all trial params by setting logstds to very negative
+        logstd_path = 'shared/quantization/logstdevs'
+        if logstd_path in all_params:
+            logstd = all_params[logstd_path]
+            for path, value in logstd.iter_leaves():
+                logstd[path] = jnp.ones_like(value) * -100
+
+        # Get or create cached batched prediction function
+        if self._batched_val_predict is None:
+            print(f"[vmap-trials] Compiling batched validation predict function...")
+            sys.stdout.flush()
+            # Stack apply signature: (params, x, z, key) -> (out, (info, fullout))
+            # Double vmap: outer over trials (params axis 0), inner over samples
+            sample_vmap = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))  # vmap over samples
+            trial_vmap = jax.vmap(sample_vmap, in_axes=(0, None, None, None))  # vmap over params
+
+            # JIT compile for GPU
+            try:
+                gpu_device = jax.devices('gpu')[0]
+                self._batched_val_predict = jax.jit(trial_vmap, device=gpu_device)
+            except (RuntimeError, IndexError):
+                self._batched_val_predict = jax.jit(trial_vmap)
+
+        # Run batched prediction
+        t0 = time.time()
+        print(f"[vmap-trials] Running batched predictions...")
+        sys.stdout.flush()
+
+        # Merge shared params from trials with fixed local params
+        from biocomptools.modelmodel import get_shared_params
+        shared_params = get_shared_params(all_params)
+        local_params = network_model._local_params
+
+        # For vmap, ALL leaves need consistent batch dimension (axis 0)
+        def ensure_batch_dim(params, n_trials, already_batched=False):
+            """Ensure all leaves have leading trial dimension for vmap."""
+            def process_leaf(x):
+                if isinstance(x, (jnp.ndarray, np.ndarray)):
+                    if len(x.shape) == 0:  # scalar array
+                        return jnp.broadcast_to(x, (n_trials,))
+                    if already_batched:
+                        return x  # already has batch dim
+                    return jnp.broadcast_to(x, (n_trials,) + x.shape)
+                # Convert non-arrays to arrays with batch dim
+                arr = jnp.asarray(x)
+                if arr.shape == ():
+                    return jnp.broadcast_to(arr, (n_trials,))
+                if already_batched and len(arr.shape) > 0:
+                    return arr
+                return jnp.broadcast_to(arr, (n_trials,) + arr.shape)
+            return jax.tree.map(process_leaf, params)
+
+        # shared_params from training already have batch dim, but may have non-arrays
+        shared_params_vmap = ensure_batch_dim(shared_params, n_trials, already_batched=True)
+        # local_params don't have batch dim
+        local_params_batched = ensure_batch_dim(local_params, n_trials, already_batched=False)
+        merged_params = pr.ParameterTree.merge(shared_params_vmap, local_params_batched)
+
+        X_jnp = jnp.array(stacked_x)
+        out, (_, fullout) = self._batched_val_predict(merged_params, X_jnp, Z, keys)
+        out.block_until_ready()
+
+        pred_time = time.time() - t0
+        print(f"[vmap-trials] Batched prediction done ({pred_time:.1f}s)")
+
+        # out shape: (n_trials, n_samples, n_outputs)
+        # Split outputs per network and compute stats for each trial
+        t0 = time.time()
+        losses = []
+
+        for trial_idx in range(n_trials):
+            trial_out = np.asarray(out[trial_idx])  # (n_samples, n_outputs)
+
+            # Split by network (same as NetworkModel.split_outputs_per_network)
+            network_outputs = network_model.split_outputs_per_network(trial_out, n_samples)
+
+            # Compute stats for this trial
+            trial_stats = self._compute_stats_from_outputs(
+                predictor, network_outputs, n_samples
+            )
+            loss = self._compute_loss_from_stats(trial_stats)
+            losses.append(loss)
+
+        stats_time = time.time() - t0
+        print(f"[vmap-trials] Stats computation done ({stats_time:.1f}s)")
+
+        return losses
+
+    def _compute_stats_from_outputs(
+        self, predictor, network_outputs: list, n_samples: int
+    ) -> list[dict]:
+        """Compute network stats from pre-computed outputs (avoids re-prediction)."""
+        from biocomptools.toollib.networkprediction import _calculate_grid_stats
+
+        stats = []
+        for i, net_out in enumerate(network_outputs):
+            if i >= len(predictor.ground_truth):
+                continue
+            gt = predictor.ground_truth[i]
+            if gt is None:
+                stats.append({})
+                continue
+
+            # net_out shape: (n_samples, n_quantiles) - take median (middle quantile)
+            if net_out.ndim == 2:
+                yhat = net_out[:, net_out.shape[1] // 2]  # median
+            else:
+                yhat = net_out.flatten()[:n_samples]
+
+            # Compute basic stats
+            gt_vals = np.asarray(gt).flatten()[:n_samples]
+            residuals = yhat - gt_vals
+            rmse = float(np.sqrt(np.mean(residuals ** 2)))
+
+            stat = {'rmse': rmse}
+
+            # Compute grid stats if enabled
+            if predictor.enable_gridstats and i < len(predictor._aligned_x):
+                x_vals = np.asarray(predictor._aligned_x[i])
+                try:
+                    grid_params = {
+                        'hypercube_res': predictor.gridstats_hypercube_res,
+                        'hypercube_min': 0.0,
+                        'hypercube_max': predictor.gridstats_hypercube_max,
+                        'k': predictor.gridstats_k,
+                        'radius': predictor.gridstats_radius,
+                        'min_points': 1,
+                    }
+                    grid_stats = _calculate_grid_stats(
+                        yhat.reshape(-1, 1),
+                        gt_vals.reshape(-1, 1),
+                        x_vals,
+                        grid_params,
+                    )
+                    stat.update(grid_stats)
+                    # Also compute noise_relative_error if possible
+                    data_nrmse = np.std(gt_vals) / np.mean(np.abs(gt_vals) + 1e-8)
+                    if grid_stats.get('grid_nrmse') is not None and data_nrmse > 0:
+                        stat['noise_relative_error'] = grid_stats['grid_nrmse'] / data_nrmse
+                except Exception:
+                    pass
+
+            stats.append(stat)
+
+        return stats
+
+    def _compute_loss_from_stats(self, stats: list[dict]) -> float:
+        """Compute loss value from network stats based on validation_objective."""
         if self.validation_objective == "mean_rmse":
             valid_stats = [s for s in stats if s.get('rmse') is not None]
             if not valid_stats:
@@ -562,7 +773,6 @@ class HyperoptProgram(BaseModel):
             return float(np.mean([s['rmse'] for s in valid_stats]))
 
         elif self.validation_objective == "softmax_nrmse":
-            # soft-max of nRMSE (LogSumExp gives smooth approximation of max)
             nrmses = np.array([
                 s['grid_nrmse'] for s in stats
                 if s.get('grid_nrmse') is not None and np.isfinite(s.get('grid_nrmse'))
@@ -570,13 +780,11 @@ class HyperoptProgram(BaseModel):
             if len(nrmses) == 0:
                 return float('inf')
             alpha = self.validation_softmax_alpha
-            # logsumexp for numerical stability
             max_val = np.max(nrmses)
             soft_max = max_val + (1 / alpha) * np.log(np.sum(np.exp(alpha * (nrmses - max_val))))
             return float(soft_max)
 
         elif self.validation_objective == "geomean_nrmse":
-            # geometric mean of nRMSE (less sensitive to outliers than arithmetic mean)
             from scipy.stats import gmean
             nrmses = np.array([
                 s['grid_nrmse'] for s in stats
@@ -589,8 +797,6 @@ class HyperoptProgram(BaseModel):
             return float(gmean(nrmses))
 
         elif self.validation_objective == "geomean_nre":
-            # geometric mean of noise-relative error (model error / data noise floor)
-            # This is the ultimate metric: invariant to data quality and dimensionality
             from scipy.stats import gmean
             nres = np.array([
                 s['noise_relative_error'] for s in stats
@@ -601,6 +807,18 @@ class HyperoptProgram(BaseModel):
             if len(nres) == 0:
                 return float('inf')
             return float(gmean(nres))
+
+        elif self.validation_objective == "powermean_nre":
+            nres = np.array([
+                s['noise_relative_error'] for s in stats
+                if s.get('noise_relative_error') is not None
+                and np.isfinite(s.get('noise_relative_error'))
+                and s.get('noise_relative_error') > 0
+            ])
+            if len(nres) == 0:
+                return float('inf')
+            p = self.validation_powermean_p
+            return float(np.power(np.mean(np.power(nres, p)), 1.0 / p))
 
         else:
             raise ValueError(f"Unknown validation objective: {self.validation_objective}")
@@ -914,8 +1132,12 @@ class HyperoptProgram(BaseModel):
         if len(existing) >= self.n_top_models and loss >= existing[-1][0]:
             return  # not good enough
 
-        # create model
-        shared_params = get_shared_params(pickle.loads(pickle.dumps(tree_get(params, 0))))
+        # create model - extract single replicate if params have replicate dimension
+        try:
+            single_params = tree_get(params, 0)
+        except (IndexError, TypeError):
+            single_params = params
+        shared_params = get_shared_params(pickle.loads(pickle.dumps(single_params)))
         if shared_params is None:
             logger.warning(f"Trial {trial_number}: could not extract shared params")
             return
@@ -1056,6 +1278,201 @@ class HyperoptProgram(BaseModel):
             logger.exception(f"Trial {trial.number} failed: {e}")
             return float('inf')
 
+    def _build_per_trial_weights(self, all_hyperparams: list[dict]) -> Any:
+        """Build (n_trials, n_outputs) weight matrix from hyperparams for vmap-trials."""
+        import jax.numpy as jnp
+        from biocomp.train import expand_weights_to_outputs
+
+        per_trial_weights = []
+
+        for hyperparams in all_hyperparams:
+            if isinstance(self.training_set, DeferredNode):
+                resolved = self.training_set.construct(context=hyperparams)
+                with self.db_session as session:
+                    resolved.run_selectors(session)
+                    ndp_weights = {ndp.network_name: ndp.weight for ndp in resolved.content}
+            else:
+                ndp_weights = {}
+
+            weights = [ndp_weights.get(name, 1.0) for name in self._network_weight_mapping]
+            per_output_weights = expand_weights_to_outputs(weights, self._training_dman.get_networks())
+            per_trial_weights.append(per_output_weights)
+
+        return jnp.array(per_trial_weights)
+
+    def _run_vmap_trials_batch(
+        self,
+        trials: list[optuna.Trial],
+        training_conf: TrainingConfig,
+        compute_conf: ComputeConfig,
+    ) -> tuple[list[float], Any, list[dict], ComputeConfig]:
+        """Run multiple trials as vmapped pseudo-replicates."""
+        import jax
+
+        n_trials = len(trials)
+        trial_numbers = [t.number for t in trials]
+        print(f"[vmap-trials] === Batch of {n_trials} trials ({trial_numbers[0]}-{trial_numbers[-1]}) ===")
+        sys.stdout.flush()
+
+        all_hyperparams = [
+            {spec.name: spec.suggest(trial) for spec in self.hyperparams}
+            for trial in trials
+        ]
+        for i, hp in enumerate(all_hyperparams):
+            hp['seed'] = (self.seed or 0) + trials[i].number
+
+        batch_training_conf = training_conf.model_copy()
+        batch_training_conf.n_replicates = n_trials
+
+        # Compile and cache step on first batch (same structure, only weights differ)
+        if self._vmap_cached_step is None:
+            print(f"[vmap-trials] Compiling training step (first batch only)...")
+            sys.stdout.flush()
+            t_compile = time.time()
+            self._vmap_cached_step = compile_training_step(
+                dman=self._training_dman,
+                training_config=batch_training_conf,
+                compute_config=compute_conf,
+            )
+            self._vmap_stack = self._vmap_cached_step.stack
+            print(f"[vmap-trials] Compilation done ({time.time() - t_compile:.1f}s)")
+
+        print(f"[vmap-trials] Initializing {n_trials} parameter sets...")
+        t_init = time.time()
+        init_key = jax.random.PRNGKey(batch_training_conf.seed or 0)
+        params = jax.vmap(self._vmap_stack.init)(jax.random.split(init_key, n_trials))
+
+        per_trial_weights = self._build_per_trial_weights(all_hyperparams)
+        params.at(
+            "global/per_output_weights", per_trial_weights, tags=["non_grad", "local"], overwrite=True
+        )
+        print(f"[vmap-trials] Initialization done ({time.time() - t_init:.1f}s)")
+
+        print(f"[vmap-trials] Training {n_trials} trials in parallel...")
+        sys.stdout.flush()
+        t_train = time.time()
+        params, loss_history, _ = start(
+            dman=self._training_dman,
+            training_config=batch_training_conf,
+            compute_config=compute_conf,
+            init_params=params,
+            skip_weight_init=True,
+            cached_step=self._vmap_cached_step,
+        )
+        train_elapsed = time.time() - t_train
+        print(f"[vmap-trials] Training done ({train_elapsed:.1f}s)")
+
+        losses = []
+        if self.use_validation_loss:
+            print(f"[vmap-trials] Computing validation losses (batched)...")
+            t_val = time.time()
+            # Use batched validation - all trials at once with vmap
+            losses = self._compute_validation_losses_batched(params)
+            for i, loss in enumerate(losses):
+                print(f"[vmap-trials]   Trial {trial_numbers[i]}: loss={loss:.6f}")
+            print(f"[vmap-trials] Validation done ({time.time() - t_val:.1f}s total)")
+        else:
+            loss_arr = np.asarray(loss_history)
+            n_final = max(1, loss_arr.shape[0] // 20)
+            for i in range(n_trials):
+                rep_losses = loss_arr[:, i, :].mean(axis=-1)
+                loss = float(rep_losses[-n_final:].mean())
+                losses.append(loss)
+                print(f"[vmap-trials]   Trial {trial_numbers[i]}: train_loss={loss:.6f}")
+
+        print(
+            f"[vmap-trials] Batch complete: "
+            f"losses min={min(losses):.6f}, max={max(losses):.6f}, mean={np.mean(losses):.6f}"
+        )
+        sys.stdout.flush()
+
+        return losses, params, all_hyperparams, compute_conf
+
+    async def _run_vmap_trials_optimization(self):
+        """Run optimization using vmap-trials batching."""
+        print(f"[vmap-trials] Setting up optimization...")
+        existing = self._load_existing_study()
+        n_complete = 0
+        source_trials = None
+        if existing is not None:
+            completed = [t for t in existing.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            n_complete = len(completed)
+            print(f"[vmap-trials] Resuming study: {len(existing.trials)} trials ({n_complete} complete)")
+            if n_complete > 0:
+                print(f"[vmap-trials] Current best loss: {existing.best_value:.6f}")
+            if self.cmaes_warm_start and self.sampler in ("cmaes", "hybrid"):
+                source_trials = completed
+
+        sampler = self._create_sampler(n_complete, source_trials=source_trials)
+        pruner = optuna.pruners.NopPruner()
+
+        study = optuna.create_study(
+            study_name=self.study_name,
+            storage=self._get_storage_path(),
+            load_if_exists=True,
+            direction="minimize",
+            sampler=sampler,
+            pruner=pruner,
+        )
+
+        if isinstance(self.training_conf, DeferredNode):
+            training_conf = self.training_conf.construct(context={})
+        else:
+            training_conf = self.training_conf
+
+        if isinstance(self.compute_conf, DeferredNode):
+            compute_conf = self.compute_conf.construct(context={})
+        else:
+            compute_conf = self.compute_conf
+
+        if self.use_validation_loss and self._validation_predictor is None:
+            print(f"[vmap-trials] Preparing validation predictor...")
+            self._prepare_validation(compute_conf)
+
+        n_trials_per_batch = self.n_jobs
+        remaining = self.n_trials
+
+        print(
+            f"[vmap-trials] Starting optimization: {self.n_trials} trials in batches of {n_trials_per_batch}"
+        )
+
+        batch_num = 0
+        try:
+            while remaining > 0:
+                batch_num += 1
+                batch_size = min(n_trials_per_batch, remaining)
+                trials = [study.ask() for _ in range(batch_size)]
+
+                try:
+                    losses, params, all_hyperparams, comp_conf = self._run_vmap_trials_batch(
+                        trials, training_conf, compute_conf
+                    )
+
+                    for i, (trial, loss, hyperparams) in enumerate(zip(trials, losses, all_hyperparams)):
+                        study.tell(trial, loss)
+                        trial_params = tree_get(params, i)
+                        self._save_model_if_top(trial.number, loss, trial_params, comp_conf, hyperparams)
+
+                except Exception as e:
+                    print(f"[vmap-trials] ERROR: Batch failed: {e}")
+                    logger.exception(f"Vmap-trials batch failed: {e}")
+                    for trial in trials:
+                        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+
+                remaining -= batch_size
+                completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+                if completed:
+                    print(
+                        f"[vmap-trials] Progress: {len(completed)}/{self.n_trials} complete, "
+                        f"best={study.best_value:.6f}"
+                    )
+
+        except KeyboardInterrupt:
+            print("[vmap-trials] Interrupted. Progress saved.")
+
+        self._save_results(study)
+        print(f"[vmap-trials] Optimization complete. Results saved.")
+
     async def run(self):
         """Main entry point."""
         # handle info-only modes
@@ -1078,6 +1495,18 @@ class HyperoptProgram(BaseModel):
 
         # prepare data manager
         self._prepare_data_manager()
+
+        # vmap-trials mode validation and dispatch
+        if self.vmap_trials:
+            if not all(spec.name.startswith("dataweight_") for spec in self.hyperparams):
+                raise ValueError(
+                    "--vmap-trials only supports dataset weight optimization "
+                    "(all hyperparams must start with 'dataweight_')"
+                )
+            if self.n_jobs < 2:
+                raise ValueError("--vmap-trials requires --n-jobs >= 2")
+            await self._run_vmap_trials_optimization()
+            return
 
         # check for existing study and count completed trials
         existing = self._load_existing_study()

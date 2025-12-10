@@ -10,8 +10,8 @@ from scipy.stats import gmean
 
 from biocomp.plotutils import PlotData
 
-IN_TRAINING_COLOR = "#fff3cd"
-NOT_IN_TRAINING_COLOR = "#d4edda"
+IN_TRAINING_COLOR = "#EEEEEE"
+NOT_IN_TRAINING_COLOR = "#EEEEEE"
 GOOD_COLOR = "#28a745"
 BAD_COLOR = "#dc3545"
 RMSE_THRESHOLD = 0.1
@@ -165,6 +165,7 @@ class BenchmarkData(BaseModel):
             arr_nre = np.array(all_nres)
             self._aggregate_stats['mean_nre'] = float(np.mean(arr_nre))
             self._aggregate_stats['geomean_nre'] = float(gmean(arr_nre))
+            self._aggregate_stats['powermean_nre'] = float(np.sqrt(np.mean(arr_nre ** 2)))
 
     @property
     def loaded_model(self):
@@ -243,6 +244,10 @@ class BenchmarkData(BaseModel):
     def geomean_nre(self) -> Optional[float]:
         return self._aggregate_stats.get('geomean_nre')
 
+    @property
+    def powermean_nre(self) -> Optional[float]:
+        return self._aggregate_stats.get('powermean_nre')
+
 
 def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwargs):
     """Render summary header with model info, metrics, and per-item barplot."""
@@ -260,11 +265,11 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
 
     # Main metrics display - NRE as primary metric (falls back to nRMSE if unavailable)
     y_pos = 0.75
-    if bench.geomean_nre is not None:
-        color = GOOD_COLOR if bench.geomean_nre < NRE_THRESHOLD else BAD_COLOR
-        ax.text(0.32, y_pos, f"{bench.geomean_nre:.2f}x", transform=ax.transAxes,
+    if bench.powermean_nre is not None:
+        color = GOOD_COLOR if bench.powermean_nre < NRE_THRESHOLD else BAD_COLOR
+        ax.text(0.32, y_pos, f"{bench.powermean_nre:.2f}x", transform=ax.transAxes,
                 fontsize=28, va='center', ha='center', fontweight='bold', color=color)
-        ax.text(0.32, y_pos - 0.12, "Geomean NRE", transform=ax.transAxes,
+        ax.text(0.32, y_pos - 0.12, "RMS NRE (p=2)", transform=ax.transAxes,
                 fontsize=10, va='center', ha='center', color='gray')
     elif bench.geomean_nrmse is not None:
         color = GOOD_COLOR if bench.geomean_nrmse < NRMSE_THRESHOLD else BAD_COLOR
@@ -313,30 +318,33 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
         ], loc='lower right', fontsize=7)
 
 
-def render_metrics_panel(ax: matplotlib.axes.Axes, item: BenchmarkItem, **_kwargs):
+def render_metrics_panel(ax: matplotlib.axes.Axes, item: BenchmarkItem, bench: 'BenchmarkData' = None, **_kwargs):
     """Render metrics panel for a single benchmark item."""
     ax.axis('off')
 
-    bg_color = IN_TRAINING_COLOR if item.in_training else NOT_IN_TRAINING_COLOR
     ax.add_patch(FancyBboxPatch(
         (0, 0), 1, 1, transform=ax.transAxes, boxstyle="round,pad=0.02",
-        facecolor=bg_color, edgecolor='#ccc', linewidth=1, clip_on=False))
+        facecolor=NOT_IN_TRAINING_COLOR, edgecolor='#ccc', linewidth=1, clip_on=False))
+
+    # Get average NRE for comparison (use powermean if available)
+    avg_nre = bench.powermean_nre if bench else None
+    avg_nrmse = bench.mean_nrmse if bench else None
 
     # NRE as primary metric if available, otherwise nRMSE
     if item.nre is not None and np.isfinite(item.nre):
-        ncolor = GOOD_COLOR if item.nre < NRE_THRESHOLD else BAD_COLOR
+        ncolor = GOOD_COLOR if (avg_nre and item.nre < avg_nre) else (BAD_COLOR if avg_nre else '#333')
         ax.text(0.5, 0.78, f"{item.nre:.2f}x", transform=ax.transAxes,
                 fontsize=18, va='center', ha='center', fontweight='bold', color=ncolor)
         ax.text(0.5, 0.65, "NRE", transform=ax.transAxes,
                 fontsize=7, va='center', ha='center', color='gray')
     elif item.nrmse is not None:
-        ncolor = GOOD_COLOR if item.nrmse < NRMSE_THRESHOLD else BAD_COLOR
+        ncolor = GOOD_COLOR if (avg_nrmse and item.nrmse < avg_nrmse) else (BAD_COLOR if avg_nrmse else '#333')
         ax.text(0.5, 0.78, f"{item.nrmse:.3f}", transform=ax.transAxes,
                 fontsize=18, va='center', ha='center', fontweight='bold', color=ncolor)
         ax.text(0.5, 0.65, "nRMSE", transform=ax.transAxes,
                 fontsize=7, va='center', ha='center', color='gray')
 
-    # Secondary metrics: nRMSE, data_nrmse, SNR
+    # Secondary metrics
     y_offset = 0.50
     if item.nrmse is not None:
         ax.text(0.5, y_offset, f"nRMSE={item.nrmse:.3f}", transform=ax.transAxes,
@@ -350,6 +358,13 @@ def render_metrics_panel(ax: matplotlib.axes.Axes, item: BenchmarkItem, **_kwarg
 
     if item.snr is not None:
         ax.text(0.5, y_offset, f"SNR={item.snr:.1f}dB", transform=ax.transAxes,
+                fontsize=8, va='center', ha='center', family='monospace', color='#555')
+        y_offset -= 0.12
+
+    # Dimensionality
+    ndim = item.gt_data.x.shape[1] if item.gt_data and item.gt_data.x is not None else None
+    if ndim is not None:
+        ax.text(0.5, y_offset, f"{ndim}D", transform=ax.transAxes,
                 fontsize=8, va='center', ha='center', family='monospace', color='#555')
 
     status = "In training" if item.in_training else "Not in training"

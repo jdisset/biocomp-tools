@@ -45,19 +45,23 @@ def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) 
     return np.vstack([g.ravel() for g in grid]).T
 
 
+SPLIT_HALF_SUBSET_SIZE = 50000
+
+
 def _compute_split_half_nrmse(
     latent_x: NdArray,
     latent_gt: NdArray,
     params: Dict[str, Any],
-    n_bootstraps: int = 3,
+    n_bootstraps: int = 5,
     seed: int = 42,
 ) -> float:
     """
-    Compute intrinsic noise floor via split-half nRMSE.
+    Compute intrinsic noise floor via bootstrapped split-half nRMSE.
 
-    Splits data randomly into two halves, computes local means for each half
-    independently at shared grid points, then measures the nRMSE between them.
-    This estimates the irreducible noise in the data.
+    For each bootstrap iteration, draws two independent subsets (with replacement)
+    of fixed size, computes local means for each at shared grid points, then
+    measures the nRMSE between them. Uses fixed subset size for fair comparison
+    across datasets of different sizes.
     """
     rng = np.random.RandomState(seed)
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
@@ -66,7 +70,6 @@ def _compute_split_half_nrmse(
     if n_points < 200:
         return np.nan
 
-    # Filter valid points
     valid_mask = np.all(np.isfinite(latent_x), axis=1) & np.all(np.isfinite(latent_gt), axis=1)
     latent_x = np.asarray(latent_x[valid_mask])
     latent_gt = np.asarray(latent_gt[valid_mask])
@@ -75,7 +78,6 @@ def _compute_split_half_nrmse(
     if n_points < 200:
         return np.nan
 
-    # Create shared grid
     grid = make_hypercube(
         latent_x.shape[1],
         res=params['hypercube_res'],
@@ -83,75 +85,47 @@ def _compute_split_half_nrmse(
         xmax=params['hypercube_max'],
     )
 
+    subset_size = min(SPLIT_HALF_SUBSET_SIZE, n_points)
+
     scores = []
     for _ in range(n_bootstraps):
-        perm = rng.permutation(n_points)
-        mid = n_points // 2
-        idx_a, idx_b = perm[:mid], perm[mid : 2 * mid]
+        idx_a = rng.choice(n_points, size=subset_size, replace=True)
+        idx_b = rng.choice(n_points, size=subset_size, replace=True)
 
         x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
         x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
 
-        # Build separate trees for each half
         tree_a = build_tree(x_a)
         tree_b = build_tree(x_b)
 
-        # Get KNN for each half at the SAME grid points
         indices_a, weights_a = get_gaussian_weighted_knn(
-            grid,
-            tree=tree_a,
-            k=params['k'],
-            min_points=params['min_points'],
-            adaptive_sigma=True,
-            max_radius=params['radius'],
-            normed_w=False,
+            grid, tree=tree_a, k=params['k'], min_points=params['min_points'],
+            adaptive_sigma=True, max_radius=params['radius'], normed_w=False,
         )
         indices_b, weights_b = get_gaussian_weighted_knn(
-            grid,
-            tree=tree_b,
-            k=params['k'],
-            min_points=params['min_points'],
-            adaptive_sigma=True,
-            max_radius=params['radius'],
-            normed_w=False,
+            grid, tree=tree_b, k=params['k'], min_points=params['min_points'],
+            adaptive_sigma=True, max_radius=params['radius'], normed_w=False,
         )
 
-        # Effective sample sizes
         n_eff_a = np.nansum(weights_a, axis=1, keepdims=True)
         n_eff_b = np.nansum(weights_b, axis=1, keepdims=True)
 
-        # Normalize weights
         with np.errstate(divide='ignore', invalid='ignore'):
             norm_weights_a = weights_a / n_eff_a
             norm_weights_b = weights_b / n_eff_b
 
-        # Compute local means and stds for each half using their own indices
         _, std_a, mean_a = knn_stats(
-            grid,
-            y_a,
-            iw=(indices_a, norm_weights_a),
-            stats=['iw', 'std', 'mean'],
-            k=params['k'],
-            min_points=params['min_points'],
+            grid, y_a, iw=(indices_a, norm_weights_a), stats=['iw', 'std', 'mean'],
+            k=params['k'], min_points=params['min_points'],
         )
         _, std_b, mean_b = knn_stats(
-            grid,
-            y_b,
-            iw=(indices_b, norm_weights_b),
-            stats=['iw', 'std', 'mean'],
-            k=params['k'],
-            min_points=params['min_points'],
+            grid, y_b, iw=(indices_b, norm_weights_b), stats=['iw', 'std', 'mean'],
+            k=params['k'], min_points=params['min_points'],
         )
 
-        # Compute nRMSE between the two halves' local means
-        # Use pooled local variance as denominator
-        local_var_a = std_a**2
-        local_var_b = std_b**2
-        pooled_var = (local_var_a + local_var_b) / 2.0
-
+        pooled_var = (std_a**2 + std_b**2) / 2.0
         sq_error = (mean_a - mean_b) ** 2
 
-        # Use same stabilization as _calculate_grid_stats
         global_var = np.var(latent_gt)
         PRIOR_STRENGTH = 100.0
         n_eff_pooled = (n_eff_a + n_eff_b) / 2.0
@@ -165,9 +139,10 @@ def _compute_split_half_nrmse(
 
         norm_sq_error = sq_error / (safe_denom**2)
 
-        # Weight by effective sample size (capped)
         WEIGHT_CAP = 0.1 * params['k']
-        capped_weights = np.minimum(n_eff_pooled, WEIGHT_CAP)
+        capped_weights = np.broadcast_to(
+            np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape
+        )
 
         weights_flat = capped_weights.flatten()
         norm_sq_flat = norm_sq_error.flatten()
