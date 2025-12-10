@@ -27,6 +27,8 @@ dependencies = [
 	"psutil",
 	"gspread",
 	"pypdf",
+	"loky",
+	"cloudpickle",
 ]
 
 

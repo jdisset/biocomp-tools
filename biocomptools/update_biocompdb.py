@@ -695,7 +695,13 @@ def _w_proc_xp(worker_args: ExperimentWorkerArgs) -> ExperimentWorkerResult:
                         f"Error linking recipe for {dfile.file} (xp {xp.name}): {e}",
                     )
                 )
-    return xp.name, xp, [c.model_dump() for c in cal_map.values()], local_errors
+    # Include data_files explicitly since Relationship fields aren't included by model_dump()
+    cal_dicts = []
+    for c in cal_map.values():
+        cal_d = c.model_dump()
+        cal_d['data_files'] = [df.model_dump() for df in c.data_files]
+        cal_dicts.append(cal_d)
+    return xp.name, xp, cal_dicts, local_errors
 
 
 class BiocompDBUpdater(BaseModel):
@@ -1248,7 +1254,10 @@ class BiocompDBUpdater(BaseModel):
                                         f"Err in xp worker {xp_name_ctx} [{err_k}]: {err_m}"
                                     )
                                 for cal_d in new_cal_ds:
+                                    # Extract data_files before validation (Relationship fields aren't auto-validated)
+                                    df_dicts = cal_d.pop('data_files', [])
                                     cal_o = md.Calibration.model_validate(cal_d)
+                                    cal_o.data_files = [md.DataFile.model_validate(df_d) for df_d in df_dicts]
                                     if cal_o.fullname in cals_map:
                                         cals_map[cal_o.fullname].data_files.extend(
                                             f
@@ -1341,11 +1350,20 @@ class BiocompDBUpdater(BaseModel):
             if not self.no_figures:
                 figs_list, plots_list, fig_metrics_list = self._load_figs(progress)
 
+            # Extract recipes and networks from experiments (relationships aren't auto-persisted)
+            all_recipes = [r for xp in xps_map.values() for r in xp.recipes]
+            all_networks = [n for r in all_recipes for n in r.networks]
+            all_datafiles = [df for cal in cals_map.values() for df in cal.data_files]
+            self._logger.info(f"Extracted {len(all_recipes)} recipes, {len(all_networks)} networks, {len(all_datafiles)} datafiles")
+
             items_commit = [
                 i
                 for grp in [
                     list(xps_map.values()),
                     list(cals_map.values()),
+                    all_recipes,
+                    all_networks,
+                    all_datafiles,
                     models_list,
                     datasets_list,
                     dataset_associations_list,

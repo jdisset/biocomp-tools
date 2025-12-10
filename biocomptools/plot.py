@@ -90,6 +90,147 @@ warnings.filterwarnings("ignore", message="os.fork()", module="subprocess")
 
 logger = get_logger(__name__)
 
+
+def _detached_get_xy(pdata):
+    """Dummy get_xy for detached LazyPlotData - data should already be evaluated."""
+    raise RuntimeError("LazyPlotData has been detached for pickling - data should already be evaluated")
+
+
+def _detach_lazy_plot_data(obj, visited=None):
+    """Recursively find LazyPlotData objects and detach their closures for pickling.
+
+    LazyPlotData.get_xy closures capture NetworkPrediction instances which hold
+    BiocompModel with JAX Device objects that cannot be pickled. This function:
+    1. Forces evaluation of lazy data (populates xval/yval)
+    2. Replaces get_xy with a dummy function (no closure references)
+
+    After this, the LazyPlotData contains all the data it needs and is picklable.
+    """
+    from biocomp.plotutils import LazyPlotData
+
+    if visited is None:
+        visited = set()
+
+    obj_id = id(obj)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    # Check if this is a LazyPlotData
+    if isinstance(obj, LazyPlotData):
+        # Force evaluation if not already done
+        if obj.xval is None:
+            try:
+                _ = obj.x
+                _ = obj.y
+            except Exception:
+                pass  # Data may not be available, that's OK
+        # Replace get_xy closure with dummy
+        obj.get_xy = _detached_get_xy
+        return
+
+    # Recurse into containers
+    try:
+        if isinstance(obj, dict):
+            for v in obj.values():
+                _detach_lazy_plot_data(v, visited)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                _detach_lazy_plot_data(v, visited)
+        elif hasattr(obj, '__dict__'):
+            for v in vars(obj).values():
+                _detach_lazy_plot_data(v, visited)
+    except Exception:
+        pass  # Skip objects that can't be traversed (e.g., Pydantic internal types)
+
+
+def _convert_jax_to_numpy_inplace(obj, visited=None):
+    """Recursively convert JAX arrays to numpy arrays in-place for pickling.
+
+    Also removes JAX Device objects which cannot be pickled.
+    """
+    if visited is None:
+        visited = set()
+
+    obj_id = id(obj)
+    if obj_id in visited:
+        return obj
+    visited.add(obj_id)
+
+    try:
+        from jax import Array as JaxArray
+        from jax._src.xla_bridge import Device
+    except ImportError:
+        try:
+            from jax import Array as JaxArray
+            Device = None
+        except ImportError:
+            return obj
+
+    # check for JAX Device - return None to remove from containers
+    if Device is not None and isinstance(obj, Device):
+        return None
+
+    # convert JAX Array to numpy
+    if isinstance(obj, JaxArray):
+        return np.asarray(obj)
+
+    # also check for jax.Array via string (in case import differs)
+    type_name = type(obj).__module__ + '.' + type(obj).__name__
+    if 'jax' in type_name.lower() and 'device' in type_name.lower():
+        return None
+    if 'jax' in type_name.lower() and 'array' in type_name.lower():
+        try:
+            return np.asarray(obj)
+        except Exception:
+            pass
+
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            converted = _convert_jax_to_numpy_inplace(v, visited)
+            if converted is None and v is not None:
+                del obj[k]  # remove Device entries
+            else:
+                obj[k] = converted
+    elif isinstance(obj, list):
+        i = 0
+        while i < len(obj):
+            converted = _convert_jax_to_numpy_inplace(obj[i], visited)
+            if converted is None and obj[i] is not None:
+                obj.pop(i)  # remove Device entries
+            else:
+                obj[i] = converted
+                i += 1
+    elif isinstance(obj, tuple):
+        # tuples are immutable, return converted tuple (filtering out Devices)
+        converted = [_convert_jax_to_numpy_inplace(v, visited) for v in obj]
+        return tuple(c for c, orig in zip(converted, obj) if not (c is None and orig is not None))
+    elif hasattr(obj, '__dict__'):
+        for attr_name in list(vars(obj).keys()):
+            try:
+                val = getattr(obj, attr_name)
+                converted = _convert_jax_to_numpy_inplace(val, visited)
+                if converted is None and val is not None:
+                    # can't delete attribute, set to None
+                    setattr(obj, attr_name, None)
+                elif converted is not val:
+                    setattr(obj, attr_name, converted)
+            except (AttributeError, TypeError):
+                pass
+    elif hasattr(obj, '__slots__'):
+        for slot in obj.__slots__:
+            try:
+                val = getattr(obj, slot)
+                converted = _convert_jax_to_numpy_inplace(val, visited)
+                if converted is None and val is not None:
+                    setattr(obj, slot, None)
+                elif converted is not val:
+                    setattr(obj, slot, converted)
+            except (AttributeError, TypeError):
+                pass
+
+    return obj
+
 DEFAULT_TYPES = [
     Figure,
     PlotConfig,
@@ -217,6 +358,11 @@ def run_figure(f, **kw):
     return str(opath)
 
 
+def _run_figure_worker(fig, overwrite):
+    """Worker function for ProcessPoolExecutor - must be at module level for pickling."""
+    return run_figure(fig, overwrite=overwrite)
+
+
 class PlotJob(BaseModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
@@ -288,28 +434,11 @@ class PlotJob(BaseModel):
             logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
 
         elif self.parallel_mode == 'ray':
-            logger.debug(f"Using ray with {self.nworkers} workers")
-            import ray
+            logger.debug(f"Using joblib with {self.nworkers} workers")
+            from joblib import Parallel, delayed
+            import cloudpickle
 
-            time_ray_start = time.time()
-
-            if not ray.is_initialized():
-                context = ray.init(
-                    num_cpus=self.nworkers,
-                    runtime_env={
-                        'env_vars': {
-                            'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-                            'JAX_PLATFORMS': 'cpu',
-                        }
-                    },
-                )
-                logger.info(f"Ray context: {context}")
-                logger.info(f"Ray dashboard at: {context.dashboard_url}")
-
-            def wait_iterator(task_refs):
-                while task_refs:
-                    done, task_refs = ray.wait(task_refs, num_returns=1)
-                    yield ray.get(done[0])
+            time_start = time.time()
 
             batch_idx = 0
             num_batches = (total_figures + self.max_batch_size - 1) // self.max_batch_size
@@ -329,6 +458,7 @@ class PlotJob(BaseModel):
 
                 batch_start += batch_len
 
+                # construct figures in main process (handles JAX arrays)
                 constructed_figures = [
                     construct_figure(fig, output_path_override=temp_paths[batch_order_indices[j]])
                     for j, fig in enumerate(
@@ -340,26 +470,53 @@ class PlotJob(BaseModel):
                     )
                 ]
 
-                fig_refs = ray.put(constructed_figures)
+                # convert JAX arrays to numpy and detach LazyPlotData closures before pickling
+                for fig in constructed_figures:
+                    _convert_jax_to_numpy_inplace(fig)
+                    _detach_lazy_plot_data(fig)
 
-                @ray.remote
-                def run_figure_ray(i, fig_regs=fig_refs):
-                    fig = ray.get(fig_regs)[i]
-                    return run_figure(fig, overwrite=overwrite)
+                # try parallel execution with fallback to sequential if pickling fails
+                parallel_figs, sequential_figs, sequential_indices = [], [], []
+                for i, fig in enumerate(constructed_figures):
+                    try:
+                        cloudpickle.dumps(fig)
+                        parallel_figs.append(fig)
+                    except (TypeError, AttributeError) as e:
+                        logger.debug(f"Figure {i} cannot be pickled ({e}), running sequentially")
+                        sequential_figs.append(fig)
+                        sequential_indices.append(i)
 
-                task_refs = [run_figure_ray.remote(i) for i in range(len(constructed_figures))]
+                results = [None] * len(constructed_figures)
 
-                time_ray_work_submit = time.time()
-                logger.debug(f"Ray work submitted in {time_ray_work_submit - time_ray_start:.2f}s")
-
-                results = list(
-                    tqdm(
-                        wait_iterator(task_refs),
-                        total=batch_len,
-                        desc=f'Generating figures in batch {batch_idx}/{num_batches}',
+                # run picklable figures in parallel
+                if parallel_figs:
+                    parallel_results = Parallel(n_jobs=self.nworkers, backend='loky')(
+                        delayed(_run_figure_worker)(fig, overwrite)
+                        for fig in tqdm(
+                            parallel_figs,
+                            total=len(parallel_figs),
+                            desc=f'Parallel figures in batch {batch_idx}/{num_batches}',
+                        )
                     )
-                )
+                    j = 0
+                    for i in range(len(constructed_figures)):
+                        if i not in sequential_indices:
+                            results[i] = parallel_results[j]
+                            j += 1
+
+                # run unpicklable figures sequentially
+                if sequential_figs:
+                    logger.info(f"Running {len(sequential_figs)} figures sequentially (not picklable)")
+                    for i, fig in zip(
+                        sequential_indices,
+                        tqdm(sequential_figs, desc=f'Sequential figures in batch {batch_idx}/{num_batches}'),
+                    ):
+                        results[i] = run_figure(fig, overwrite=overwrite)
+
                 out_paths.extend(results)
+
+                time_batch_end = time.time()
+                logger.debug(f"Batch {batch_idx} completed in {time_batch_end - time_start:.2f}s")
 
                 fpaths = '\n  - ' + '\n  - '.join(results)
                 logger.debug(f"Generated {len(results)} figures:{fpaths}")
