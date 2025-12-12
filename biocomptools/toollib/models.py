@@ -535,6 +535,7 @@ class NetworkDataPair(BiocompDB, table=True):
     datafile: Optional["DataFile"] = Relationship()
 
     _weight: float = 1.0  # runtime-only, not in DB
+    _dataset_name: str | None = None  # runtime-only, tracks parent dataset for hyperopt
 
     @property
     def weight(self) -> float:
@@ -543,6 +544,14 @@ class NetworkDataPair(BiocompDB, table=True):
     @weight.setter
     def weight(self, value: float):
         self._weight = value
+
+    @property
+    def dataset_name(self) -> str | None:
+        return self._dataset_name
+
+    @dataset_name.setter
+    def dataset_name(self, value: str | None):
+        self._dataset_name = value
 
     def __hash__(self):
         return hash((self.network_name, self.datafile_path))

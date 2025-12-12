@@ -1,10 +1,10 @@
 from pydantic.functional_validators import BeforeValidator
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
 import jax.numpy as jnp
 from biocomp.plotutils import PlotData, LazyPlotData, get_reordered_protein_names
-from biocomp.datautils import DataRescaler, IdentityRescaler
+from biocomp.datautils import IdentityRescaler
 from biocomptools.toollib.common import make_pretty_input_names
 from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
@@ -17,7 +17,6 @@ import time
 
 # from concurrent.futures import ProcessPoolExecutor as PoolExecutor, as_completed
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
-from functools import partial
 
 logger = get_logger(__name__)
 
@@ -99,12 +98,22 @@ def _compute_split_half_nrmse(
         tree_b = build_tree(x_b)
 
         indices_a, weights_a = get_gaussian_weighted_knn(
-            grid, tree=tree_a, k=params['k'], min_points=params['min_points'],
-            adaptive_sigma=True, max_radius=params['radius'], normed_w=False,
+            grid,
+            tree=tree_a,
+            k=params['k'],
+            min_points=params['min_points'],
+            adaptive_sigma=True,
+            max_radius=params['radius'],
+            normed_w=False,
         )
         indices_b, weights_b = get_gaussian_weighted_knn(
-            grid, tree=tree_b, k=params['k'], min_points=params['min_points'],
-            adaptive_sigma=True, max_radius=params['radius'], normed_w=False,
+            grid,
+            tree=tree_b,
+            k=params['k'],
+            min_points=params['min_points'],
+            adaptive_sigma=True,
+            max_radius=params['radius'],
+            normed_w=False,
         )
 
         n_eff_a = np.nansum(weights_a, axis=1, keepdims=True)
@@ -115,12 +124,20 @@ def _compute_split_half_nrmse(
             norm_weights_b = weights_b / n_eff_b
 
         _, std_a, mean_a = knn_stats(
-            grid, y_a, iw=(indices_a, norm_weights_a), stats=['iw', 'std', 'mean'],
-            k=params['k'], min_points=params['min_points'],
+            grid,
+            y_a,
+            iw=(indices_a, norm_weights_a),
+            stats=['iw', 'std', 'mean'],
+            k=params['k'],
+            min_points=params['min_points'],
         )
         _, std_b, mean_b = knn_stats(
-            grid, y_b, iw=(indices_b, norm_weights_b), stats=['iw', 'std', 'mean'],
-            k=params['k'], min_points=params['min_points'],
+            grid,
+            y_b,
+            iw=(indices_b, norm_weights_b),
+            stats=['iw', 'std', 'mean'],
+            k=params['k'],
+            min_points=params['min_points'],
         )
 
         pooled_var = (std_a**2 + std_b**2) / 2.0
@@ -140,9 +157,7 @@ def _compute_split_half_nrmse(
         norm_sq_error = sq_error / (safe_denom**2)
 
         WEIGHT_CAP = 0.1 * params['k']
-        capped_weights = np.broadcast_to(
-            np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape
-        )
+        capped_weights = np.broadcast_to(np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape)
 
         weights_flat = capped_weights.flatten()
         norm_sq_flat = norm_sq_error.flatten()
@@ -533,7 +548,7 @@ class NetworkPrediction(DataSource):
 
         # validate and fix input dimensions for each network
         fixed_predict_at = []
-        for i, (x, net) in enumerate(zip(self.predict_at, self.network_model.network)):
+        for i, (x, net) in enumerate(zip(self.predict_at, self.network_model.network, strict=True)):
             expected_inputs = net.nb_inputs
             actual_inputs = x.shape[1] if x.ndim > 1 else 1
             if actual_inputs > expected_inputs:
@@ -598,7 +613,7 @@ class NetworkPrediction(DataSource):
 
         new_predict_at = []
         new_gt = []
-        for i, (x, gt) in enumerate(zip(self.predict_at, self.ground_truth)):
+        for x, gt in zip(self.predict_at, self.ground_truth, strict=True):
             order = rng.permutation(len(x))
             new_predict_at.append(x[order])
             new_gt.append(gt[order] if gt is not None else None)
@@ -642,8 +657,9 @@ class NetworkPrediction(DataSource):
         aligned_predict_at = []
         aligned_ground_truth = []
 
-        for i, (x, gt) in enumerate(zip(self.predict_at, self.ground_truth)):
-            network = self.network_model.network[i]
+        for i, (x, gt, network) in enumerate(
+            zip(self.predict_at, self.ground_truth, self.network_model.network, strict=True)
+        ):
             inverse_order = self._get_inverse_input_order(network)
 
             # Reorder x columns from alphabetical to network order if needed
@@ -768,7 +784,9 @@ class NetworkPrediction(DataSource):
         assert isinstance(self._aligned_ground_truth, list)
         assert isinstance(self._aligned_x, list)
 
-        for i, (network_output, aligned_x) in enumerate(zip(network_outputs, self._aligned_x)):
+        for i, (network_output, aligned_x) in enumerate(
+            zip(network_outputs, self._aligned_x, strict=True)
+        ):
             effective_max_evals = min(max_evals, len(aligned_x))
 
             # store prediction results
@@ -1046,6 +1064,106 @@ class NetworkPrediction(DataSource):
 
         return all_stats
 
+    def compute_stats_from_outputs(self, network_outputs: List[NdArray]) -> List[Dict[str, Any]]:
+        """Compute stats from externally-provided network outputs (e.g., from batched predictions).
+
+        This is the canonical stats computation - uses same logic as _calculate_all_network_stats.
+        Useful for hyperopt batched validation where outputs come from vmapped predictions.
+        """
+        from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
+
+        rescaler = (
+            self.network_model.model.rescaler if not self.already_latent else IdentityRescaler()
+        )
+        gridstats_params = {
+            'hypercube_res': self.gridstats_hypercube_res,
+            'hypercube_min': self.gridstats_hypercube_min,
+            'hypercube_max': self.gridstats_hypercube_max,
+            'k': self.gridstats_k,
+            'radius': self.gridstats_radius,
+            'min_points': self.gridstats_min_points,
+        }
+
+        # Build tasks
+        tasks = []
+        for i, network in enumerate(self.network_model.network):
+            if i >= len(network_outputs):
+                break
+            yhat = network_outputs[i]
+            gt = (
+                self._aligned_ground_truth[i]
+                if self._aligned_ground_truth and i < len(self._aligned_ground_truth)
+                else None
+            )
+            x = self._aligned_x[i] if self._aligned_x and i < len(self._aligned_x) else None
+
+            _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
+            network_name = getattr(network, 'name', f"Network_{i}")
+            nb_points_in_eval = len(self.predict_at[i]) if self.predict_at else yhat.shape[0]
+
+            all_outputs = set(network.get_output_proteins())
+            input_proteins = set(network.get_inverted_input_proteins())
+            n_dependent_outputs = len(all_outputs - input_proteins)
+
+            network_info = {
+                'network_name': network_name,
+                'n_dependent_outputs': n_dependent_outputs,
+            }
+            if self.per_prediction_info is not None and i < len(self.per_prediction_info):
+                network_info['extra_prediction_info'] = self.per_prediction_info[i]
+
+            tasks.append({
+                'network_idx': i,
+                'yhat': yhat,
+                'gt': gt,
+                'x': x,
+                'dependent_output_pos': dependent_output_pos,
+                'nb_points_in_eval': nb_points_in_eval,
+                'rescaler': rescaler,
+                'gridstats_params': gridstats_params,
+                'network_info': network_info,
+                'enable_gridstats': self.enable_gridstats,
+            })
+
+        # Process tasks (parallel if n_stats_workers > 1)
+        all_stats = [None] * len(tasks)
+        show_progress = self.verbose and len(tasks) > 3
+
+        if self.n_stats_workers > 1 and len(tasks) > 1:
+            from tqdm import tqdm
+            with PoolExecutor(max_workers=self.n_stats_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_calculate_single_network_stats, **task): task['network_idx']
+                    for task in tasks
+                }
+                futures_iter = as_completed(future_to_idx)
+                if show_progress:
+                    futures_iter = tqdm(
+                        futures_iter, total=len(tasks), desc="Stats", leave=False, ncols=80
+                    )
+                for future in futures_iter:
+                    idx = future_to_idx[future]
+                    try:
+                        all_stats[idx] = future.result()
+                    except Exception as e:
+                        net_name = tasks[idx]['network_info'].get('network_name', f'Network_{idx}')
+                        logger.warning(f"Stats computation failed for network {net_name}: {e}")
+                        all_stats[idx] = {'network_name': net_name, 'error': str(e)}
+        else:
+            from tqdm import tqdm
+            task_iter = tasks
+            if show_progress:
+                task_iter = tqdm(tasks, desc="Stats", leave=False, ncols=80)
+            for task in task_iter:
+                idx = task['network_idx']
+                try:
+                    all_stats[idx] = _calculate_single_network_stats(**task)
+                except Exception as e:
+                    net_name = task['network_info'].get('network_name', f'Network_{idx}')
+                    logger.warning(f"Stats computation failed for network {net_name}: {e}")
+                    all_stats[idx] = {'network_name': net_name, 'error': str(e)}
+        return all_stats
+
     def get_network_stats(
         self,
         with_shared_params: Optional[pr.ParameterTree] = None,
@@ -1219,7 +1337,7 @@ class NetworkPrediction(DataSource):
         assert len(self.collection_points) == len(self._output_shapes)
 
         in_sizes, out_sizes = [], []
-        for inshapes, outshapes in zip(self._input_shapes, self._output_shapes):
+        for inshapes, outshapes in zip(self._input_shapes, self._output_shapes, strict=True):
             in_sizes.append(np.sum([np.prod(s) for s in inshapes]))
             out_sizes.append(np.sum([np.prod(s) for s in outshapes]))
         in_offsets = np.cumsum([0] + in_sizes[:-1])
@@ -1387,7 +1505,7 @@ class NetworkPrediction(DataSource):
         )
 
         # evaluate all plot data
-        for i, data in enumerate(lazy_data):
+        for data in lazy_data:
             data.set_xy()
 
         return lazy_data

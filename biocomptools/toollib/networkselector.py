@@ -700,6 +700,10 @@ class NetworkFilter(NetworkSet):
             if self.weight is not None:
                 for ndp in self.content:
                     ndp.weight = self.weight
+            # Track dataset name for hyperopt weight mapping
+            if self.name is not None:
+                for ndp in self.content:
+                    ndp.dataset_name = self.name
             self._size_diff = len(self.source_set.content) - len(self.content)
             self.update_name()
         except Exception as e:

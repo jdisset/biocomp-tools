@@ -1,1275 +1,454 @@
-"""
-Optuna-based hyperparameter optimization for biocompiler training.
+"""Optuna-based hyperparameter optimization for biocomp training.
 
-This tool integrates with the Dracon configuration system, allowing you to define
-hyperparameter search spaces and training settings in YAML config files.
-
-Progress is automatically saved to SQLite after each trial, so you can:
-- Stop the script at any time (Ctrl+C) and resume later
-- Run multiple sessions that accumulate results
-- Query the database directly for analysis
+Progress saved to SQLite after each trial for resume support.
+Run multiple processes on different GPUs for parallelism.
 
 Usage:
-    # Run with a config file
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset
-
-    # Override parameters from CLI
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.n_trials 500
-
-    # Check status of existing study
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.show_best true
-
-    # Launch Optuna dashboard web interface
     biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.dashboard true
-
-    # Launch dashboard on custom port
-    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset --define.dashboard true --define.dashboard_port 9000
-
-    # Resume existing study (just run the same command again)
-    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset
-
-    # Dataset weight optimization with validation-based objective
-    biocomp-hyperopt +biocomp-jobs/hyperopt/dataset_weights --use_validation_loss true
-
-    # Disable model saving (default keeps top 10)
-    biocomp-hyperopt +biocomp-jobs/hyperopt/fullset ++n_top_models 0
-
-Model Saving:
-    By default, the top 10 models (by loss) are saved as BiocompModel pickle files
-    in {output_dir}/{study_name}/top_models/. This allows you to use the best
-    hyperparameter configurations without re-training. Worse models are automatically
-    evicted as better ones are found. Set n_top_models=0 to disable.
-
-Parallel Execution:
-    # Run multiple processes manually (each in separate terminal/tmux pane)
-    # They coordinate via shared SQLite storage automatically
-    biocomp-hyperopt +hyperopt/fullset
-    biocomp-hyperopt +hyperopt/fullset  # in another terminal
-
-    # For multi-GPU setups
-    CUDA_VISIBLE_DEVICES=0 biocomp-hyperopt +hyperopt/fullset
-    CUDA_VISIBLE_DEVICES=1 biocomp-hyperopt +hyperopt/fullset
-
-    Note: Set streaming_batches=true in your training config to reduce GPU memory
-    and enable multiple processes on the same GPU.
-
-CMA-ES Configuration:
-    When using sampler cmaes, the following defaults are applied to avoid local minima:
-    - cmaes_restart_strategy: bipop (bidirectional population restarts)
-    - cmaes_popsize: 32 (larger than default 4+3*log(n) for better exploration)
-    - cmaes_warm_start: true (resume from existing trials instead of random init)
-    - cmaes_with_margin: true (prevents discrete params from collapsing)
-
-Notes on restart strategies:
-    - bipop (default): Alternates between small (exploitation) and large (exploration) populations
-    - ipop: Restarts with 2x population each time (simpler, good for escaping local minima)
-    - lr_adapt: Adapts learning rate for noisy/multimodal landscapes (incompatible with restarts)
-    - Requires: pip install optunahub (for ipop/bipop)
 """
 
 from __future__ import annotations
-
 import json
 import pickle
+import sys
 import time
 import asyncio
-import sys
+import threading
 from pathlib import Path
-from typing import Any, Annotated
-
+from typing import Any, Annotated, Literal
 import numpy as np
 import optuna
-from optuna.samplers import TPESampler, CmaEsSampler, RandomSampler, BaseSampler
-from optuna.distributions import FloatDistribution
+from optuna.samplers import BaseSampler
 from tqdm import tqdm
-from pydantic import Field, ConfigDict, BaseModel
-from typing import Literal
+from pydantic import Field, BaseModel
 
-try:
-    import optunahub
-
-    _OPTUNAHUB_AVAILABLE = True
-except ImportError:
-    _OPTUNAHUB_AVAILABLE = False
-
-from dracon.commandline import Arg, make_program
+from dracon.commandline import Arg
 from dracon.deferred import DeferredNode
-
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
-from biocomp.train import TrainingConfig, start, CompiledTrainingStep, compile_training_step
+from biocomp.train import TrainingConfig, start, compile_training_step
 from biocomp.library import load_lib
-from biocomp.jaxutils import tree_get
+import jax
 from biocomptools.toollib.common import config
-from biocomptools.toollib.networkselector import build_data_manager, NetworkSet, NetworkDataPair
-from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES
-from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logging_config import get_logger, setup_logging
+from biocomptools.toollib.networkselector import build_data_manager, NetworkSet
+from biocomptools.optimtools import DEFAULT_TYPES, make_context_from_types
 from biocomptools.logging_config import get_logger
+from biocomptools.optimtools import make_context_from_types
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.networkprediction import NetworkPrediction
+from dracon.commandline import Arg, dracon_program
 
 logger = get_logger(__name__)
 
 
-class TqdmProgressLogger(Logger):
-    """Simple tqdm progress bar for training steps."""
-
-    trial_number: int = 0
-    total_steps: int = 0
-    async_ok: bool = False
-    _pbar: Any = None
-
-    def get_callbacks(self, training_program):
-        def on_start(step, training_config, step_history, stack):
-            self.total_steps = int(
-                training_config.n_epochs
-                * training_config.n_batches
-                / training_config.batches_per_step
-            )
-            self._pbar = tqdm(
-                total=self.total_steps,
-                desc=f"Trial {self.trial_number}",
-                unit="step",
-                leave=False,
-            )
-
-        def on_step(step, training_config, step_history, stack):
-            if self._pbar is not None:
-                loss = step_history.get('loss')
-                if loss is not None:
-                    mean_loss = float(np.asarray(loss).mean())
-                    self._pbar.set_postfix(loss=f"{mean_loss:.4f}")
-                self._pbar.update(1)
-
-        def on_end(step, training_config, step_history, stack):
-            if self._pbar is not None:
-                self._pbar.close()
-                self._pbar = None
-
-        return [(0, on_start), (1, on_step), (-1, on_end)]
-
-
-class OptunaPruningLogger(Logger):
-    """Logger that reports losses to Optuna for pruning bad trials early."""
-
-    trial: optuna.Trial | None = None
-    async_ok: bool = False  # must run synchronously to check pruning
-    _step_losses: list[float] = []
-
-    def model_post_init(self, __context):
-        self._step_losses = []
-
-    def get_callbacks(self, training_program):
-        def report_loss(step, training_config, step_history, stack):
-            if self.trial is None:
-                return
-
-            loss = step_history.get('loss')
-            if loss is None:
-                return
-
-            mean_loss = float(np.asarray(loss).mean())
-            self._step_losses.append(mean_loss)
-
-            self.trial.report(mean_loss, step)
-            if self.trial.should_prune():
-                raise optuna.TrialPruned()
-
-        return [(1, report_loss)]
-
-    def get_final_loss(self) -> float:
-        """Get smoothed final loss (last 5% average)."""
-        if not self._step_losses:
-            return float('inf')
-        n_final = max(1, len(self._step_losses) // 20)
-        return float(np.mean(self._step_losses[-n_final:]))
-
-
-class SparseSampler(BaseSampler):
-    """Sampler that uses beta distribution biased toward low values (sparse weights).
-
-    For float parameters, samples from Beta(alpha, 2) scaled to [low, high].
-    With alpha=0.5, most samples will be near 0 (the low end).
-    """
-
-    def __init__(self, alpha: float = 0.5, seed: int | None = None):
-        self._alpha = alpha
-        self._rng = np.random.RandomState(seed)
-
-    def infer_relative_search_space(self, study, trial):
-        return {}
-
-    def sample_relative(self, study, trial, search_space):
-        return {}
-
-    def sample_independent(self, study, trial, param_name, param_distribution):
-        if isinstance(param_distribution, FloatDistribution):
-            # Beta(alpha, 2) is skewed toward 0 when alpha < 1
-            sample = self._rng.beta(self._alpha, 2.0)
-            low, high = param_distribution.low, param_distribution.high
-            return low + sample * (high - low)
-        # Fall back to uniform for other types
-        return self._rng.uniform(param_distribution.low, param_distribution.high)
-
-
 class HyperparamSpec(BaseModel):
-    """Specification for a hyperparameter to optimize."""
-
-    model_config = ConfigDict(extra="forbid")
+    """Hyperparameter specification for Optuna."""
 
     name: str
-    type: str  # "float", "int", "categorical", "log_float"
-    low: float | None = None
-    high: float | None = None
+    type: Literal['float', 'log_float', 'int', 'categorical']
+    low: float | int | None = None
+    high: float | int | None = None
     choices: list | None = None
+    step: float | None = None
+    target_path: str | None = None
 
     def suggest(self, trial: optuna.Trial) -> Any:
-        if self.type == "float":
-            return trial.suggest_float(self.name, self.low, self.high)
-        elif self.type == "log_float":
+        if self.type == 'float':
+            return trial.suggest_float(self.name, self.low, self.high, step=self.step)
+        if self.type == 'log_float':
             return trial.suggest_float(self.name, self.low, self.high, log=True)
-        elif self.type == "int":
+        if self.type == 'int':
             return trial.suggest_int(self.name, int(self.low), int(self.high))
-        elif self.type == "categorical":
+        if self.type == 'categorical':
             return trial.suggest_categorical(self.name, self.choices)
-        raise ValueError(f"Unknown hyperparameter type: {self.type}")
+        raise ValueError(f"Unknown type: {self.type}")
 
 
+@dracon_program(
+    name='biocomp-hyperopt',
+    description='Run hyperparameter optimization for biocomp models.',
+    context_types=DEFAULT_TYPES + [HyperparamSpec],
+    context={'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve()},
+)
 class HyperoptProgram(BaseModel):
-    """Optuna hyperparameter optimization program for biocompiler."""
+    """Hyperopt program with drastically reduced complexity."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    # study configuration
-    study_name: Annotated[str, Arg(help='Study name for persistence')] = "biocomp_hyperopt"
-    n_trials: Annotated[int, Arg(help='Number of trials to run')] = 100
-    n_jobs: Annotated[
-        int, Arg(help='Number of parallel trials (-1 = CPU count, 1 = sequential)')
-    ] = 1
-    n_startup_trials: Annotated[int, Arg(help='Random trials before sampler kicks in')] = 20
-    pruning: Annotated[bool, Arg(help='Enable early stopping of bad trials')] = True
+    study_name: Annotated[str, Arg(help='Study name for persistence')] = "hyperopt"
+    output_dir: Annotated[str, Arg(help='Output directory')] = "./hyperopt_output"
+    n_trials: Annotated[int, Arg(help='Number of trials')] = 100
     seed: Annotated[int | None, Arg(help='Random seed')] = None
 
-    # sampler configuration
-    sampler: Annotated[
-        Literal["tpe", "cmaes", "hybrid", "sparse", "sparse_cmaes"],
-        Arg(
-            help='Sampler: tpe, cmaes, hybrid (TPE->CMA-ES), sparse (beta toward 0), sparse_cmaes (sparse startup then CMA-ES)'
-        ),
-    ] = "tpe"
-    hybrid_switch_trial: Annotated[
-        int, Arg(help='For hybrid sampler: switch from TPE to CMA-ES after this many trials')
-    ] = 100
+    sampler: Annotated[str, Arg(help='Sampler: tpe, cmaes, hybrid')] = "tpe"
+    pruning: Annotated[bool, Arg(help='Enable pruning')] = False
+    n_startup_trials: int = 10
 
-    # CMA-ES specific configuration (defaults optimized to avoid local minima)
-    cmaes_restart_strategy: Annotated[
-        Literal["none", "ipop", "bipop"] | None,
-        Arg(help='CMA-ES restart strategy: bipop (default), ipop, or none'),
-    ] = "bipop"
-    cmaes_popsize: Annotated[
-        int | None, Arg(help='CMA-ES population size (default 32, larger = more exploration)')
-    ] = 32
-    cmaes_warm_start: Annotated[
-        bool, Arg(help='Warm start CMA-ES from existing trials when resuming a study')
-    ] = True
-    cmaes_inc_popsize: Annotated[
-        int, Arg(help='Population size multiplier for restarts (ipop/bipop)')
-    ] = 2
-    cmaes_sigma0: Annotated[
-        float | None, Arg(help='Initial step size for CMA-ES (None = auto, typically min_range/6)')
-    ] = None
-    cmaes_lr_adapt: Annotated[
-        bool,
-        Arg(
-            help='Use learning rate adaptation for multimodal/noisy problems (incompatible with restarts)'
-        ),
-    ] = False
-    cmaes_with_margin: Annotated[
-        bool, Arg(help='Use CMA-ES with margin (prevents discrete params from collapsing)')
-    ] = True
-    cmaes_x0: Annotated[
-        Literal["center", "sparse", "dense"] | None,
-        Arg(
-            help='CMA-ES initial point: center (default), sparse (most weights near 0), dense (most weights near 1)'
-        ),
-    ] = None
-    sparse_sampling: Annotated[
-        bool,
-        Arg(
-            help='Use sparse random sampling (beta distribution biased toward 0) instead of uniform for startup trials'
-        ),
-    ] = False
-    sparse_alpha: Annotated[
-        float,
-        Arg(
-            help='Alpha parameter for beta distribution when sparse_sampling=True (lower = more sparse, default 0.5)'
-        ),
-    ] = 0.5
+    # CMA-ES options
+    cmaes_restart_strategy: str | None = "bipop"
+    cmaes_popsize: int | None = 32
+    cmaes_sigma0: float = 0.5
+    cmaes_warm_start: bool = True
+    cmaes_with_margin: bool = True
+    cmaes_x0: str | None = None
+    cmaes_warn_independent_sampling: bool = False  # suppress noisy warnings from restart strategies
+    hybrid_switch_trial: int = 50
+    sparse_sampling: bool = False
+    sparse_alpha: float = 0.1
 
-    # output configuration
-    output_dir: Annotated[str, Arg(help='Directory to save results')] = Field(
-        default_factory=lambda: str(Path(config.paths.root) / "hyperopt_results")
-    )
-
-    # training configuration (can be deferred for interpolation or direct configs)
-    training_conf: Annotated[DeferredNode[TrainingConfig] | TrainingConfig, Arg(help='Base training config')]
-    compute_conf: Annotated[DeferredNode[ComputeConfig] | ComputeConfig, Arg(help='Base compute config')]
+    # Training
+    training_conf: Annotated[
+        DeferredNode[TrainingConfig] | TrainingConfig, Arg(help='Training config')
+    ]
+    compute_conf: Annotated[DeferredNode[ComputeConfig] | ComputeConfig, Arg(help='Compute config')]
     data_conf: Annotated[DataConfig, Arg(help='Data config')] = Field(default_factory=DataConfig)
-    # training_set can be either a NetworkSet (for standard use) or DeferredNode (for weight optimization)
-    training_set: Annotated[
-        NetworkSet | DeferredNode[NetworkSet], Arg(help='Networks in training set')
-    ] = Field(default_factory=NetworkSet)
-
-    # validation configuration (for validation-based objective)
-    validation_set: Annotated[NetworkSet | None, Arg(help='Networks for validation')] = None
-    use_validation_loss: Annotated[bool, Arg(help='Use validation loss as objective')] = False
-    n_validation_evals: Annotated[int, Arg(help='Number of validation samples per network')] = 8192
-    validation_objective: Annotated[
-        Literal["mean_rmse", "softmax_nrmse", "geomean_nrmse", "geomean_nre", "powermean_nre"],
-        Arg(help='Validation objective: mean_rmse, softmax_nrmse, geomean_nrmse, geomean_nre, powermean_nre (default)'),
-    ] = "powermean_nre"
-    validation_softmax_alpha: Annotated[
-        float,
-        Arg(help='Sharpness parameter for soft-max objective (higher = closer to true max)'),
-    ] = 5.0
-    validation_powermean_p: Annotated[
-        float,
-        Arg(help='Exponent for power mean objective (p>1 emphasizes high values, p=2 is RMS)'),
-    ] = 2.0
-    validation_enable_gridstats: Annotated[
-        bool,
-        Arg(help='Enable grid statistics for nRMSE-based objectives (slower but more accurate)'),
-    ] = True
-    validation_gridstats_res: Annotated[
-        int,
-        Arg(help='Grid resolution for validation gridstats per dimension'),
-    ] = 8
-    validation_gridstats_max: Annotated[
-        float,
-        Arg(help='Max value for validation gridstats hypercube'),
-    ] = 0.8
-    validation_gridstats_k: Annotated[
-        int,
-        Arg(help='Number of neighbors for validation gridstats KNN'),
-    ] = 1024
-    validation_gridstats_radius: Annotated[
-        float,
-        Arg(help='Max radius cutoff for validation gridstats adaptive sigma'),
-    ] = 0.25
-
-    # per-trial dataset weight support (for optimizing dataset weights)
-    rebuild_dman_per_trial: Annotated[bool, Arg(help='Rebuild data manager each trial')] = False
-
-    # vmap-trials mode: run n_jobs trials as vmapped pseudo-replicates
-    vmap_trials: Annotated[
-        bool,
-        Arg(help='Run n_jobs trials in parallel as vmapped pseudo-replicates (requires dataweight_* hyperparams only)')
-    ] = False
-
-    # hyperparameters to optimize
-    hyperparams: Annotated[list[HyperparamSpec], Arg(help='Hyperparameters to optimize')] = Field(
-        default_factory=list
+    training_set: Annotated[NetworkSet | DeferredNode[NetworkSet], Arg(help='Training set')] = (
+        Field(default_factory=NetworkSet)
     )
 
-    # model saving configuration
-    n_top_models: Annotated[int, Arg(help='Number of top models to keep (0 to disable)')] = 10
+    # Validation
+    use_validation_loss: bool = False
+    validation_set: NetworkSet | None = None
+    n_validation_evals: int = 32000
+    validation_objective: str = "geomean_nre"
+    validation_enable_gridstats: bool = True
+    validation_gridstats_res: int = 10
+    validation_gridstats_max: float = 0.8
+    validation_gridstats_k: int = 64  # must be >= gridstats_min_points
+    validation_gridstats_radius: float = 0.3
+    validation_gridstats_min_points: int = 20  # lower than default for faster hyperopt
+    validation_softmax_alpha: float = 5.0
+    validation_powermean_p: float = 2.0
 
-    # info-only modes
-    show_best: Annotated[bool, Arg(help='Show best results and exit')] = False
-    export_only: Annotated[bool, Arg(help='Export results and exit')] = False
-    dashboard: Annotated[bool, Arg(help='Launch Optuna dashboard web interface and exit')] = False
-    dashboard_port: Annotated[int, Arg(help='Port for Optuna dashboard')] = 8080
+    # Dataset weight optimization
+    rebuild_dman_per_trial: bool = False
+    hyperparams: list[HyperparamSpec] = []
 
-    # internal state
+    # Model saving
+    n_top_models: int = 10
+
+    # Modes
+    show_best: bool = False
+    dashboard: bool = False
+    dashboard_port: int = 8080
+    export_only: bool = False
+    n_jobs: int = 1
+    vmap_trials: bool = False
+    verbose_stats: bool = True
+    stats_top_n: int = 30
+
+    # Internal state
     _lib: Any = None
     _training_dman: Any = None
+    _cached_step: Any = None
+    _vmap_cached_step: Any = None
+    _cached_batches: Any = None  # (xbatches, ybatches) for reuse across trial batches
+    _compile_lock: Any = None  # threading.Lock for thread-safe compilation
     _validation_predictor: Any = None
-    _validation_xynetworks: Any = None
-    _network_weight_mapping: list[str] | None = None  # network_idx -> ndp.network_name
-    _cached_step: CompiledTrainingStep | None = None  # cached compiled step for JIT reuse
-    _vmap_stack: Any = None  # cached stack for vmap-trials mode
-    _vmap_cached_step: CompiledTrainingStep | None = None  # cached step for vmap-trials mode
-    _batched_val_predict: Any = None  # cached JIT-compiled batched validation predictor
+    _validation_runner: Any = None
+    _network_weight_mapping: list | None = None
+    _network_to_dataset: dict | None = None  # network_name -> dataset_name (for hyperparam lookup)
+    _weight_name_to_ndp: dict | None = None
+    _best_loss: float = float('inf')
+    _best_stats: list[dict] | None = None
+    _best_trial_number: int | None = None
+    db_session: Any = None
+    path_prefix: Path | None = None
 
-    def model_post_init(self, __context):
+    model_config = {'arbitrary_types_allowed': True}
+
+    def model_post_init(self, _):
         self._lib = load_lib()
-        self.output_dir = str(Path(self.output_dir).expanduser().resolve())
+        self.path_prefix = Path(config.paths.root).expanduser().resolve()
+        self._compile_lock = threading.Lock()
 
     @property
-    def db_session(self):
+    def _storage_path(self) -> str:
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        return f"sqlite:///{Path(self.output_dir) / (self.study_name + '.db')}"
+
+    def _prepare_data_manager(self, hyperparams: dict | None = None):
+        """Build or update DataManager. Fast path for weight-only changes.
+
+        When rebuild_dman_per_trial=True, uses _update_weights_fast to apply new
+        hyperparams weights without full DataManager reconstruction. The
+        _network_to_dataset mapping enables matching hyperparam names
+        (dataweight_X) to network dataset memberships.
+        """
+        if self._training_dman is not None:
+            if self.rebuild_dman_per_trial and self._network_weight_mapping:
+                self._update_weights_fast(hyperparams or {})
+                return
+
         from biocomptools.toollib.models import get_biocompdb_sqlite_engine
         from sqlmodel import Session
 
         engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
-        return Session(engine)
 
-    @property
-    def path_prefix(self):
-        return Path(config.paths.root).expanduser().resolve()
+        with Session(engine) as session:
+            self.db_session = session
 
-    def _prepare_data_manager(self, hyperparams: dict | None = None):
-        """Build data manager. If rebuild_dman_per_trial, update weights only (fast path)."""
-        # fast path: if we have a DataManager and just need to update weights
-        if (
-            self._training_dman is not None
-            and self.rebuild_dman_per_trial
-            and hyperparams is not None
-        ):
-            if self._network_weight_mapping is not None:
-                # update weights using the mapping
-                self._update_weights_from_hyperparams(hyperparams)
-                return
+            # resolve training set
+            if isinstance(self.training_set, DeferredNode):
+                ctx = make_context_from_types(DEFAULT_TYPES)
+                ctx.update(hyperparams or {})
+                resolved = self.training_set.construct(context=ctx)
+            else:
+                resolved = self.training_set
 
-        if self._training_dman is not None and not self.rebuild_dman_per_trial:
-            return
+            resolved.run_selectors(session)
+            logger.info(f"Building DataManager for {len(resolved.content)} networks...")
 
-        logger.info("Preparing data manager...")
-
-        # resolve training_set if it's a DeferredNode
-        if isinstance(self.training_set, DeferredNode):
-            # construct with hyperparameters as context for weight interpolation
-            context = hyperparams or {}
-            resolved_training_set = self.training_set.construct(context=context)
-        else:
-            resolved_training_set = self.training_set
-
-        with self.db_session as session:
-            resolved_training_set.run_selectors(session)
             self._training_dman = build_data_manager(
                 lib=self._lib,
                 db_session=session,
                 path_prefix=self.path_prefix,
                 data_conf=self.data_conf,
-                dataset=resolved_training_set,
+                dataset=resolved,
             )
-            # build weight mapping for fast updates on subsequent trials
+
+            # cache weight mapping for fast updates
             if self.rebuild_dman_per_trial:
-                self._build_weight_mapping(resolved_training_set, session)
-        logger.info(f"Data manager ready ({len(resolved_training_set.content)} network-data pairs)")
+                self._build_weight_mapping(resolved, session)
+
+            logger.info(f"DataManager ready ({len(resolved.content)} pairs)")
 
     def _build_weight_mapping(self, dataset: NetworkSet, session):
-        """Build mapping from network indices to NetworkDataPair names for weight updates."""
+        """Build mapping from network indices to weight parameter names."""
         net_data = dataset.get_networks_and_data(session)
-        networks, _ = zip(*net_data)
-
-        # map network_idx -> ndp.network_name (respecting network splitting)
+        networks, _ = zip(*net_data, strict=True)
         self._network_weight_mapping = []
+        self._weight_name_to_ndp = {}
+        self._network_to_dataset = {}
+
+        for ndp in dataset.content:
+            self._weight_name_to_ndp[ndp.network_name] = ndp
+            # After run_selectors, NDPs retain the dataset_name from their parent filter
+            if hasattr(ndp, 'dataset_name') and ndp.dataset_name:
+                self._network_to_dataset[ndp.network_name] = ndp.dataset_name
+
         for n in networks:
-            n.build(self._lib)  # ensure built (should be cached)
+            n.build(self._lib)
             network_list = n._network if isinstance(n._network, list) else [n._network]
             for _ in network_list:
                 self._network_weight_mapping.append(n.name)
 
-    def _update_weights_from_hyperparams(self, hyperparams: dict):
-        """Update DataManager weights based on hyperparameters (fast path)."""
-        # find which hyperparam controls each network's weight
-        # hyperparams keys are like "dataweight_1_Single_CasE_no_ratios"
-        # we need to match these to network names
-
-        # rebuild the ndp_weights by resolving the training_set with new context
-        if isinstance(self.training_set, DeferredNode):
-            resolved = self.training_set.construct(context=hyperparams)
-            with self.db_session as session:
-                resolved.run_selectors(session)
-                ndp_weights = {ndp.network_name: ndp.weight for ndp in resolved.content}
-        else:
-            # no deferred node, weights don't change
-            logger.error("training set is not deferred!!")
-            return
-
-        # apply weights using the mapping
-        new_weights = [ndp_weights.get(name, 1.0) for name in self._network_weight_mapping]
+    def _update_weights_fast(self, hyperparams: dict):
+        """Update weights directly without re-resolving deferred nodes. KEY OPTIMIZATION."""
+        new_weights = []
+        for name in self._network_weight_mapping:
+            # Use dataset name for hyperparam lookup (matches hyperparam naming convention)
+            dataset_name = self._network_to_dataset.get(name)
+            hp_name = f"dataweight_{dataset_name}" if dataset_name else None
+            if hp_name and hp_name in hyperparams:
+                new_weights.append(hyperparams[hp_name])
+            else:
+                # fallback to default weight from original NDPs
+                ndp = self._weight_name_to_ndp.get(name)
+                new_weights.append(ndp.weight if ndp else 1.0)
         self._training_dman.set_weights(new_weights)
 
-    def _compile_cached_step(self, training_conf: TrainingConfig, compute_conf: ComputeConfig):
-        """Compile and cache the training step for reuse across trials.
+    def _build_per_trial_weights_fast(self, all_hyperparams: list[dict]) -> Any:
+        """Build weight matrix for vmap-trials. Vectorized for speed."""
+        import jax.numpy as jnp
 
-        This is called once on the first trial. The compiled step can then be
-        reused across subsequent trials since only the weights change (not the
-        network structure or training configuration).
-        """
-        if self._cached_step is not None:
-            return  # already compiled
+        n_trials = len(all_hyperparams)
+        # Use dataset names (from _network_to_dataset) instead of network names for hyperparam lookup
+        hp_names = []
+        for n in self._network_weight_mapping:
+            dataset_name = self._network_to_dataset.get(n)
+            hp_names.append(f"dataweight_{dataset_name}" if dataset_name else None)
 
-        logger.info("Compiling training step (first trial only)...")
-
-        self._cached_step = compile_training_step(
-            dman=self._training_dman,
-            training_config=training_conf,
-            compute_config=compute_conf,
+        defaults = np.array(
+            [
+                self._weight_name_to_ndp.get(n, type('o', (), {'weight': 1.0})).weight
+                for n in self._network_weight_mapping
+            ]
         )
-        logger.info("Training step compiled")
+        weights = np.tile(defaults, (n_trials, 1))
+        for j, hp in enumerate(all_hyperparams):
+            for i, name in enumerate(hp_names):
+                if name and name in hp:
+                    weights[j, i] = hp[name]
+        networks = self._training_dman.get_networks()
+        expanded = np.repeat(weights, [n.nb_outputs for n in networks], axis=1)
+        return jnp.array(expanded)
+
+    def _compile_cached_step(self, training_conf: TrainingConfig, compute_conf: ComputeConfig):
+        # Thread-safe compilation: only first thread compiles, others wait and reuse
+        with self._compile_lock:
+            if self._cached_step is not None:
+                return
+            logger.info("Compiling training step...")
+            self._cached_step = compile_training_step(
+                dman=self._training_dman,
+                training_config=training_conf,
+                compute_config=compute_conf,
+            )
 
     def _prepare_validation(self, compute_conf: ComputeConfig):
-        """Initialize validation predictor (done once)."""
-        if self._validation_predictor is not None:
-            return
-        if self.validation_set is None:
-            return
+        # Thread-safe validation preparation
+        with self._compile_lock:
+            if self._validation_runner is not None or self.validation_set is None:
+                return
 
-        # determine if we need gridstats based on objective type
-        needs_gridstats = (
-            self.validation_enable_gridstats
-            and self.validation_objective in ("softmax_nrmse", "geomean_nrmse", "geomean_nre", "powermean_nre")
-        )
+            from biocomptools.hyperopt.validation import ValidationRunner
+            from biocomptools.toollib.models import get_biocompdb_sqlite_engine
+            from sqlmodel import Session
 
-        logger.info(f"Preparing validation predictor (objective={self.validation_objective}, gridstats={needs_gridstats})...")
-        with self.db_session as session:
-            self.validation_set.run_selectors(session)
-            val_dman = build_data_manager(
-                lib=self._lib,
-                db_session=session,
-                path_prefix=self.path_prefix,
-                data_conf=self.data_conf,
-                dataset=self.validation_set,
-                jax_sampling=False,
+            needs_gridstats = self.validation_enable_gridstats and self.validation_objective in (
+                "softmax_nrmse",
+                "geomean_nrmse",
+                "geomean_nre",
+                "powermean_nre",
             )
 
-        self._validation_xynetworks = val_dman.get_per_network_xy_samples(self.n_validation_evals)
-        xs, ys, networks = self._validation_xynetworks
+            logger.info(f"Preparing validation (objective={self.validation_objective})...")
+            engine = get_biocompdb_sqlite_engine(config.db.sqlite.path)
 
-        model = BiocompModel(compute_config=compute_conf, rescaler=self.data_conf.rescaler)
-        network_model = NetworkModel(model=model, network=networks)
-
-        per_prediction_info = [
-            {'network_name': n.name, 'networkdatapair': {'network_name': n.name}} for n in networks
-        ]
-
-        self._validation_predictor = NetworkPrediction(
-            predict_at=xs,
-            network_model=network_model,
-            ground_truth=ys,
-            seed=self.seed or 42,
-            disable_variational=True,
-            max_evals=self.n_validation_evals,
-            already_latent=True,
-            n_stats_workers=8,
-            per_prediction_info=per_prediction_info,
-            device='gpu',
-            enable_gridstats=needs_gridstats,
-            gridstats_hypercube_res=self.validation_gridstats_res,
-            gridstats_hypercube_max=self.validation_gridstats_max,
-            gridstats_k=self.validation_gridstats_k,
-            gridstats_radius=self.validation_gridstats_radius,
-        )
-        logger.info(f"Validation predictor ready ({len(networks)} networks, device=gpu, stats_workers=8)")
-
-    def _compute_validation_loss(self, params) -> float:
-        """Compute validation loss using trained params (extracts first replicate)."""
-        if self._validation_predictor is None:
-            return float('inf')
-        stats = self._validation_predictor.get_network_stats(with_shared_params=tree_get(params, 0))
-        return self._compute_loss_from_stats(stats)
-
-    def _compute_validation_loss_single(self, single_params) -> float:
-        """Compute validation loss for single-replicate params (no wrapping needed)."""
-        if self._validation_predictor is None:
-            return float('inf')
-
-        stats = self._validation_predictor.get_network_stats(with_shared_params=single_params)
-        return self._compute_loss_from_stats(stats)
-
-    def _compute_validation_losses_batched(self, all_params) -> list[float]:
-        """Compute validation losses for all trial params using batched prediction.
-
-        Instead of calling get_network_stats N times (which triggers N prediction runs),
-        this method vmaps the prediction over all trial params at once, then computes
-        stats for each trial from the batched predictions.
-        """
-        import jax
-        import jax.numpy as jnp
-        from biocomp import parameters as pr
-
-        # Get n_trials from first array leaf
-        def get_n_trials(params):
-            for leaf in jax.tree.leaves(params):
-                if hasattr(leaf, 'shape') and len(leaf.shape) > 0:
-                    return leaf.shape[0]
-            raise ValueError("No array leaves with batch dim found in params")
-
-        if self._validation_predictor is None:
-            return [float('inf')] * get_n_trials(all_params)
-
-        predictor = self._validation_predictor
-        network_model = predictor.network_model
-
-        # Get validation inputs (same for all trials)
-        assert isinstance(predictor._aligned_x, list)
-        stacked_x = np.column_stack(predictor._aligned_x)
-        n_samples = len(predictor._aligned_x[0])
-
-        # Get the stack and prepare batched prediction
-        stack = network_model._stack
-        num_z_arr = all_params["global/number_of_random_variables"]
-        num_z = int(num_z_arr[0] if hasattr(num_z_arr, '__getitem__') else num_z_arr)
-        n_trials = get_n_trials(all_params)
-
-        print(f"[vmap-trials] Batched validation: {n_trials} trials × {n_samples} samples")
-        sys.stdout.flush()
-
-        # Prepare inputs for batched prediction
-        key = jax.random.PRNGKey(predictor.seed or 42)
-
-        # Generate Z values and keys for samples
-        z_value = predictor.z_value
-        if z_value == 'uniform':
-            Z = jax.random.uniform(key, (n_samples, num_z))
-        else:
-            Z = jnp.ones((n_samples, num_z)) * z_value
-        keys = jax.random.split(key, n_samples)
-
-        # Disable variational for all trial params by setting logstds to very negative
-        logstd_path = 'shared/quantization/logstdevs'
-        if logstd_path in all_params:
-            logstd = all_params[logstd_path]
-            for path, value in logstd.iter_leaves():
-                logstd[path] = jnp.ones_like(value) * -100
-
-        # Get or create cached batched prediction function
-        if self._batched_val_predict is None:
-            print(f"[vmap-trials] Compiling batched validation predict function...")
-            sys.stdout.flush()
-            # Stack apply signature: (params, x, z, key) -> (out, (info, fullout))
-            # Double vmap: outer over trials (params axis 0), inner over samples
-            sample_vmap = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))  # vmap over samples
-            trial_vmap = jax.vmap(sample_vmap, in_axes=(0, None, None, None))  # vmap over params
-
-            # JIT compile for GPU
-            try:
-                gpu_device = jax.devices('gpu')[0]
-                self._batched_val_predict = jax.jit(trial_vmap, device=gpu_device)
-            except (RuntimeError, IndexError):
-                self._batched_val_predict = jax.jit(trial_vmap)
-
-        # Run batched prediction
-        t0 = time.time()
-        print(f"[vmap-trials] Running batched predictions...")
-        sys.stdout.flush()
-
-        # Merge shared params from trials with fixed local params
-        from biocomptools.modelmodel import get_shared_params
-        shared_params = get_shared_params(all_params)
-        local_params = network_model._local_params
-
-        # For vmap, ALL leaves need consistent batch dimension (axis 0)
-        def ensure_batch_dim(params, n_trials, already_batched=False):
-            """Ensure all leaves have leading trial dimension for vmap."""
-            def process_leaf(x):
-                if isinstance(x, (jnp.ndarray, np.ndarray)):
-                    if len(x.shape) == 0:  # scalar array
-                        return jnp.broadcast_to(x, (n_trials,))
-                    if already_batched:
-                        return x  # already has batch dim
-                    return jnp.broadcast_to(x, (n_trials,) + x.shape)
-                # Convert non-arrays to arrays with batch dim
-                arr = jnp.asarray(x)
-                if arr.shape == ():
-                    return jnp.broadcast_to(arr, (n_trials,))
-                if already_batched and len(arr.shape) > 0:
-                    return arr
-                return jnp.broadcast_to(arr, (n_trials,) + arr.shape)
-            return jax.tree.map(process_leaf, params)
-
-        # shared_params from training already have batch dim, but may have non-arrays
-        shared_params_vmap = ensure_batch_dim(shared_params, n_trials, already_batched=True)
-        # local_params don't have batch dim
-        local_params_batched = ensure_batch_dim(local_params, n_trials, already_batched=False)
-        merged_params = pr.ParameterTree.merge(shared_params_vmap, local_params_batched)
-
-        X_jnp = jnp.array(stacked_x)
-        out, (_, fullout) = self._batched_val_predict(merged_params, X_jnp, Z, keys)
-        out.block_until_ready()
-
-        pred_time = time.time() - t0
-        print(f"[vmap-trials] Batched prediction done ({pred_time:.1f}s)")
-
-        # out shape: (n_trials, n_samples, n_outputs)
-        # Split outputs per network and compute stats for each trial
-        t0 = time.time()
-        losses = []
-
-        for trial_idx in range(n_trials):
-            trial_out = np.asarray(out[trial_idx])  # (n_samples, n_outputs)
-
-            # Split by network (same as NetworkModel.split_outputs_per_network)
-            network_outputs = network_model.split_outputs_per_network(trial_out, n_samples)
-
-            # Compute stats for this trial
-            trial_stats = self._compute_stats_from_outputs(
-                predictor, network_outputs, n_samples
-            )
-            loss = self._compute_loss_from_stats(trial_stats)
-            losses.append(loss)
-
-        stats_time = time.time() - t0
-        print(f"[vmap-trials] Stats computation done ({stats_time:.1f}s)")
-
-        return losses
-
-    def _compute_stats_from_outputs(
-        self, predictor, network_outputs: list, n_samples: int
-    ) -> list[dict]:
-        """Compute network stats from pre-computed outputs (avoids re-prediction)."""
-        from biocomptools.toollib.networkprediction import _calculate_grid_stats
-
-        stats = []
-        for i, net_out in enumerate(network_outputs):
-            if i >= len(predictor.ground_truth):
-                continue
-            gt = predictor.ground_truth[i]
-            if gt is None:
-                stats.append({})
-                continue
-
-            # net_out shape: (n_samples, n_quantiles) - take median (middle quantile)
-            if net_out.ndim == 2:
-                yhat = net_out[:, net_out.shape[1] // 2]  # median
-            else:
-                yhat = net_out.flatten()[:n_samples]
-
-            # Compute basic stats
-            gt_vals = np.asarray(gt).flatten()[:n_samples]
-            residuals = yhat - gt_vals
-            rmse = float(np.sqrt(np.mean(residuals ** 2)))
-
-            stat = {'rmse': rmse}
-
-            # Compute grid stats if enabled
-            if predictor.enable_gridstats and i < len(predictor._aligned_x):
-                x_vals = np.asarray(predictor._aligned_x[i])
-                try:
-                    grid_params = {
-                        'hypercube_res': predictor.gridstats_hypercube_res,
-                        'hypercube_min': 0.0,
-                        'hypercube_max': predictor.gridstats_hypercube_max,
-                        'k': predictor.gridstats_k,
-                        'radius': predictor.gridstats_radius,
-                        'min_points': 1,
-                    }
-                    grid_stats = _calculate_grid_stats(
-                        yhat.reshape(-1, 1),
-                        gt_vals.reshape(-1, 1),
-                        x_vals,
-                        grid_params,
-                    )
-                    stat.update(grid_stats)
-                    # Also compute noise_relative_error if possible
-                    data_nrmse = np.std(gt_vals) / np.mean(np.abs(gt_vals) + 1e-8)
-                    if grid_stats.get('grid_nrmse') is not None and data_nrmse > 0:
-                        stat['noise_relative_error'] = grid_stats['grid_nrmse'] / data_nrmse
-                except Exception:
-                    pass
-
-            stats.append(stat)
-
-        return stats
-
-    def _compute_loss_from_stats(self, stats: list[dict]) -> float:
-        """Compute loss value from network stats based on validation_objective."""
-        if self.validation_objective == "mean_rmse":
-            valid_stats = [s for s in stats if s.get('rmse') is not None]
-            if not valid_stats:
-                return float('inf')
-            return float(np.mean([s['rmse'] for s in valid_stats]))
-
-        elif self.validation_objective == "softmax_nrmse":
-            nrmses = np.array([
-                s['grid_nrmse'] for s in stats
-                if s.get('grid_nrmse') is not None and np.isfinite(s.get('grid_nrmse'))
-            ])
-            if len(nrmses) == 0:
-                return float('inf')
-            alpha = self.validation_softmax_alpha
-            max_val = np.max(nrmses)
-            soft_max = max_val + (1 / alpha) * np.log(np.sum(np.exp(alpha * (nrmses - max_val))))
-            return float(soft_max)
-
-        elif self.validation_objective == "geomean_nrmse":
-            from scipy.stats import gmean
-            nrmses = np.array([
-                s['grid_nrmse'] for s in stats
-                if s.get('grid_nrmse') is not None
-                and np.isfinite(s.get('grid_nrmse'))
-                and s.get('grid_nrmse') > 0
-            ])
-            if len(nrmses) == 0:
-                return float('inf')
-            return float(gmean(nrmses))
-
-        elif self.validation_objective == "geomean_nre":
-            from scipy.stats import gmean
-            nres = np.array([
-                s['noise_relative_error'] for s in stats
-                if s.get('noise_relative_error') is not None
-                and np.isfinite(s.get('noise_relative_error'))
-                and s.get('noise_relative_error') > 0
-            ])
-            if len(nres) == 0:
-                return float('inf')
-            return float(gmean(nres))
-
-        elif self.validation_objective == "powermean_nre":
-            nres = np.array([
-                s['noise_relative_error'] for s in stats
-                if s.get('noise_relative_error') is not None
-                and np.isfinite(s.get('noise_relative_error'))
-                and s.get('noise_relative_error') > 0
-            ])
-            if len(nres) == 0:
-                return float('inf')
-            p = self.validation_powermean_p
-            return float(np.power(np.mean(np.power(nres, p)), 1.0 / p))
-
-        else:
-            raise ValueError(f"Unknown validation objective: {self.validation_objective}")
-
-    def _get_storage_path(self) -> str:
-        output_path = Path(self.output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{output_path / (self.study_name + '.db')}"
-
-    def _load_existing_study(self) -> optuna.Study | None:
-        try:
-            return optuna.load_study(
-                study_name=self.study_name,
-                storage=self._get_storage_path(),
-            )
-        except KeyError:
-            return None
-
-    def _show_study_status(self) -> bool:
-        study = self._load_existing_study()
-        if study is None:
-            logger.info(f"No existing study found with name '{self.study_name}'")
-            return False
-
-        n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-        n_pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
-        n_failed = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
-
-        lines = [
-            f"Study: {self.study_name} | Storage: {self._get_storage_path()}",
-            f"Trials: {len(study.trials)} total ({n_complete} complete, {n_pruned} pruned, {n_failed} failed)",
-        ]
-        if n_complete > 0:
-            params = ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
-                               for k, v in study.best_params.items())
-            lines.append(f"Best: #{study.best_trial.number} loss={study.best_value:.6f} [{params}]")
-        logger.info("\n".join(lines))
-        return True
-
-    def _set_nested_value(self, obj: Any, path: list[str], value: Any):
-        """Set a nested attribute value using a path like ['node_functions', 'translation', 'kwargs', 'rate_dim']."""
-        current = obj
-        for key in path[:-1]:
-            if hasattr(current, key):
-                current = getattr(current, key)
-            elif isinstance(current, dict):
-                current = current[key]
-            else:
-                raise ValueError(f"Cannot navigate path {'.'.join(path)} in {type(obj).__name__}")
-
-        # set the final value
-        final_key = path[-1]
-        if hasattr(current, final_key):
-            setattr(current, final_key, value)
-        elif isinstance(current, dict):
-            current[final_key] = value
-        else:
-            raise ValueError(f"Cannot set {final_key} in {type(current).__name__}")
-
-    def _compute_x0(self) -> dict[str, float] | None:
-        """Compute initial point for CMA-ES based on cmaes_x0 setting.
-
-        Returns:
-            Dictionary mapping parameter names to initial values, or None for default (center).
-        """
-        if self.cmaes_x0 is None or self.cmaes_x0 == "center":
-            return None
-
-        x0 = {}
-        for hp in self.hyperparams:
-            if hp.type in ("float", "log_float", "int"):
-                low, high = hp.low, hp.high
-                if self.cmaes_x0 == "sparse":
-                    # Start near the low end (10% of range)
-                    x0[hp.name] = low + 0.1 * (high - low)
-                elif self.cmaes_x0 == "dense":
-                    # Start near the high end (90% of range)
-                    x0[hp.name] = low + 0.9 * (high - low)
-            # categorical params don't get x0
-        return x0 if x0 else None
-
-    def _create_cmaes_sampler(
-        self,
-        n_startup: int = 1,
-        source_trials: list | None = None,
-        independent_sampler: BaseSampler | None = None,
-    ) -> optuna.samplers.BaseSampler:
-        """Create CMA-ES sampler with configured restart strategy.
-
-        Uses OptunaHub's RestartCmaEsSampler for ipop/bipop strategies, which are
-        designed to escape local minima by restarting with modified population sizes.
-
-        - ipop: Restart with increasing population size (better exploration)
-        - bipop: Alternate between small (exploitation) and large (exploration) populations
-        - lr_adapt: Learning rate adaptation for multimodal/noisy problems
-        - with_margin: Prevents discrete parameters from collapsing to single values
-        - source_trials: Warm start from existing trials (estimates initial distribution)
-        - x0: Initial point (sparse/dense/center)
-        """
-        restart_strategy = self.cmaes_restart_strategy
-        if restart_strategy == "none":
-            restart_strategy = None
-
-        # compute x0 if specified
-        x0 = self._compute_x0()
-        if x0:
-            logger.info(
-                f"Using {self.cmaes_x0} initialization for CMA-ES (x0 values near {list(x0.values())[0]:.2f})"
-            )
-
-        # use OptunaHub for restart strategies (ipop/bipop)
-        if restart_strategy in ("ipop", "bipop"):
-            if not _OPTUNAHUB_AVAILABLE:
-                logger.warning(
-                    "optunahub not installed, falling back to standard CMA-ES without restarts. "
-                    "Install with: pip install optunahub"
-                )
-                restart_strategy = None
-            else:
-                # RestartCmaEsSampler doesn't support with_margin, lr_adapt, source_trials, or x0
-                if self.cmaes_with_margin:
-                    logger.info(
-                        f"Note: with_margin not supported with {restart_strategy} restarts, "
-                        "using restart strategy (more important for avoiding local minima)"
-                    )
-                if source_trials:
-                    logger.info(
-                        f"Note: warm start (source_trials) not supported with {restart_strategy} restarts"
-                    )
-                if x0:
-                    logger.info(
-                        f"Note: x0 not supported with {restart_strategy} restarts, "
-                        "x0 is sampled uniformly within search space for each restart"
-                    )
-                module = optunahub.load_module("samplers/restart_cmaes")
-                RestartCmaEsSampler = module.RestartCmaEsSampler
-                logger.info(
-                    f"Using RestartCmaEsSampler with {restart_strategy} strategy, popsize={self.cmaes_popsize}"
-                )
-                return RestartCmaEsSampler(
-                    n_startup_trials=n_startup,
-                    seed=self.seed,
-                    restart_strategy=restart_strategy,
-                    popsize=self.cmaes_popsize,
-                    inc_popsize=self.cmaes_inc_popsize,
-                    sigma0=self.cmaes_sigma0,
-                    warn_independent_sampling=False,
+            with Session(engine) as session:
+                self.validation_set.run_selectors(session)
+                val_dman = build_data_manager(
+                    lib=self._lib,
+                    db_session=session,
+                    path_prefix=self.path_prefix,
+                    data_conf=self.data_conf,
+                    dataset=self.validation_set,
+                    jax_sampling=False,
                 )
 
-        # standard CMA-ES (no restarts, but can use lr_adapt, with_margin, source_trials, and x0)
-        if source_trials:
-            logger.info(f"Warm starting CMA-ES from {len(source_trials)} existing trials")
-            if x0:
-                logger.info("Note: x0 is ignored when using source_trials (warm start)")
-                x0 = None
-        return CmaEsSampler(
-            x0=x0,
-            n_startup_trials=n_startup,
+            xs, ys, networks = val_dman.get_per_network_xy_samples(self.n_validation_evals)
+            model = BiocompModel(compute_config=compute_conf, rescaler=self.data_conf.rescaler)
+            network_model = NetworkModel(model=model, network=networks)
+
+            self._validation_predictor = NetworkPrediction(
+                predict_at=xs,
+                network_model=network_model,
+                ground_truth=ys,
+                seed=self.seed or 42,
+                disable_variational=True,
+                max_evals=self.n_validation_evals,
+                already_latent=True,
+                n_stats_workers=8,
+                device='gpu',
+                per_prediction_info=[{'network_name': n.name} for n in networks],
+                enable_gridstats=needs_gridstats,
+                gridstats_hypercube_res=self.validation_gridstats_res,
+                gridstats_hypercube_max=self.validation_gridstats_max,
+                gridstats_k=self.validation_gridstats_k,
+                gridstats_radius=self.validation_gridstats_radius,
+                gridstats_min_points=self.validation_gridstats_min_points,
+            )
+
+            self._validation_runner = ValidationRunner(
+                self._validation_predictor,
+                objective=self.validation_objective,
+                softmax_alpha=self.validation_softmax_alpha,
+                powermean_p=self.validation_powermean_p,
+            )
+            logger.info(f"Validation ready ({len(networks)} networks)")
+
+    def _create_sampler(self, n_complete: int = 0, source_trials=None) -> BaseSampler:
+        """Create Optuna sampler based on configuration."""
+        from biocomptools.hyperopt.samplers import create_sampler
+
+        sampler_type = self.sampler
+        if sampler_type == "hybrid":
+            sampler_type = "tpe" if n_complete < self.hybrid_switch_trial else "cmaes"
+
+        return create_sampler(
+            sampler_type=sampler_type,
             seed=self.seed,
-            popsize=self.cmaes_popsize,
-            sigma0=self.cmaes_sigma0,
-            lr_adapt=self.cmaes_lr_adapt,
-            with_margin=self.cmaes_with_margin,
-            source_trials=source_trials,
-            independent_sampler=independent_sampler,
-            warn_independent_sampling=False,
+            n_startup_trials=self.n_startup_trials,
+            cmaes_restart_strategy=self.cmaes_restart_strategy,
+            cmaes_with_margin=self.cmaes_with_margin,
+            cmaes_popsize=self.cmaes_popsize,
+            cmaes_sigma0=self.cmaes_sigma0,
+            cmaes_source_trials=source_trials,
+            cmaes_warn_independent_sampling=self.cmaes_warn_independent_sampling,
         )
-
-    def _create_sampler(
-        self, n_completed_trials: int = 0, source_trials: list | None = None
-    ) -> optuna.samplers.BaseSampler:
-        """Create sampler based on configuration.
-
-        For hybrid mode, returns TPE if below switch threshold, CMA-ES otherwise.
-        CMA-ES is particularly effective for continuous hyperparameters in high dimensions
-        once we have some good samples to initialize from.
-        """
-        # Use sparse sampler for startup trials if requested
-        if self.sparse_sampling:
-            logger.info(
-                f"Using sparse sampling (beta alpha={self.sparse_alpha}) for independent samples"
-            )
-
-        if self.sampler == "sparse":
-            # Pure sparse random sampling (no CMA-ES)
-            return SparseSampler(alpha=self.sparse_alpha, seed=self.seed)
-        elif self.sampler == "tpe":
-            return TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed)
-        elif self.sampler == "cmaes":
-            # For CMA-ES with sparse_sampling, use SparseSampler as independent_sampler
-            independent_sampler = (
-                SparseSampler(alpha=self.sparse_alpha, seed=self.seed)
-                if self.sparse_sampling
-                else None
-            )
-            return self._create_cmaes_sampler(
-                n_startup=self.n_startup_trials,
-                source_trials=source_trials if self.cmaes_warm_start else None,
-                independent_sampler=independent_sampler,
-            )
-        elif self.sampler == "hybrid":
-            if n_completed_trials < self.hybrid_switch_trial:
-                logger.info(
-                    f"Hybrid mode: using TPE (trial {n_completed_trials} < {self.hybrid_switch_trial})"
-                )
-                return TPESampler(n_startup_trials=self.n_startup_trials, seed=self.seed)
-            else:
-                logger.info(
-                    f"Hybrid mode: switched to CMA-ES (trial {n_completed_trials} >= {self.hybrid_switch_trial})"
-                )
-                return self._create_cmaes_sampler(
-                    n_startup=0,  # don't need random trials, we have TPE samples
-                    source_trials=source_trials if self.cmaes_warm_start else None,
-                )
-        elif self.sampler == "sparse_cmaes":
-            # Sparse random startup, then CMA-ES optimization from sparse region
-            if n_completed_trials < self.n_startup_trials:
-                logger.info(
-                    f"sparse_cmaes: using sparse sampling (trial {n_completed_trials} < {self.n_startup_trials})"
-                )
-                return SparseSampler(alpha=self.sparse_alpha, seed=self.seed)
-            else:
-                logger.info(
-                    f"sparse_cmaes: switched to CMA-ES (trial {n_completed_trials} >= {self.n_startup_trials})"
-                )
-                # Use sparse trials to warm-start CMA-ES (it will learn the sparse distribution)
-                return self._create_cmaes_sampler(
-                    n_startup=0,  # don't need more random trials
-                    source_trials=source_trials if self.cmaes_warm_start else None,
-                    independent_sampler=SparseSampler(alpha=self.sparse_alpha, seed=self.seed),
-                )
-        else:
-            raise ValueError(f"Unknown sampler: {self.sampler}")
-
-    def _launch_dashboard(self):
-        """Launch Optuna dashboard web interface."""
-        storage = self._get_storage_path()
-
-        try:
-            import optuna_dashboard
-            logger.info(f"Launching Optuna Dashboard at http://localhost:{self.dashboard_port} (Ctrl+C to stop)")
-            optuna_dashboard.run_server(storage, port=self.dashboard_port)
-        except ImportError:
-            logger.error(f"optuna-dashboard not installed. Install with: pip install optuna-dashboard")
-            logger.error(f"Or run manually: optuna-dashboard {storage}")
-            sys.exit(1)
-
-    def _save_results(self, study: optuna.Study):
-        results_dir = Path(self.output_dir) / self.study_name
-        results_dir.mkdir(parents=True, exist_ok=True)
-
-        with open(results_dir / "best_hyperparams.json", "w") as f:
-            json.dump(study.best_params, f, indent=2)
-        with open(results_dir / "best_hyperparams.pkl", "wb") as f:
-            pickle.dump(study.best_params, f)
-
-        df = study.trials_dataframe()
-        df.to_csv(results_dir / "trials.csv", index=False)
-
-        summary = {
-            "best_value": study.best_value,
-            "best_trial": study.best_trial.number,
-            "n_trials": len(study.trials),
-            "n_complete": len(
-                [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            ),
-            "n_pruned": len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]),
-        }
-        with open(results_dir / "summary.json", "w") as f:
-            json.dump(summary, f, indent=2)
-
-        logger.info(f"Results saved to {results_dir} (best loss: {study.best_value:.6f})")
-
-    def _get_top_models_dir(self) -> Path:
-        """Get directory for top models."""
-        return Path(self.output_dir) / self.study_name / "top_models"
-
-    def _save_model_if_top(
-        self,
-        trial_number: int,
-        loss: float,
-        params,
-        compute_conf: ComputeConfig,
-        hyperparams: dict,
-    ):
-        """Save model if it's among the top N, evicting the worst if needed."""
-        if self.n_top_models <= 0 or loss == float('inf'):
-            return
-
-        from biocomp.jaxutils import tree_to_np
-        from biocomptools.run_training import get_shared_params
-
-        models_dir = self._get_top_models_dir()
-        models_dir.mkdir(parents=True, exist_ok=True)
-
-        # get existing models and their losses
-        existing = []
-        for f in models_dir.glob("*.pickle"):
-            try:
-                # parse loss from filename: trial_NNN_loss_X.XXXXXX.pickle
-                parts = f.stem.split("_")
-                idx = parts.index("loss")
-                file_loss = float(parts[idx + 1])
-                existing.append((file_loss, f))
-            except (ValueError, IndexError):
-                continue
-
-        existing.sort(key=lambda x: x[0])  # sort by loss ascending
-
-        # check if this model should be saved
-        if len(existing) >= self.n_top_models and loss >= existing[-1][0]:
-            return  # not good enough
-
-        # create model - extract single replicate if params have replicate dimension
-        try:
-            single_params = tree_get(params, 0)
-        except (IndexError, TypeError):
-            single_params = params
-        shared_params = get_shared_params(pickle.loads(pickle.dumps(single_params)))
-        if shared_params is None:
-            logger.warning(f"Trial {trial_number}: could not extract shared params")
-            return
-
-        model = BiocompModel(
-            compute_config=compute_conf,
-            rescaler=self.data_conf.rescaler,
-            shared_params=tree_to_np(shared_params),
-            metadata={
-                'hyperopt_trial': trial_number,
-                'hyperopt_loss': loss,
-                'hyperopt_study': self.study_name,
-                'hyperparams': {k: v for k, v in hyperparams.items() if not k.startswith('_')},
-            },
-        )
-
-        # save model
-        fname = models_dir / f"trial_{trial_number:04d}_loss_{loss:.6f}.pickle"
-        model.save(fname)
-        logger.debug(f"Saved model {model.signature} (trial {trial_number}, loss {loss:.6f})")
-
-        # evict worst if over limit
-        existing.append((loss, fname))
-        existing.sort(key=lambda x: x[0])
-        while len(existing) > self.n_top_models:
-            _, worst_file = existing.pop()
-            worst_file.unlink()
-            logger.debug(f"Evicted model {worst_file.name}")
 
     def _run_single_trial(self, trial: optuna.Trial) -> float:
-        """Run a single training trial with sampled hyperparameters."""
-        # sample hyperparameters
-        hyperparams = {spec.name: spec.suggest(trial) for spec in self.hyperparams}
-
-        # apply ordering constraints
-        if hyperparams.get("initial_learning_rate", 0) > hyperparams.get("peak_learning_rate", 1):
-            hyperparams["initial_learning_rate"] = hyperparams["peak_learning_rate"] * 0.1
-        if hyperparams.get("final_learning_rate", 0) > hyperparams.get("peak_learning_rate", 1):
-            hyperparams["final_learning_rate"] = hyperparams["peak_learning_rate"] * 0.01
-
-        # seed per trial
-        hyperparams['seed'] = self.seed if self.seed is not None else trial.number
+        """Run single training trial."""
+        hp = {spec.name: spec.suggest(trial) for spec in self.hyperparams}
+        hp['seed'] = self.seed if self.seed else trial.number
 
         try:
-            if isinstance(self.training_conf, DeferredNode):
-                training_conf = self.training_conf.construct(context=hyperparams)
-            else:
-                training_conf = self.training_conf
-
-            if isinstance(self.compute_conf, DeferredNode):
-                compute_conf = self.compute_conf.construct(context=hyperparams)
-            else:
-                compute_conf = self.compute_conf
-
-            # handle path-based hyperparameters (e.g., "compute_conf.node_functions.translation.kwargs.rate_dim")
-            for spec in self.hyperparams:
-                if '.' in spec.name and spec.name.startswith('compute_conf.'):
-                    path_parts = spec.name.split('.')[1:]  # skip 'compute_conf' prefix
-                    value = hyperparams[spec.name]
-                    self._set_nested_value(compute_conf, path_parts, value)
-                elif '.' in spec.name and spec.name.startswith('training_conf.'):
-                    path_parts = spec.name.split('.')[1:]  # skip 'training_conf' prefix
-                    value = hyperparams[spec.name]
-                    self._set_nested_value(training_conf, path_parts, value)
-
-            # update weights if needed (for dataset weight optimization)
-            # _prepare_data_manager uses fast path when DataManager exists
-            if self.rebuild_dman_per_trial:
-                self._prepare_data_manager(hyperparams)
-
-            # compile and cache step on first trial (for dataset weight optimization)
-            # only do this when rebuild_dman_per_trial is True (dataset weights only change)
-            # and hyperparams are only dataset weights (no structural hyperparams)
-            use_cached_step = self.rebuild_dman_per_trial and all(
-                spec.name.startswith("dataweight_") for spec in self.hyperparams
+            training_conf = (
+                self.training_conf.construct(context=hp)
+                if isinstance(self.training_conf, DeferredNode)
+                else self.training_conf
             )
-            if use_cached_step:
+            training_conf = training_conf.model_copy()
+            training_conf.clear_source_data = False  # keep data for reuse across trials
+            compute_conf = (
+                self.compute_conf.construct(context=hp)
+                if isinstance(self.compute_conf, DeferredNode)
+                else self.compute_conf
+            )
+
+            if self.rebuild_dman_per_trial:
+                self._prepare_data_manager(hp)
+
+            use_cached = self.rebuild_dman_per_trial and all(
+                s.name.startswith("dataweight_") for s in self.hyperparams
+            )
+            if use_cached:
                 self._compile_cached_step(training_conf, compute_conf)
 
-            # init validation predictor on first trial if needed
-            if self.use_validation_loss and self._validation_predictor is None:
+            if self.use_validation_loss and self._validation_runner is None:
                 self._prepare_validation(compute_conf)
-
-            # create loggers
-            pruning_logger = None
-            if self.pruning and not self.use_validation_loss:
-                pruning_logger = OptunaPruningLogger(trial=trial)
-
-            progress_logger = TqdmProgressLogger(trial_number=trial.number)
-
-            logger_callbacks = []
-            # add progress bar callbacks
-            progress_logger.initialize(None)
-            logger_callbacks.extend(progress_logger.get_callbacks(None))
-            # add pruning callbacks
-            if pruning_logger:
-                pruning_logger.initialize(None)
-                logger_callbacks.extend(pruning_logger.get_callbacks(None))
 
             t0 = time.time()
             params, loss_history, _ = start(
                 dman=self._training_dman,
                 training_config=training_conf,
                 compute_config=compute_conf,
-                loggers=logger_callbacks,
-                cached_step=self._cached_step if use_cached_step else None,
+                cached_step=self._cached_step if use_cached else None,
+                skip_loss_history=self.use_validation_loss,
             )
-            train_elapsed = time.time() - t0
+            train_time = time.time() - t0
 
-            # determine final loss
             if self.use_validation_loss:
-                # use validation RMSE as objective
-                t_val = time.time()
-                loss = self._compute_validation_loss(params)
-                val_elapsed = time.time() - t_val
-                logger.info(f"Trial {trial.number}: val_loss={loss:.6f} (train={train_elapsed:.1f}s, val={val_elapsed:.1f}s)")
-            elif pruning_logger:
-                loss = pruning_logger.get_final_loss()
-                logger.info(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
+                t0 = time.time()
+                loss, stats = self._validation_runner.compute_loss_with_stats(params)
+                val_time = time.time() - t0
+                logger.info(
+                    f"Trial {trial.number}: val={loss:.6f} (train={train_time:.1f}s, val={val_time:.1f}s)"
+                )
+                # update best stats tracking
+                if loss < self._best_loss:
+                    self._best_loss = loss
+                    self._best_stats = stats
+                    self._best_trial_number = trial.number
+                if self.verbose_stats:
+                    try:
+                        from biocomptools.hyperopt.validation import print_trial_summary
+
+                        names = self._validation_runner.get_network_names()
+                        print_trial_summary(
+                            trial.number,
+                            loss,
+                            stats,
+                            names,
+                            top_n=self.stats_top_n,
+                            best_stats=self._best_stats,
+                            best_loss=self._best_loss,
+                            best_trial_number=self._best_trial_number,
+                        )
+                    except Exception as plot_err:
+                        logger.warning(f"Failed to print stats: {plot_err}")
             elif loss_history:
                 losses = np.asarray(loss_history)
-                mean_losses = losses.mean(axis=(1, 2))
-                n_final = max(1, len(mean_losses) // 20)
-                loss = float(mean_losses[-n_final:].mean())
-                logger.info(f"Trial {trial.number}: train_loss={loss:.6f} ({train_elapsed:.1f}s)")
+                n_final = max(1, len(losses) // 20)
+                loss = float(losses[-n_final:].mean(axis=(0, 1, 2)))
+                logger.info(f"Trial {trial.number}: train={loss:.6f} ({train_time:.1f}s)")
             else:
                 loss = float('inf')
-                logger.warning(f"Trial {trial.number}: loss=inf (no data)")
 
-            # save model if among top N
-            self._save_model_if_top(trial.number, loss, params, compute_conf, hyperparams)
-
+            self._save_model_if_top(trial.number, loss, params, compute_conf, hp)
             return loss
 
         except optuna.TrialPruned:
@@ -1278,373 +457,390 @@ class HyperoptProgram(BaseModel):
             logger.exception(f"Trial {trial.number} failed: {e}")
             return float('inf')
 
-    def _build_per_trial_weights(self, all_hyperparams: list[dict]) -> Any:
-        """Build (n_trials, n_outputs) weight matrix from hyperparams for vmap-trials."""
-        import jax.numpy as jnp
-        from biocomp.train import expand_weights_to_outputs
-
-        per_trial_weights = []
-
-        for hyperparams in all_hyperparams:
-            if isinstance(self.training_set, DeferredNode):
-                resolved = self.training_set.construct(context=hyperparams)
-                with self.db_session as session:
-                    resolved.run_selectors(session)
-                    ndp_weights = {ndp.network_name: ndp.weight for ndp in resolved.content}
-            else:
-                ndp_weights = {}
-
-            weights = [ndp_weights.get(name, 1.0) for name in self._network_weight_mapping]
-            per_output_weights = expand_weights_to_outputs(weights, self._training_dman.get_networks())
-            per_trial_weights.append(per_output_weights)
-
-        return jnp.array(per_trial_weights)
-
     def _run_vmap_trials_batch(
         self,
         trials: list[optuna.Trial],
-        training_conf: TrainingConfig,
-        compute_conf: ComputeConfig,
-    ) -> tuple[list[float], Any, list[dict], ComputeConfig]:
+        training_conf,
+        compute_conf,
+        batch_idx: int = 0,
+        total_batches: int = 1,
+    ):
         """Run multiple trials as vmapped pseudo-replicates."""
         import jax
 
         n_trials = len(trials)
-        trial_numbers = [t.number for t in trials]
-        print(f"[vmap-trials] === Batch of {n_trials} trials ({trial_numbers[0]}-{trial_numbers[-1]}) ===")
-        sys.stdout.flush()
+        trial_nums = [t.number for t in trials]
+        print(
+            f"\n[vmap] Batch {batch_idx + 1}/{total_batches} ({n_trials} trials, optuna ids: {trial_nums[0]}-{trial_nums[-1]})"
+        )
 
-        all_hyperparams = [
-            {spec.name: spec.suggest(trial) for spec in self.hyperparams}
-            for trial in trials
-        ]
-        for i, hp in enumerate(all_hyperparams):
+        all_hp = [{spec.name: spec.suggest(t) for spec in self.hyperparams} for t in trials]
+        for i, hp in enumerate(all_hp):
             hp['seed'] = (self.seed or 0) + trials[i].number
 
-        batch_training_conf = training_conf.model_copy()
-        batch_training_conf.n_replicates = n_trials
+        batch_conf = training_conf.model_copy()
+        batch_conf.n_replicates = n_trials
+        batch_conf.clear_source_data = False  # keep data for reuse across trials
 
-        # Compile and cache step on first batch (same structure, only weights differ)
-        if self._vmap_cached_step is None:
-            print(f"[vmap-trials] Compiling training step (first batch only)...")
-            sys.stdout.flush()
-            t_compile = time.time()
-            self._vmap_cached_step = compile_training_step(
-                dman=self._training_dman,
-                training_config=batch_training_conf,
-                compute_config=compute_conf,
+        # Thread-safe vmap compilation
+        with self._compile_lock:
+            if self._vmap_cached_step is None:
+                print("[vmap] Compiling...")
+                t0 = time.time()
+                self._vmap_cached_step = compile_training_step(
+                    dman=self._training_dman,
+                    training_config=batch_conf,
+                    compute_config=compute_conf,
+                )
+                print(f"[vmap] Compiled ({time.time() - t0:.1f}s)")
+
+        # Use unique seeds per trial (based on trial numbers) to avoid position-based bias across batches
+        trial_seeds = np.array([hp['seed'] for hp in all_hp], dtype=np.uint32)
+        init_keys = jax.vmap(jax.random.PRNGKey)(trial_seeds)
+        params = jax.vmap(self._vmap_cached_step.stack.init)(init_keys)
+
+        weights = self._build_per_trial_weights_fast(all_hp)
+        params.at("global/per_output_weights", weights, tags=["non_grad", "local"], overwrite=True)
+
+        # Cache batches for reuse across trial batches (major speedup)
+        n_batches_needed = batch_conf.n_batches
+        batch_size = batch_conf.batch_size
+        if self._cached_batches is None:
+            print(f"[vmap] Generating batches (caching for reuse)...")
+            t0 = time.time()
+            # Generate enough for max_replicates (first batch size) - subsequent can slice
+            flat_n = n_trials * n_batches_needed
+            batch_key = jax.random.PRNGKey(self.seed or 42)
+            xflat, yflat = self._training_dman.get_batches(flat_n, batch_size, batch_key)
+            self._cached_batches = (xflat, yflat, n_trials)  # store with n_replicates used
+            print(f"[vmap] Batch generation done ({time.time() - t0:.1f}s)")
+
+        xflat, yflat, cached_n_reps = self._cached_batches
+        if n_trials <= cached_n_reps:
+            # Slice and reshape cached batches
+            flat_n = n_trials * n_batches_needed
+            xy_batches = (
+                xflat[:flat_n].reshape(n_trials, n_batches_needed, *xflat.shape[1:]),
+                yflat[:flat_n].reshape(n_trials, n_batches_needed, *yflat.shape[1:]),
             )
-            self._vmap_stack = self._vmap_cached_step.stack
-            print(f"[vmap-trials] Compilation done ({time.time() - t_compile:.1f}s)")
+        else:
+            # Rare case: more trials than cached - regenerate
+            xy_batches = None
 
-        print(f"[vmap-trials] Initializing {n_trials} parameter sets...")
-        t_init = time.time()
-        init_key = jax.random.PRNGKey(batch_training_conf.seed or 0)
-        params = jax.vmap(self._vmap_stack.init)(jax.random.split(init_key, n_trials))
+        print(f"[vmap] Training {n_trials} trials...")
+        t0 = time.time()
 
-        per_trial_weights = self._build_per_trial_weights(all_hyperparams)
-        params.at(
-            "global/per_output_weights", per_trial_weights, tags=["non_grad", "local"], overwrite=True
-        )
-        print(f"[vmap-trials] Initialization done ({time.time() - t_init:.1f}s)")
+        # Create hyperopt training logger if rich is available
+        hyperopt_loggers = []
+        try:
+            from biocomptools.hyperopt.training_logger import HyperoptTrainingLogger
 
-        print(f"[vmap-trials] Training {n_trials} trials in parallel...")
-        sys.stdout.flush()
-        t_train = time.time()
+            hyperopt_logger = HyperoptTrainingLogger(n_replicates=n_trials)
+            hyperopt_loggers = hyperopt_logger.get_callbacks(None)
+        except ImportError:
+            pass
+
         params, loss_history, _ = start(
             dman=self._training_dman,
-            training_config=batch_training_conf,
+            training_config=batch_conf,
             compute_config=compute_conf,
             init_params=params,
             skip_weight_init=True,
             cached_step=self._vmap_cached_step,
+            loggers=hyperopt_loggers,
+            skip_loss_history=self.use_validation_loss,
+            xy_batches=xy_batches,
         )
-        train_elapsed = time.time() - t_train
-        print(f"[vmap-trials] Training done ({train_elapsed:.1f}s)")
+        print(f"[vmap] Training done ({time.time() - t0:.1f}s)")
 
-        losses = []
+        best_stats = None
         if self.use_validation_loss:
-            print(f"[vmap-trials] Computing validation losses (batched)...")
-            t_val = time.time()
-            # Use batched validation - all trials at once with vmap
-            losses = self._compute_validation_losses_batched(params)
-            for i, loss in enumerate(losses):
-                print(f"[vmap-trials]   Trial {trial_numbers[i]}: loss={loss:.6f}")
-            print(f"[vmap-trials] Validation done ({time.time() - t_val:.1f}s total)")
+            print("[vmap] Validation...")
+            t0 = time.time()
+            if self.verbose_stats:
+                losses, best_idx, best_stats = self._validation_runner.compute_losses_batched(
+                    params, verbose=True, return_best_stats=True
+                )
+            else:
+                losses = self._validation_runner.compute_losses_batched(params, verbose=True)
+            print(f"[vmap] Validation done ({time.time() - t0:.1f}s)")
         else:
             loss_arr = np.asarray(loss_history)
             n_final = max(1, loss_arr.shape[0] // 20)
-            for i in range(n_trials):
-                rep_losses = loss_arr[:, i, :].mean(axis=-1)
-                loss = float(rep_losses[-n_final:].mean())
-                losses.append(loss)
-                print(f"[vmap-trials]   Trial {trial_numbers[i]}: train_loss={loss:.6f}")
+            losses = [float(loss_arr[-n_final:, i, :].mean()) for i in range(n_trials)]
 
-        print(
-            f"[vmap-trials] Batch complete: "
-            f"losses min={min(losses):.6f}, max={max(losses):.6f}, mean={np.mean(losses):.6f}"
+        return losses, params, all_hp, compute_conf, best_stats
+
+    async def _run_vmap_optimization(self):
+        """Run optimization with vmap-trials batching."""
+        existing_study = self._load_existing()
+        previously_completed = self._get_completed_trials(existing_study)
+        n_previously_complete = len(previously_completed)
+
+        sampler = self._create_sampler(
+            n_previously_complete, previously_completed if self.cmaes_warm_start else None
         )
-        sys.stdout.flush()
-
-        return losses, params, all_hyperparams, compute_conf
-
-    async def _run_vmap_trials_optimization(self):
-        """Run optimization using vmap-trials batching."""
-        print(f"[vmap-trials] Setting up optimization...")
-        existing = self._load_existing_study()
-        n_complete = 0
-        source_trials = None
-        if existing is not None:
-            completed = [t for t in existing.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            n_complete = len(completed)
-            print(f"[vmap-trials] Resuming study: {len(existing.trials)} trials ({n_complete} complete)")
-            if n_complete > 0:
-                print(f"[vmap-trials] Current best loss: {existing.best_value:.6f}")
-            if self.cmaes_warm_start and self.sampler in ("cmaes", "hybrid"):
-                source_trials = completed
-
-        sampler = self._create_sampler(n_complete, source_trials=source_trials)
-        pruner = optuna.pruners.NopPruner()
-
         study = optuna.create_study(
             study_name=self.study_name,
-            storage=self._get_storage_path(),
+            storage=self._storage_path,
             load_if_exists=True,
             direction="minimize",
             sampler=sampler,
-            pruner=pruner,
+            pruner=optuna.pruners.NopPruner(),
         )
 
-        if isinstance(self.training_conf, DeferredNode):
-            training_conf = self.training_conf.construct(context={})
-        else:
-            training_conf = self.training_conf
+        training_conf = (
+            self.training_conf.construct(context={})
+            if isinstance(self.training_conf, DeferredNode)
+            else self.training_conf
+        )
+        compute_conf = (
+            self.compute_conf.construct(context={})
+            if isinstance(self.compute_conf, DeferredNode)
+            else self.compute_conf
+        )
 
-        if isinstance(self.compute_conf, DeferredNode):
-            compute_conf = self.compute_conf.construct(context={})
-        else:
-            compute_conf = self.compute_conf
-
-        if self.use_validation_loss and self._validation_predictor is None:
-            print(f"[vmap-trials] Preparing validation predictor...")
+        if self.use_validation_loss and self._validation_runner is None:
             self._prepare_validation(compute_conf)
 
-        n_trials_per_batch = self.n_jobs
+        batch_size = self.n_jobs
+        total_batches = (self.n_trials + batch_size - 1) // batch_size
+        db_path = Path(self.output_dir).resolve() / (self.study_name + '.db')
+
+        # show resume info
+        if n_previously_complete > 0:
+            print(f"\n{'═' * 70}")
+            print(f"[vmap] Resuming study '{self.study_name}'")
+            print(f"[vmap] Database: {db_path}")
+            print(f"[vmap] Previously completed: {n_previously_complete} trials")
+            if existing_study and existing_study.best_trial:
+                print(
+                    f"[vmap] Previous best: {existing_study.best_value:.6f} (trial #{existing_study.best_trial.number})"
+                )
+            print(
+                f"[vmap] New trials to run: {self.n_trials} (in {total_batches} batches of {batch_size})"
+            )
+            print(f"{'═' * 70}\n")
+        else:
+            print(f"\n{'═' * 70}")
+            print(f"[vmap] Starting new study '{self.study_name}'")
+            print(f"[vmap] Database: {db_path}")
+            print(
+                f"[vmap] Trials to run: {self.n_trials} (in {total_batches} batches of {batch_size})"
+            )
+            print(f"{'═' * 70}\n")
+
         remaining = self.n_trials
+        batch_idx = 0
+        pbar = tqdm(total=self.n_trials, desc="Hyperopt", unit="trial")
 
-        print(
-            f"[vmap-trials] Starting optimization: {self.n_trials} trials in batches of {n_trials_per_batch}"
-        )
-
-        batch_num = 0
         try:
             while remaining > 0:
-                batch_num += 1
-                batch_size = min(n_trials_per_batch, remaining)
-                trials = [study.ask() for _ in range(batch_size)]
-
+                trials = [study.ask() for _ in range(min(batch_size, remaining))]
                 try:
-                    losses, params, all_hyperparams, comp_conf = self._run_vmap_trials_batch(
-                        trials, training_conf, compute_conf
+                    losses, params, all_hp, comp_conf, best_stats = self._run_vmap_trials_batch(
+                        trials,
+                        training_conf,
+                        compute_conf,
+                        batch_idx=batch_idx,
+                        total_batches=total_batches,
                     )
-
-                    for i, (trial, loss, hyperparams) in enumerate(zip(trials, losses, all_hyperparams)):
+                    best_idx = int(np.argmin(losses))
+                    for i, (trial, loss, hp) in enumerate(zip(trials, losses, all_hp, strict=True)):
                         study.tell(trial, loss)
-                        trial_params = tree_get(params, i)
-                        self._save_model_if_top(trial.number, loss, trial_params, comp_conf, hyperparams)
+                        idx = i
+                        single_params = jax.tree.map(lambda x, j=idx: x[j], params)
+                        self._save_model_if_top(trial.number, loss, single_params, comp_conf, hp)
 
+                    # update best stats tracking and show summary
+                    batch_best_loss = losses[best_idx]
+                    batch_best_trial = trials[best_idx].number
+                    if batch_best_loss < self._best_loss:
+                        self._best_loss = batch_best_loss
+                        self._best_stats = best_stats
+                        self._best_trial_number = batch_best_trial
+                    if self.verbose_stats and self.use_validation_loss and best_stats is not None:
+                        try:
+                            from biocomptools.hyperopt.validation import print_trial_summary
+
+                            names = self._validation_runner.get_network_names()
+                            print_trial_summary(
+                                batch_best_trial,
+                                batch_best_loss,
+                                best_stats,
+                                names,
+                                top_n=self.stats_top_n,
+                                best_stats=self._best_stats,
+                                best_loss=self._best_loss,
+                                best_trial_number=self._best_trial_number,
+                            )
+                        except Exception as plot_err:
+                            logger.warning(f"Failed to print stats: {plot_err}")
                 except Exception as e:
-                    print(f"[vmap-trials] ERROR: Batch failed: {e}")
-                    logger.exception(f"Vmap-trials batch failed: {e}")
+                    logger.exception(f"Batch failed: {e}")
                     for trial in trials:
                         study.tell(trial, state=optuna.trial.TrialState.FAIL)
 
-                remaining -= batch_size
-                completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-                if completed:
-                    print(
-                        f"[vmap-trials] Progress: {len(completed)}/{self.n_trials} complete, "
-                        f"best={study.best_value:.6f}"
-                    )
+                pbar.update(len(trials))
+                remaining -= len(trials)
+                batch_idx += 1
+
+                # show progress summary
+                all_completed = [
+                    t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+                ]
+                new_completed = len(all_completed) - n_previously_complete
+                pbar.set_postfix(
+                    best=f"{study.best_value:.4f}", new=new_completed, total=len(all_completed)
+                )
 
         except KeyboardInterrupt:
-            print("[vmap-trials] Interrupted. Progress saved.")
+            print("\n[vmap] Interrupted by user")
+        finally:
+            pbar.close()
+
+        # final summary
+        all_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        new_completed = len(all_completed) - n_previously_complete
+        print(f"\n{'═' * 70}")
+        print(f"[vmap] Study complete: {new_completed} new trials ({len(all_completed)} total)")
+        print(f"[vmap] Best: {study.best_value:.6f} (trial #{study.best_trial.number})")
+        print(f"{'═' * 70}\n")
 
         self._save_results(study)
-        print(f"[vmap-trials] Optimization complete. Results saved.")
+
+    def _load_existing(self) -> optuna.Study | None:
+        try:
+            return optuna.load_study(study_name=self.study_name, storage=self._storage_path)
+        except KeyError:
+            return None
+
+    def _get_completed_trials(self, study: optuna.Study | None) -> list:
+        if not study:
+            return []
+        return [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+
+    def _save_results(self, study: optuna.Study):
+        out = Path(self.output_dir) / self.study_name
+        out.mkdir(parents=True, exist_ok=True)
+        with open(out / "best_hyperparams.json", "w") as f:
+            json.dump(study.best_params, f, indent=2)
+        study.trials_dataframe().to_csv(out / "trials.csv", index=False)
+        logger.info(f"Results saved to {out}")
+
+    def _save_model_if_top(self, trial_num: int, loss: float, params, compute_conf, hp: dict):
+        if self.n_top_models <= 0 or loss == float('inf'):
+            return
+
+        from biocomp.jaxutils import tree_to_np
+        from biocomptools.run_training import get_shared_params
+
+        models_dir = Path(self.output_dir) / self.study_name / "top_models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        existing = sorted(
+            [
+                (float(f.stem.split("_loss_")[1]), f)
+                for f in models_dir.glob("*.pickle")
+                if "_loss_" in f.stem
+            ],
+            key=lambda x: x[0],
+        )
+
+        if len(existing) >= self.n_top_models and loss >= existing[-1][0]:
+            return
+
+        try:
+            single = jax.tree.map(lambda x: x[0], params)
+        except (IndexError, TypeError):
+            single = params
+
+        shared = get_shared_params(pickle.loads(pickle.dumps(single)))
+        if shared is None:
+            return
+
+        model = BiocompModel(
+            compute_config=compute_conf,
+            rescaler=self.data_conf.rescaler,
+            shared_params=tree_to_np(shared),
+            metadata={'trial': trial_num, 'loss': loss, 'study': self.study_name, 'hp': hp},
+        )
+        model.save(models_dir / f"trial_{trial_num:04d}_loss_{loss:.6f}.pickle")
+
+        existing.append((loss, models_dir / f"trial_{trial_num:04d}_loss_{loss:.6f}.pickle"))
+        existing.sort(key=lambda x: x[0])
+        while len(existing) > self.n_top_models:
+            _, worst = existing.pop()
+            worst.unlink()
 
     async def run(self):
-        """Main entry point."""
-        # handle info-only modes
         if self.dashboard:
-            self._launch_dashboard()
+            import optuna_dashboard
+
+            logger.info(f"Launching dashboard at http://localhost:{self.dashboard_port}")
+            optuna_dashboard.run_server(self._storage_path, port=self.dashboard_port)
             return
 
         if self.show_best:
-            self._show_study_status()
+            study = self._load_existing()
+            if study:
+                completed = self._get_completed_trials(study)
+                logger.info(f"Study: {self.study_name} ({len(completed)} complete)")
+                if completed:
+                    logger.info(f"Best: #{study.best_trial.number} loss={study.best_value:.6f}")
             return
 
         if self.export_only:
-            study = self._load_existing_study()
-            if study is None:
-                logger.warning(f"No existing study found with name '{self.study_name}'")
-                return
-            self._save_results(study)
-            self._show_study_status()
+            study = self._load_existing()
+            if study:
+                self._save_results(study)
             return
 
-        # prepare data manager
         self._prepare_data_manager()
 
-        # vmap-trials mode validation and dispatch
         if self.vmap_trials:
-            if not all(spec.name.startswith("dataweight_") for spec in self.hyperparams):
-                raise ValueError(
-                    "--vmap-trials only supports dataset weight optimization "
-                    "(all hyperparams must start with 'dataweight_')"
-                )
-            if self.n_jobs < 2:
-                raise ValueError("--vmap-trials requires --n-jobs >= 2")
-            await self._run_vmap_trials_optimization()
+            await self._run_vmap_optimization()
             return
 
-        # check for existing study and count completed trials
-        existing = self._load_existing_study()
-        n_complete = 0
-        source_trials = None
-        if existing is not None:
-            completed_trials = [
-                t for t in existing.trials if t.state == optuna.trial.TrialState.COMPLETE
-            ]
-            n_complete = len(completed_trials)
-            logger.info(f"Resuming study: {len(existing.trials)} trials ({n_complete} complete)")
-            if n_complete > 0:
-                logger.info(f"Current best loss: {existing.best_value:.6f}")
-                # use completed trials for warm starting CMA-ES
-                if self.cmaes_warm_start and self.sampler in ("cmaes", "hybrid"):
-                    source_trials = completed_trials
-
-        # create sampler based on config and current progress
-        sampler = self._create_sampler(n_complete, source_trials=source_trials)
+        # standard sequential optimization
+        completed = self._get_completed_trials(self._load_existing())
+        sampler = self._create_sampler(len(completed), completed if self.cmaes_warm_start else None)
         pruner = (
-            optuna.pruners.MedianPruner(n_startup_trials=self.n_startup_trials, n_warmup_steps=5)
+            optuna.pruners.MedianPruner(n_warmup_steps=5)
             if self.pruning
             else optuna.pruners.NopPruner()
         )
 
         study = optuna.create_study(
             study_name=self.study_name,
-            storage=self._get_storage_path(),
+            storage=self._storage_path,
             load_if_exists=True,
             direction="minimize",
             sampler=sampler,
             pruner=pruner,
         )
 
-        sampler_info = self.sampler
-        if self.sampler == "hybrid":
-            sampler_info += f" (switch at {self.hybrid_switch_trial})"
-        if self.sampler in ("cmaes", "hybrid"):
-            cmaes_opts = []
-            if self.cmaes_restart_strategy and self.cmaes_restart_strategy != "none":
-                cmaes_opts.append(f"restart={self.cmaes_restart_strategy}")
-            if self.cmaes_lr_adapt:
-                cmaes_opts.append("lr_adapt")
-            if self.cmaes_with_margin:
-                cmaes_opts.append("with_margin")
-            if self.cmaes_popsize:
-                cmaes_opts.append(f"popsize={self.cmaes_popsize}")
-            if cmaes_opts:
-                sampler_info += f" [{', '.join(cmaes_opts)}]"
-        parallel_info = ""
-        if self.n_jobs != 1:
-            parallel_info = f" | {'all CPUs' if self.n_jobs == -1 else f'{self.n_jobs} workers'}"
-        logger.info(
-            f"Starting optimization: {self.n_trials} trials | {self.study_name} | {sampler_info}{parallel_info}\n"
-            f"Hyperparameters: {[h.name for h in self.hyperparams]}"
+        pbar = tqdm(total=self.n_trials, desc="Hyperopt")
+
+        def callback(study, trial):
+            if trial.state == optuna.trial.TrialState.COMPLETE:
+                pbar.update()
+
+        study.optimize(
+            self._run_single_trial, n_trials=self.n_trials, callbacks=[callback], n_jobs=self.n_jobs
         )
-
-        # show_progress_bar doesn't work well with n_jobs > 1
-        show_progress = self.n_jobs == 1
-
-        try:
-            if self.sampler in ("hybrid", "sparse_cmaes"):
-                # run in batches to allow switching sampler mid-optimization
-                switch_at = (
-                    self.hybrid_switch_trial if self.sampler == "hybrid" else self.n_startup_trials
-                )
-                remaining = self.n_trials
-                while remaining > 0:
-                    completed_trials = [
-                        t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
-                    ]
-                    n_complete = len(completed_trials)
-                    # get source trials for warm start
-                    warm_source = completed_trials if self.cmaes_warm_start else None
-                    # check if we need to switch sampler
-                    new_sampler = self._create_sampler(n_complete, source_trials=warm_source)
-                    if type(new_sampler) != type(study.sampler):
-                        logger.info(
-                            f"Switching sampler from {type(study.sampler).__name__} to {type(new_sampler).__name__}"
-                        )
-                        # recreate study with new sampler (will load existing trials)
-                        study = optuna.create_study(
-                            study_name=self.study_name,
-                            storage=self._get_storage_path(),
-                            load_if_exists=True,
-                            direction="minimize",
-                            sampler=new_sampler,
-                            pruner=pruner,
-                        )
-                    # run batch
-                    batch_size = min(remaining, max(1, switch_at - n_complete))
-                    study.optimize(
-                        self._run_single_trial,
-                        n_trials=batch_size,
-                        n_jobs=self.n_jobs,
-                        show_progress_bar=show_progress,
-                    )
-                    remaining -= batch_size
-            else:
-                study.optimize(
-                    self._run_single_trial,
-                    n_trials=self.n_trials,
-                    n_jobs=self.n_jobs,
-                    show_progress_bar=show_progress,
-                )
-        except KeyboardInterrupt:
-            logger.info("Optimization interrupted. Progress saved.")
-
+        pbar.close()
         self._save_results(study)
 
 
-async def main_async():
-    cliprog = make_program(
-        HyperoptProgram,
-        name='biocomp-hyperopt',
-        description='Optuna hyperparameter optimization for biocompiler.',
-    )
-
-    context = {
-        **make_context_from_types(DEFAULT_TYPES),
-        'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
-        'HyperparamSpec': HyperparamSpec,
-    }
-
-    program, _ = cliprog.parse_args(
-        sys.argv[1:],
-        deferred_paths=['/training_conf', '/compute_conf', '/training_set'],
-        context=context,
-        capture_globals=False,
-        enable_shorthand_vars=False,
-    )
-    assert isinstance(program, HyperoptProgram)
-    await program.run()
+async def _main_async():
+    setup_logging()
+    await HyperoptProgram.cli()
 
 
 def main():
-    asyncio.run(main_async())
+    asyncio.run(_main_async())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
