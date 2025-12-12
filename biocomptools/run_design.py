@@ -7,6 +7,7 @@ from biocomptools.modelmodel import BiocompModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.trainutils import make_json_ready
 from biocomptools.logging_config import get_logger
+from biocomptools.toollib.hashutils import pronounceable_hash48
 
 from biocomp.design import (
     start,
@@ -18,8 +19,6 @@ from biocomp.design import (
     sample_for_evaluation,
     evaluate_design,
     get_topk_replicate_network_pairs,
-    plot_design_results,
-    distance_loss,
     SamplingConfigUnion,
     UniformSampling,
     compute_baseline_loss,
@@ -37,10 +36,10 @@ import numpy as np
 import jax
 import yaml
 from pathlib import Path
-from typing import Annotated, Optional, Literal, Any
+from typing import Annotated, Optional
 from pydantic import Field
 import pickle
-from functools import partial
+from datetime import datetime
 
 logger = get_logger(__name__)
 
@@ -50,24 +49,32 @@ class DesignProgram(BaseOptimizationProgram):
         default_factory=lambda: DesignConfig()
     )
 
-    targets: Annotated[list[TargetUnion] | TargetUnion, Arg(help='Design targets (SVG files or DataTarget)')] = Field(
-        default_factory=list
-    )
+    targets: Annotated[
+        list[TargetUnion] | TargetUnion, Arg(help='Design targets (SVG files or DataTarget)')
+    ] = Field(default_factory=list)
 
     networks: Annotated[Optional[list[Network] | Network], Arg(help='Networks to optimize')] = None
-    recipes: Annotated[Optional[list[Recipe] | Recipe], Arg(help='Recipes to convert to networks')] = None
+    # Scaffolds: generic circuit topologies with unlocked parameters, optimized during design
+    scaffolds: Annotated[
+        Optional[list[Recipe] | Recipe],
+        Arg(help='Base recipes to optimize (converted to networks)'),
+    ] = None
 
     # Sampling configuration
     sampling: Annotated[SamplingConfigUnion, Arg(help='Sampling strategy configuration')] = Field(
         default_factory=UniformSampling
     )
 
-    # Network subset configuration
+    # for quick use
     network_subset_size: Annotated[Optional[int], Arg(help='Limit networks to first N')] = None
 
     # Model can be specified by path/name directly, or via model_selector for complex queries
-    model_name: Annotated[Optional[str], Arg(help='Model path or signature (simpler alternative to model_selector)')] = None
-    model_selector: Annotated[Optional[ModelSelector], Arg(help='Model selector for complex queries')] = None
+    model_name: Annotated[
+        Optional[str], Arg(help='Model path or signature (simpler alternative to model_selector)')
+    ] = None
+    model_selector: Annotated[
+        Optional[ModelSelector], Arg(help='Model selector for complex queries')
+    ] = None
 
     experiment_name: str = 'default_design_xp'
 
@@ -84,7 +91,9 @@ class DesignProgram(BaseOptimizationProgram):
 
     plot_results: Annotated[bool, Arg(help='Generate result plots')] = True
     plot_n_samples: Annotated[int, Arg(help='Max samples to plot')] = 5000
-    skip_evaluation: Annotated[bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')] = False
+    skip_evaluation: Annotated[
+        bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')
+    ] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
 
     def model_post_init(self, __context):
@@ -101,7 +110,7 @@ class DesignProgram(BaseOptimizationProgram):
         return self._design_id
 
     def get_output_subdir(self) -> str:
-        return 'design'
+        return ''  # no subdirectory - outputs go directly in run folder
 
     def initialize_context(self):
         logger.info("Initializing design context...")
@@ -116,7 +125,9 @@ class DesignProgram(BaseOptimizationProgram):
                 effective_selector = ModelSelector(name=self.model_name)
                 with self.db_session as session:
                     selected_model = effective_selector.get_model(session)
-                    logger.info(f"Loading model: {selected_model.name if selected_model else 'None'}")
+                    logger.info(
+                        f"Loading model: {selected_model.name if selected_model else 'None'}"
+                    )
                     self._model = selected_model.load() if selected_model else None
                     session.expunge_all()
                     session.close()
@@ -134,29 +145,33 @@ class DesignProgram(BaseOptimizationProgram):
             return
 
         if self._model is None:
-            raise ValueError(f"Could not load model: model_name={self.model_name}, model_selector={self.model_selector}")
+            raise ValueError(
+                f"Could not load model: model_name={self.model_name}, model_selector={self.model_selector}"
+            )
 
         logger.info(f"Successfully loaded model with signature: {self._model.signature}")
 
-        # Build networks from recipes or use directly specified networks
+        # Build networks from scaffolds or use directly specified networks
         if isinstance(self.networks, Network):
             self.networks = [self.networks]
-        if isinstance(self.recipes, Recipe):
-            self.recipes = [self.recipes]
+        if isinstance(self.scaffolds, Recipe):
+            self.scaffolds = [self.scaffolds]
 
         networks = []
         if self.networks is not None:
             networks.extend(self.networks)
             logger.debug(f"Using {len(self.networks)} directly specified networks")
 
-        if self.recipes is not None:
-            for recipe in self.recipes:
-                recipe_networks = recipe_to_networks(recipe, invert=True, inversion_mode="main")
-                networks.extend(recipe_networks)
-            logger.debug(f"Generated {len(networks)} networks from {len(self.recipes)} recipes")
+        if self.scaffolds is not None:
+            for scaffold in self.scaffolds:
+                scaffold_networks = recipe_to_networks(scaffold, invert=True, inversion_mode="main")
+                networks.extend(scaffold_networks)
+            logger.debug(f"Generated {len(networks)} networks from {len(self.scaffolds)} scaffolds")
 
         if not networks:
-            raise ValueError("No networks or recipes specified. Use --networks or --recipes, or set recipes in config.")
+            raise ValueError(
+                "No networks or scaffolds specified. Use --networks or --scaffolds in config."
+            )
 
         if self.network_subset_size is not None:
             networks = networks[: self.network_subset_size]
@@ -168,7 +183,9 @@ class DesignProgram(BaseOptimizationProgram):
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
             f"and {self.sampling.strategy} sampling"
         )
-        self._dmanager = DesignManager(targets=self.targets, networks=networks, sampling=self.sampling)
+        self._dmanager = DesignManager(
+            targets=self.targets, networks=networks, sampling=self.sampling
+        )
 
     def _get_logger_context(self) -> dict:
         context = super()._get_logger_context()
@@ -242,6 +259,7 @@ class DesignProgram(BaseOptimizationProgram):
                 return t.name or "data_target"
             else:
                 return t.name or Path(t.path).stem
+
         target_names = [get_target_name(t) for t in self.targets]
         logger.info(f"Optimizing for {self._dmanager.n_targets} targets: {', '.join(target_names)}")
 
@@ -367,7 +385,9 @@ class DesignProgram(BaseOptimizationProgram):
             baseline_info = baseline_results.get(target_name, {})
             if baseline_info.get('has_original_network'):
                 baseline_loss = baseline_info['model_prediction_loss']
-                improvement = (baseline_loss - loss_val) / baseline_loss * 100 if baseline_loss > 0 else 0
+                improvement = (
+                    (baseline_loss - loss_val) / baseline_loss * 100 if baseline_loss > 0 else 0
+                )
                 logger.info(
                     f"  {target_name}: Rep {rep_id}, Net '{network_name}' "
                     f"(loss={loss_val:.4f}, baseline={baseline_loss:.4f}, improvement={improvement:+.1f}%)"
@@ -436,50 +456,6 @@ class DesignProgram(BaseOptimizationProgram):
                     pickle.dump(eval_data, f)
                 logger.debug(f"Saved evaluation data to {eval_file}")
 
-            if self.plot_results:
-                logger.info("Generating visualization plots...")
-                plot_dir = save_dir / 'plots'
-                plot_dir.mkdir(exist_ok=True)
-                logger.debug(
-                    f"Plotting with n_samples={self.plot_n_samples}, show_difference={self.show_difference_plots}, plot_top_k={self.topk_n}"
-                )
-
-                assert self._dmanager is not None
-
-                def get_target_name(t):
-                    if isinstance(t, DataTarget):
-                        return t.name or "data_target"
-                    else:
-                        return t.name or Path(t.path).stem
-
-                # Create target-specific plot subdirectories and plot each target separately
-                for tid, target in enumerate(self._dmanager.targets):
-                    target_name = get_target_name(target)
-                    target_plot_dir = plot_dir / target_name
-                    target_plot_dir.mkdir(exist_ok=True)
-
-                    # Create single-target topk list for this target only
-                    single_target_topk = [topk[tid]]  # wrap in list to maintain expected structure
-
-                    # Plot all top-k results for this target
-                    plot_design_results(
-                        dmanager=DesignManager(targets=[target], networks=self._dmanager.networks),
-                        dconf=self.design_conf,
-                        xraw=xraw[:, :, :, tid : tid + 1, :],  # slice to keep only this target
-                        yraw=yraw[:, :, :, tid : tid + 1, :],  # slice to keep only this target
-                        yhatdep=yhatdep[:, :, tid : tid + 1, :] if yhatdep is not None else None,
-                        topk=single_target_topk,
-                        n_eval_samples=self.plot_n_samples,
-                        save_dir=target_plot_dir,
-                        show_difference=self.show_difference_plots,
-                        plot_top_k=self.topk_n,
-                    )
-
-                total_plots = len(self.targets) * self.topk_n
-                logger.info(
-                    f"Generated {total_plots} plots organized by target, saved to {plot_dir}"
-                )
-
             self._save_best_designs_summary(save_dir, topk)
 
         logger_metrics = [
@@ -517,31 +493,35 @@ class DesignProgram(BaseOptimizationProgram):
 
     def _save_best_designs_summary(self, save_dir, topk):
         summary_file = save_dir / 'best_designs_summary.txt'
-        recipes_dir = save_dir / 'best_recipes'
-        recipes_dir.mkdir(exist_ok=True)
+        design_results_dir = save_dir / 'design_results'
+        design_results_dir.mkdir(exist_ok=True)
 
-        # Get final params and stack from evaluation results
         final_params = self._evaluation_results[0] if hasattr(self, '_evaluation_results') else None
+        assert final_params is not None, "Final params required to save designs"
+        assert self._model is not None, "Model required to save designs"
+        assert self._dmanager is not None, "Design manager required to save designs"
 
-        # Build the compute stack once
-        if final_params is not None and self._model is not None:
-            import biocomp.compute as cmp
+        import biocomp.compute as cmp
 
-            stack = cmp.ComputeStack(networks=self._dmanager.networks)
-            stack.build(self._model.compute_config)
-        else:
-            stack = None
-            logger.warning("Cannot commit networks: final_params or model not available")
+        stack = cmp.ComputeStack(networks=self._dmanager.networks)
+        stack.build(self._model.compute_config)
+
+        run_datetime = datetime.now().isoformat()
+        run_name = self._run_name
 
         def get_target_name(t):
             if isinstance(t, DataTarget):
                 return t.name or "data_target"
-            else:
-                return t.name or Path(t.path).stem
+            return t.name or Path(t.path).stem
+
+        all_design_results = []  # collect for diagnostic plots
 
         with open(summary_file, 'w') as f:
             f.write("BEST DESIGN SUMMARY\n")
             f.write("=" * 50 + "\n\n")
+            f.write(f"Run: {run_name}\n")
+            f.write(f"Date: {run_datetime}\n")
+            f.write(f"Model: {self._model.signature}\n\n")
 
             best_per_target = {}
 
@@ -550,95 +530,138 @@ class DesignProgram(BaseOptimizationProgram):
                 f.write(f"Target: {target_name}\n")
                 f.write("-" * 30 + "\n")
 
-                # Create target-specific recipe subfolder
-                target_recipes_dir = recipes_dir / target_name
-                target_recipes_dir.mkdir(exist_ok=True)
-
-                # Store all designs for this target (not just best)
-                target_designs = []
+                target_results_dir = design_results_dir / target_name
+                target_results_dir.mkdir(exist_ok=True)
 
                 for rank, (rep_id, net_id, loss_val) in enumerate(topk[tid], 1):
                     network_name = self._dmanager.networks[net_id].name
                     f.write(f"  Rank {rank}: Replicate {rep_id}, Network '{network_name}'\n")
                     f.write(f"           Loss: {loss_val:.6f}\n")
 
-                    # Save all top-k network recipes (not just rank 1)
-                    if final_params is not None and stack is not None:
-                        # Get params for this replicate and target
-                        bparams = tree_get(final_params, (rep_id, tid))
+                    bparams = tree_get(final_params, (rep_id, tid))
 
-                        # Commit the networks to get post-processed versions
-                        try:
-                            committed_networks = stack.commit(bparams)
-                            cnet = committed_networks[net_id]
+                    try:
+                        committed_networks = stack.commit(bparams)
+                        cnet = committed_networks[net_id]
+                        assert cnet is not None, f"Committed network {net_id} is None"
 
-                            # Store design info
-                            design_info = {
-                                'rank': rank,
-                                'replicate': rep_id,
-                                'network_name': network_name,
-                                'network_id': net_id,
-                                'network': cnet,
-                                'loss': float(loss_val),
-                                'params': bparams,
-                            }
-                            target_designs.append(design_info)
+                        recipe = cnet.to_recipe()
+                        recipe_yaml = dracon.dump(recipe)
 
-                            # Save best design to best_per_target dict
-                            if rank == 1:
-                                best_per_target[target_name] = design_info
+                        # hash recipe content for unique identifier
+                        recipe_hash = pronounceable_hash48(recipe_yaml.encode('utf-8'))
 
-                            # Save recipe as YAML using dracon
-                            recipe = cnet.to_recipe()
-                            recipe_filename = (
-                                target_recipes_dir
-                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.yaml"
-                            )
-                            recipe_yaml = dracon.dump(recipe)
-                            metadata_yaml = yaml.dump({
-                                '_metadata': {
-                                    'target': target_name, 'rank': rank,
-                                    'network': network_name, 'replicate': rep_id, 'loss': float(loss_val),
-                                }
-                            }, default_flow_style=False)
-                            with open(recipe_filename, 'w') as rf:
-                                rf.write(metadata_yaml + '\n' + recipe_yaml)
+                        # rich metadata for recipe
+                        recipe_metadata = {
+                            'target_name': target_name,
+                            'datetime': run_datetime,
+                            'run_name': run_name,
+                            'loss': float(loss_val),
+                            'rank': rank,
+                            'replicate': rep_id,
+                            'scaffold_network_name': network_name,
+                            'scaffold_network_id': net_id,
+                            'recipe_hash': recipe_hash,
+                            'model_signature': self._model.signature,
+                        }
 
-                            f.write(
-                                f"           Recipe saved: {target_name}/{recipe_filename.name}\n"
-                            )
-                            logger.debug(
-                                f"Saved recipe for {target_name} rank {rank} to {recipe_filename}"
-                            )
-                            # also save network as pickle
-                            network_pickle_file = (
-                                target_recipes_dir
-                                / f"rank{rank:02d}_{target_name}_rep{rep_id}_net{net_id}.pickle"
-                            )
-                            with open(network_pickle_file, 'wb') as npf:
-                                pickle.dump(cnet, npf)
+                        # directory: design_results/{target}/design_{rank:02d}/
+                        design_dir = target_results_dir / f"design_{rank:02d}"
+                        design_dir.mkdir(exist_ok=True)
 
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to commit/save recipe for {target_name} rank {rank}: {e}"
-                            )
-                            f.write(f"           Recipe: Failed to generate ({e})\n")
+                        # save recipe as {hash}.yaml
+                        recipe_filename = design_dir / f"{recipe_hash}.yaml"
+                        metadata_yaml = yaml.dump(
+                            {'_metadata': recipe_metadata}, default_flow_style=False
+                        )
+                        with open(recipe_filename, 'w') as rf:
+                            rf.write(metadata_yaml + '\n' + recipe_yaml)
+
+                        # save network pickle
+                        network_pickle = design_dir / f"{recipe_hash}.pickle"
+                        with open(network_pickle, 'wb') as npf:
+                            pickle.dump(cnet, npf)
+
+                        design_info = {
+                            'rank': rank,
+                            'replicate': rep_id,
+                            'network_name': network_name,
+                            'network_id': net_id,
+                            'network': cnet,
+                            'loss': float(loss_val),
+                            'params': bparams,
+                            'recipe_hash': recipe_hash,
+                            'recipe_path': str(recipe_filename),
+                            'design_dir': str(design_dir),
+                            'target_name': target_name,
+                            'target': target,
+                            'target_id': tid,
+                        }
+
+                        all_design_results.append(design_info)
+                        if rank == 1:
+                            best_per_target[target_name] = design_info
+
+                        f.write(f"           Recipe: {recipe_hash}.yaml\n")
+                        f.write(f"           Path: {design_dir.relative_to(save_dir)}/\n")
+                        logger.debug(f"Saved design {target_name} rank {rank}: {recipe_hash}")
+
+                    except Exception as e:
+                        logger.warning(f"Failed to save design {target_name} rank {rank}: {e}")
+                        f.write(f"           Recipe: Failed ({e})\n")
 
                 f.write("\n")
 
-        # Save the best_per_target dict as pickle for later use
+        # save best_per_target dict for later use
         if best_per_target:
             best_designs_file = save_dir / 'best_designs.pickle'
             with open(best_designs_file, 'wb') as f:
-                # Convert JAX arrays to numpy before saving
                 for target_data in best_per_target.values():
                     target_data['params'] = tree_to_np(target_data['params'])
                 pickle.dump(best_per_target, f)
             logger.info(f"Saved best designs data to {best_designs_file}")
 
+        # generate diagnostic summary plots
+        if self.plot_results and all_design_results:
+            self._generate_design_diagnostic_plots(save_dir, all_design_results)
+
         logger.info(f"Saved best designs summary to {summary_file}")
-        if recipes_dir.exists() and any(recipes_dir.iterdir()):
-            logger.info(f"Saved network recipes to {recipes_dir}")
+        if design_results_dir.exists() and any(design_results_dir.iterdir()):
+            logger.info(f"Saved design results to {design_results_dir}")
+
+    def _generate_design_diagnostic_plots(self, save_dir, design_results: list[dict]):
+        """Generate diagnostic summary plots for each design result."""
+        from biocomptools.plot import PlotJob
+        from biocomptools.toollib.figuremakers.designutils import DesignResult
+
+        logger.info(f"Generating diagnostic plots for {len(design_results)} designs...")
+
+        for r in design_results:
+            try:
+                design_dir = Path(r['design_dir'])
+                result = DesignResult(
+                    network=r['network'],
+                    target=r['target'],
+                    target_name=r['target_name'],
+                    rank=r['rank'],
+                    replicate=r['replicate'],
+                    scaffold_network_name=r['network_name'],
+                    loss=r['loss'],
+                    recipe_hash=r['recipe_hash'],
+                    run_name=self._run_name,
+                    model=self._model,
+                )
+                PlotJob.invoke(
+                    'biocomp-jobs/plot/auto_figures/autofig_design_summary.yaml',
+                    result=result,
+                    output_dir=str(design_dir),
+                )
+                logger.debug(f"Generated summary plot: {design_dir / r['recipe_hash']}_summary.pdf")
+
+            except Exception as e:
+                logger.warning(f"Failed to generate plot for {r.get('recipe_hash', '?')}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
 
 
 async def main_async():
@@ -652,6 +675,7 @@ async def main_async():
 
 def main():
     from biocomptools.logging_config import setup_logging
+
     setup_logging()
     asyncio.run(main_async())
 

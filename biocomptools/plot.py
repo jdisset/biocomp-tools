@@ -1,7 +1,7 @@
 ## {{{                          --     imports     --
 
 from biocomptools.logging_config import get_logger, setup_logging
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from tqdm import tqdm
 from biocomptools.toollib.common import maybetqdm
 import numpy as np
@@ -11,11 +11,10 @@ from dracon.utils import ser_debug
 from dracon.diagnostics import DraconError, handle_dracon_error
 
 import matplotlib.pyplot as plt
-import sys
 import time
 from pathlib import Path
-from typing import List, Annotated, Literal
-from dracon.commandline import make_program, Arg
+from typing import List, Annotated, Literal, Optional
+from dracon.commandline import Arg, dracon_program
 from dracon.deferred import DeferredNode
 
 from biocomp.utils import PartialFunction
@@ -35,7 +34,6 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
 )
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 from biocomptools.toollib.figuremakers.benchmarkutils import BenchmarkData, BenchmarkItem
-
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
@@ -91,9 +89,47 @@ warnings.filterwarnings("ignore", message="os.fork()", module="subprocess")
 logger = get_logger(__name__)
 
 
+class FigureResult(BaseModel):
+    """Result of running a single figure. Useful for chaining/composition."""
+
+    path: str
+    figure_spec: FigureSpec
+    metadata: dict = Field(default_factory=dict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def __str__(self) -> str:
+        return self.path
+
+
+class PlotResult(BaseModel):
+    """Result of running PlotJob. Provides both paths and structured data for composition."""
+
+    figures: List[FigureResult] = Field(default_factory=list)
+    merged_path: Optional[str] = None
+
+    @property
+    def paths(self) -> List[str]:
+        """List of output file paths (for backward compatibility)."""
+        return [f.path for f in self.figures]
+
+    def __iter__(self):
+        """Iterate over paths for backward compatibility."""
+        return iter(self.paths)
+
+    def __len__(self):
+        return len(self.figures)
+
+    def __getitem__(self, idx):
+        """Index access returns FigureResult for composition, or path for backward compat."""
+        return self.figures[idx]
+
+
 def _detached_get_xy(pdata):
     """Dummy get_xy for detached LazyPlotData - data should already be evaluated."""
-    raise RuntimeError("LazyPlotData has been detached for pickling - data should already be evaluated")
+    raise RuntimeError(
+        "LazyPlotData has been detached for pickling - data should already be evaluated"
+    )
 
 
 def _detach_lazy_plot_data(obj, visited=None):
@@ -163,6 +199,7 @@ def _convert_jax_to_numpy_inplace(obj, visited=None):
     except ImportError:
         try:
             from jax import Array as JaxArray
+
             Device = None
         except ImportError:
             return obj
@@ -231,8 +268,82 @@ def _convert_jax_to_numpy_inplace(obj, visited=None):
 
     return obj
 
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def debug_figures(figures):
+    for fig in figures:
+        ser_debug(fig, 'dill')
+        ser_debug(fig, 'deepcopy')
+        # ser_debug(fig, 'sizeof', max_size_mb=200)
+        nr = dr.utils.node_repr(
+            fig,
+            enable_colors=True,
+            show_biggest_context=5,
+        )
+        logger.debug(nr)
+
+
+def get_pretty_axis_label(i: int, d: DataSource) -> str:
+    if "pretty_inputs" in d.metadata and len(d.metadata["pretty_inputs"]) > i:
+        return f'$\\mathbf{{X_{i + 1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
+    return f'$\\mathbf{{X_{i + 1}}}$ ({d.input_names[i]})'
+
+
+def urlencoded(s: str) -> str:
+    import urllib.parse
+
+    return urllib.parse.quote(s, safe='')
+
+
+def construct_figure(figure_node, output_path_override: str | None = None):
+    try:
+        figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
+        if dict_like(figure):
+            figure = Figure(**figure)  # type: ignore
+        assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
+        if output_path_override:
+            figure.figure_spec.output_dir = str(Path(output_path_override).parent)
+            figure.figure_spec.output_file = Path(output_path_override).name
+    except DraconError:
+        # let DraconErrors propagate - they'll be formatted nicely at the top level
+        raise
+    except Exception as e:
+        logger.error(f"Error constructing figure: {e}")
+        logger.exception(e)
+        raise
+    return figure
+
+
+def run_figure(f, **kw) -> FigureResult:
+    try:
+        t0 = time.time()
+        f.run(**kw)
+        plt.close('all')
+        t1 = time.time()
+        opath = f.figure_spec.output_path
+        logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
+    except Exception as e:
+        logger.error(f"Error running figure: {e}")
+        logger.exception(e)
+        raise
+    return FigureResult(
+        path=str(opath),
+        figure_spec=f.figure_spec,
+        metadata=getattr(f.figure_spec, 'metadata', {}),
+    )
+
+
+def _run_figure_worker(fig, overwrite) -> FigureResult:
+    """Worker function for ProcessPoolExecutor - must be at module level for pickling."""
+    return run_figure(fig, overwrite=overwrite)
+
+
 DEFAULT_TYPES = [
     Figure,
+    FigureResult,
+    PlotResult,
     PlotConfig,
     PlotTask,
     DataSource,
@@ -296,73 +407,25 @@ def make_context_from_types(types):
     return {t.__name__: t for t in types}
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
+DEFAULT_CONTEXT = {
+    **make_context_from_types(DEFAULT_TYPES),
+    'get_pretty_axis_label': get_pretty_axis_label,
+    'urlencoded': urlencoded,
+    'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+}
 
 
-def debug_figures(figures):
-    for fig in figures:
-        ser_debug(fig, 'dill')
-        ser_debug(fig, 'deepcopy')
-        # ser_debug(fig, 'sizeof', max_size_mb=200)
-        nr = dr.utils.node_repr(
-            fig,
-            enable_colors=True,
-            show_biggest_context=5,
-        )
-        logger.debug(nr)
-
-
-def get_pretty_axis_label(i: int, d: DataSource) -> str:
-    if "pretty_inputs" in d.metadata and len(d.metadata["pretty_inputs"]) > i:
-        return f'$\\mathbf{{X_{i + 1} ({d.input_names[i]}}})$\n{d.metadata["pretty_inputs"][i]}'
-    return f'$\\mathbf{{X_{i + 1}}}$ ({d.input_names[i]})'
-
-
-def urlencoded(s: str) -> str:
-    import urllib.parse
-
-    return urllib.parse.quote(s, safe='')
-
-
-def construct_figure(figure_node, output_path_override: str | None = None):
-    try:
-        figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
-        if dict_like(figure):
-            figure = Figure(**figure)  # type: ignore
-        assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
-        if output_path_override:
-            figure.figure_spec.output_dir = str(Path(output_path_override).parent)
-            figure.figure_spec.output_file = Path(output_path_override).name
-    except DraconError:
-        # let DraconErrors propagate - they'll be formatted nicely at the top level
-        raise
-    except Exception as e:
-        logger.error(f"Error constructing figure: {e}")
-        logger.exception(e)
-        raise
-    return figure
-
-
-def run_figure(f, **kw):
-    try:
-        t0 = time.time()
-        f.run(**kw)
-        plt.close('all')
-        t1 = time.time()
-        opath = f.figure_spec.output_path
-        logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
-    except Exception as e:
-        logger.error(f"Error running figure: {e}")
-        logger.exception(e)
-        raise
-    return str(opath)
-
-
-def _run_figure_worker(fig, overwrite):
-    """Worker function for ProcessPoolExecutor - must be at module level for pickling."""
-    return run_figure(fig, overwrite=overwrite)
-
-
+@dracon_program(
+    name='biocomp-plot',
+    description='Generate plots from YAML configuration.',
+    deferred_paths=['/figures.*'],
+    context_types=DEFAULT_TYPES,
+    context={
+        'get_pretty_axis_label': get_pretty_axis_label,
+        'urlencoded': urlencoded,
+        'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+    },
+)
 class PlotJob(BaseModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
@@ -430,7 +493,7 @@ class PlotJob(BaseModel):
                 run_figure(f, overwrite=overwrite)
                 for f in maybetqdm(constructed_figures, min_len=2, desc='Running figures')
             ]
-            outpathstr = '\n  - ' + '\n  - '.join(out_paths)
+            outpathstr = '\n  - ' + '\n  - '.join(r.path for r in out_paths)
             logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
 
         elif self.parallel_mode == 'ray':
@@ -506,10 +569,15 @@ class PlotJob(BaseModel):
 
                 # run unpicklable figures sequentially
                 if sequential_figs:
-                    logger.info(f"Running {len(sequential_figs)} figures sequentially (not picklable)")
+                    logger.info(
+                        f"Running {len(sequential_figs)} figures sequentially (not picklable)"
+                    )
                     for i, fig in zip(
                         sequential_indices,
-                        tqdm(sequential_figs, desc=f'Sequential figures in batch {batch_idx}/{num_batches}'),
+                        tqdm(
+                            sequential_figs,
+                            desc=f'Sequential figures in batch {batch_idx}/{num_batches}',
+                        ),
                     ):
                         results[i] = run_figure(fig, overwrite=overwrite)
 
@@ -518,14 +586,19 @@ class PlotJob(BaseModel):
                 time_batch_end = time.time()
                 logger.debug(f"Batch {batch_idx} completed in {time_batch_end - time_start:.2f}s")
 
-                fpaths = '\n  - ' + '\n  - '.join(results)
+                fpaths = '\n  - ' + '\n  - '.join(r.path for r in results if r)
                 logger.debug(f"Generated {len(results)} figures:{fpaths}")
 
         t1 = time.time()
         logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
 
+        merged_path = None
         if self.merge_spec and out_paths:
-            self._merge_figures(out_paths)
+            paths = [r.path for r in out_paths]
+            self._merge_figures(paths)
+            merged_path = str(self.merge_spec.output_path)
+
+        return PlotResult(figures=out_paths, merged_path=merged_path)
 
     def _merge_figures(self, paths: list[str]):
         """Merge generated figures into single output per MergeSpec."""
@@ -706,34 +779,10 @@ class PlotJob(BaseModel):
                     pass
 
 
-DEFAULT_CONTEXT = {
-    **make_context_from_types(DEFAULT_TYPES),
-    'get_pretty_axis_label': get_pretty_axis_label,
-    'urlencoded': urlencoded,
-    'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
-}
-
-
 def main():
     setup_logging()
-
-    prog = make_program(
-        PlotJob,
-        name='biocomp-plot',
-        description='Make plots.',
-    )
-
-    pj, args = prog.parse_args(
-        sys.argv[1:],
-        deferred_paths=[
-            '/figures.*',
-        ],
-        context=DEFAULT_CONTEXT,
-        enable_shorthand_vars=False,
-    )
-
     try:
-        pj.run()
+        PlotJob.cli()
     except DraconError as e:
         handle_dracon_error(e, exit_code=1)
     except Exception as e:

@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 import matplotlib.pyplot as plt
 
-from dracon import make_program, Arg
+from dracon import dracon_program, Arg
 from biocomp.recipe import Recipe
 from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, PartsLibrary
@@ -18,6 +18,11 @@ from biocomptools.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+@dracon_program(
+    name='biocomp-circuitplot',
+    description='Generate circuit diagrams and network schematics from recipes.',
+    context_types=[Recipe, FigureSpec, GeneticCircuitFigure, NetworkDiagramFigure],
+)
 class CircuitPlotConfig(BaseModel):
     recipe: Optional[Recipe] = Field(default=None, description="Recipe object (from dracon yaml)")
     recipe_file: Annotated[Optional[str], Arg(short="r", help="Path to recipe file (json5)")] = None
@@ -30,6 +35,10 @@ class CircuitPlotConfig(BaseModel):
     dpi: Annotated[int, Arg(help="Output DPI")] = 150
     style: Annotated[Optional[dict], Arg(help="Custom style overrides")] = None
     invert: Annotated[bool, Arg(help="Apply network inversion")] = True
+
+    def run(self):
+        """Generate the circuit plot. Returns the output file path."""
+        return run_circuitplot(self)
 
 
 def load_recipe(config: CircuitPlotConfig) -> Recipe:
@@ -116,6 +125,8 @@ def run_circuitplot(config: CircuitPlotConfig):
 
     else:
         raise ValueError(f"Unknown plot type: {config.plot_type}")
+
+    return str(output)
 
 
 def _render_circuit(network, ax, config: CircuitPlotConfig):
@@ -221,10 +232,7 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
 
 
 def main():
-    import sys
-    program = make_program(CircuitPlotConfig)
-    config, _ = program.parse_args(sys.argv[1:])
-    run_circuitplot(config)
+    CircuitPlotConfig.cli()
 
 
 if __name__ == "__main__":
