@@ -473,14 +473,40 @@ def _calculate_grid_stats(
 
 
 class NetworkPrediction(DataSource):
-    """
-    Performs predictions using a networkmodel and prepares data for plotting
+    """Performs predictions using a NetworkModel and prepares data for plotting.
 
-    responsible for:
-    - preparing input data for prediction
-    - making predictions using the network model
-    - comparing predictions to ground truth
-    - generating plot data for visualization
+    IMPORTANT - Space Handling (Latent vs Raw):
+    ==========================================
+    The biocomp model operates in "latent space" (normalized 0-1 range). Raw fluorescence
+    data (values in millions) must be rescaled before prediction.
+
+    There are two modes controlled by `already_latent`:
+
+    1. already_latent=False (DEFAULT):
+       - predict_at: expects RAW space (original fluorescence values, e.g., 1e6)
+       - Internally calls NetworkModel.predict_unscaled() which:
+         * Converts X to latent via rescaler.fwd(X)
+         * Runs model prediction
+         * Converts Y back to raw via rescaler.inv(Y)
+       - get_data() returns: (X_raw, Y_raw)
+
+    2. already_latent=True:
+       - predict_at: expects LATENT space (0-1 normalized values)
+       - Internally calls NetworkModel.predict() directly (no rescaling)
+       - get_data() returns: (X_latent, Y_latent)
+       - get_data(rescale_latent=True) returns: (X_raw, Y_raw)
+
+    Common mistake: Passing latent data without already_latent=True will cause
+    double-rescaling (latent values treated as raw, scaled again), producing garbage.
+
+    Example usage:
+        # From raw experimental data (DBSource, etc.)
+        pred = NetworkPrediction(predict_at=[X_raw], network_model=nm)
+        data = pred.get_data()  # Returns (X_raw, Y_raw)
+
+        # From design targets (DataTarget.X is already latent)
+        pred = NetworkPrediction(predict_at=[X_latent], network_model=nm, already_latent=True)
+        data = pred.get_data(rescale_latent=True)  # Returns (X_raw, Y_raw)
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
@@ -506,7 +532,7 @@ class NetworkPrediction(DataSource):
 
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
-    already_latent: bool = False  # no need to rescale if the input data is already in latent space
+    already_latent: bool = False  # Set True if predict_at is in latent space (0-1). See class docstring.
 
     enable_gridstats: bool = True  # enable grid statistics calculation
     gridstats_hypercube_res: int = 8  # resolution per dimension (8³=512 cells for 3D)
@@ -1497,7 +1523,21 @@ class NetworkPrediction(DataSource):
         with_shared_params: Optional[pr.ParameterTree] = None,
         with_local_params: Optional[pr.ParameterTree] = None,
     ) -> List[PlotData]:
-        """get fully-evaluated plot data"""
+        """Get fully-evaluated PlotData for each network.
+
+        Args:
+            rescale_latent: Only applies when already_latent=True. If True, converts
+                output (X, Y) from latent space to raw space using rescaler.inv().
+                Has no effect when already_latent=False (output is already raw).
+            with_shared_params: Optional override for model shared parameters.
+            with_local_params: Optional override for model local parameters.
+
+        Returns:
+            List of PlotData objects, one per network. Output space depends on settings:
+            - already_latent=False: (X_raw, Y_raw)
+            - already_latent=True, rescale_latent=False: (X_latent, Y_latent)
+            - already_latent=True, rescale_latent=True: (X_raw, Y_raw)
+        """
         lazy_data = self.get_data_lazy(
             rescale_latent=rescale_latent,
             with_shared_params=with_shared_params,
