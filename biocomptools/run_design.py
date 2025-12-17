@@ -44,6 +44,12 @@ from datetime import datetime
 logger = get_logger(__name__)
 
 
+def _target_name(t) -> str:
+    if isinstance(t, DataTarget):
+        return t.name or "data_target"
+    return t.name or Path(t.path).stem
+
+
 class DesignProgram(BaseOptimizationProgram):
     design_conf: Annotated[DesignConfig, Arg(help='Design optimization config')] = Field(
         default_factory=lambda: DesignConfig()
@@ -54,21 +60,14 @@ class DesignProgram(BaseOptimizationProgram):
     ] = Field(default_factory=list)
 
     networks: Annotated[Optional[list[Network] | Network], Arg(help='Networks to optimize')] = None
-    # Scaffolds: generic circuit topologies with unlocked parameters, optimized during design
     scaffolds: Annotated[
         Optional[list[Recipe] | Recipe],
         Arg(help='Base recipes to optimize (converted to networks)'),
     ] = None
-
-    # Sampling configuration
     sampling: Annotated[SamplingConfigUnion, Arg(help='Sampling strategy configuration')] = Field(
         default_factory=UniformSampling
     )
-
-    # for quick use
     network_subset_size: Annotated[Optional[int], Arg(help='Limit networks to first N')] = None
-
-    # Model can be specified by path/name directly, or via model_selector for complex queries
     model_name: Annotated[
         Optional[str], Arg(help='Model path or signature (simpler alternative to model_selector)')
     ] = None
@@ -87,7 +86,7 @@ class DesignProgram(BaseOptimizationProgram):
         False
     )
 
-    topk_n: Annotated[int, Arg(help='Number of top designs to keep per target')] = 64
+    topk_n: Annotated[int, Arg(help='Number of top designs to keep per target')] = 10
 
     plot_results: Annotated[bool, Arg(help='Generate result plots')] = True
     plot_n_samples: Annotated[int, Arg(help='Max samples to plot')] = 5000
@@ -95,12 +94,11 @@ class DesignProgram(BaseOptimizationProgram):
         bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')
     ] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
-
-    # TU masking options
-    enable_tu_masking: Annotated[bool, Arg(help='Enable Hard Concrete TU masking for architecture search')] = False
+    disable_tu_masking: Annotated[
+        bool, Arg(help='Disable Hard Concrete TU masking for architecture search')
+    ] = False
 
     def model_post_init(self, __context):
-        # Initialize private attributes
         self._model = None
         self._dmanager = None
         self._design_id = None
@@ -113,7 +111,7 @@ class DesignProgram(BaseOptimizationProgram):
         return self._design_id
 
     def get_output_subdir(self) -> str:
-        return ''  # no subdirectory - outputs go directly in run folder
+        return ''
 
     def initialize_context(self):
         logger.info("Initializing design context...")
@@ -154,7 +152,6 @@ class DesignProgram(BaseOptimizationProgram):
 
         logger.info(f"Successfully loaded model with signature: {self._model.signature}")
 
-        # Build networks from scaffolds or use directly specified networks
         if isinstance(self.networks, Network):
             self.networks = [self.networks]
         if isinstance(self.scaffolds, Recipe):
@@ -184,14 +181,17 @@ class DesignProgram(BaseOptimizationProgram):
             self.targets = [self.targets]
         logger.info(
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
-            f"{self.sampling.strategy} sampling, TU masking={self.enable_tu_masking}"
+            f"{self.sampling.strategy} sampling, TU masking={not self.disable_tu_masking}"
         )
         self._dmanager = DesignManager(
-            targets=self.targets, networks=networks, sampling=self.sampling,
-            enable_tu_masking=self.enable_tu_masking,
+            targets=self.targets,
+            networks=networks,
+            sampling=self.sampling,
+            enable_tu_masking=not self.disable_tu_masking,
         )
-        if self.enable_tu_masking:
-            logger.info(f"TU masking enabled: {self._dmanager.n_tus} TUs identified")
+        if not self.disable_tu_masking:
+            n_networks = len(self._dmanager.networks)
+            logger.info(f"TU masking enabled: {self._dmanager.n_tus} TUs × {n_networks} networks")
 
     def _get_logger_context(self) -> dict:
         context = super()._get_logger_context()
@@ -208,22 +208,13 @@ class DesignProgram(BaseOptimizationProgram):
         return context
 
     def enrich_metadata(self):
-        # Skip if not initialized yet
         if self._dmanager is None:
             return
 
-        # Use the networks from dmanager which has the resolved networks
         networks = self._dmanager.networks
-
-        def get_target_name(t):
-            if isinstance(t, DataTarget):
-                return t.name or "data_target"
-            else:
-                return t.name or Path(t.path).stem
-
         design_info = {
             "n_targets": self._dmanager.n_targets,
-            "target_names": [get_target_name(t) for t in self.targets],
+            "target_names": [_target_name(t) for t in self.targets],
             "n_networks": len(networks),
             "network_names": [n.name for n in networks],
             "n_replicates": self.design_conf.n_replicates,
@@ -259,23 +250,13 @@ class DesignProgram(BaseOptimizationProgram):
         logger.info("Starting design optimization...")
         assert self._dmanager is not None
 
-        # Log target details
-        def get_target_name(t):
-            if isinstance(t, DataTarget):
-                return t.name or "data_target"
-            else:
-                return t.name or Path(t.path).stem
-
-        target_names = [get_target_name(t) for t in self.targets]
+        target_names = [_target_name(t) for t in self.targets]
         logger.info(f"Optimizing for {self._dmanager.n_targets} targets: {', '.join(target_names)}")
 
-        # Log network details
-        network_names = [n.name for n in self._dmanager.networks[:5]]  # Show first 5
+        network_names = [n.name for n in self._dmanager.networks[:5]]
         if len(self._dmanager.networks) > 5:
             network_names.append(f"... and {len(self._dmanager.networks) - 5} more")
         logger.info(f"Using {len(self._dmanager.networks)} networks: {', '.join(network_names)}")
-
-        # Log optimization parameters
         logger.info("Optimization parameters:")
         logger.info(f"  - Replicates: {self.design_conf.n_replicates}")
         logger.info(f"  - Epochs: {self.design_conf.n_epochs}")
@@ -300,7 +281,9 @@ class DesignProgram(BaseOptimizationProgram):
         )
 
         logger.info(
-            f"Optimization completed. Final loss: {loss_history[-1]:.4f}" if loss_history else "Optimization completed. No loss history"
+            f"Optimization completed. Final loss: {loss_history[-1]:.4f}"
+            if loss_history
+            else "Optimization completed. No loss history"
         )
 
         if not self.skip_evaluation:
@@ -312,6 +295,7 @@ class DesignProgram(BaseOptimizationProgram):
 
     async def _evaluate_and_save_results(self, final_params, loss_history):
         import time
+
         logger.info("=" * 60)
         logger.info("POST-OPTIMIZATION EVALUATION")
         logger.info("=" * 60)
@@ -330,10 +314,14 @@ class DesignProgram(BaseOptimizationProgram):
             n_eval_samples=self.n_eval_samples,
             key=eval_key,
         )
-        logger.info(f"  -> Sampled in {time.perf_counter() - t0:.2f}s (shapes: x={xraw.shape}, y={yraw.shape})")
+        logger.info(
+            f"  -> Sampled in {time.perf_counter() - t0:.2f}s (shapes: x={xraw.shape}, y={yraw.shape})"
+        )
 
         t1 = time.perf_counter()
-        logger.info(f"[2/3] Running forward pass evaluation (chunk_size={self.max_eval_chunk_size})...")
+        logger.info(
+            f"[2/3] Running forward pass evaluation (chunk_size={self.max_eval_chunk_size})..."
+        )
         yhatdep, losses = evaluate_design(
             dmanager=self._dmanager,
             dconf=self.design_conf,
@@ -347,7 +335,9 @@ class DesignProgram(BaseOptimizationProgram):
             store_predictions=self.plot_results,
         )
         logger.info(f"  -> Evaluated in {time.perf_counter() - t1:.2f}s")
-        logger.info(f"  -> Losses: min={losses.min():.4f}, max={losses.max():.4f}, mean={losses.mean():.4f}")
+        logger.info(
+            f"  -> Losses: min={losses.min():.4f}, max={losses.max():.4f}, mean={losses.mean():.4f}"
+        )
 
         t2 = time.perf_counter()
         logger.info(f"[3/3] Finding top {self.topk_n} designs...")
@@ -359,12 +349,6 @@ class DesignProgram(BaseOptimizationProgram):
             k=self.topk_n,
         )
         logger.info(f"  -> Top-k found in {time.perf_counter() - t2:.2f}s")
-
-        def get_target_name(t):
-            if isinstance(t, DataTarget):
-                return t.name or "data_target"
-            else:
-                return t.name or Path(t.path).stem
 
         t3 = time.perf_counter()
         try:
@@ -382,11 +366,9 @@ class DesignProgram(BaseOptimizationProgram):
         logger.info("=" * 60)
         logger.info("RESULTS: Best replicate/network pairs for each target:")
         for tid, target in enumerate(self._dmanager.targets):
-            target_name = get_target_name(target)
+            target_name = _target_name(target)
             rep_id, net_id, loss_val = topk[tid][0]
             network_name = self._dmanager.networks[net_id].name
-
-            # Show baseline comparison if available
             baseline_info = baseline_results.get(target_name, {})
             if baseline_info.get('has_original_network'):
                 baseline_loss = baseline_info['model_prediction_loss']
@@ -409,8 +391,8 @@ class DesignProgram(BaseOptimizationProgram):
             'baseline_results': baseline_results,
             'topk_results': [
                 {
-                    'target': get_target_name(self.targets[tid]),
-                    'baseline': baseline_results.get(get_target_name(self.targets[tid]), {}),
+                    'target': _target_name(self.targets[tid]),
+                    'baseline': baseline_results.get(_target_name(self.targets[tid]), {}),
                     'best_designs': [
                         {
                             'replicate_id': rep_id,
@@ -513,13 +495,7 @@ class DesignProgram(BaseOptimizationProgram):
 
         run_datetime = datetime.now().isoformat()
         run_name = self._run_name
-
-        def get_target_name(t):
-            if isinstance(t, DataTarget):
-                return t.name or "data_target"
-            return t.name or Path(t.path).stem
-
-        all_design_results = []  # collect for diagnostic plots
+        all_design_results = []
 
         with open(summary_file, 'w') as f:
             f.write("BEST DESIGN SUMMARY\n")
@@ -531,7 +507,7 @@ class DesignProgram(BaseOptimizationProgram):
             best_per_target = {}
 
             for tid, target in enumerate(self.targets):
-                target_name = get_target_name(target)
+                target_name = _target_name(target)
                 f.write(f"Target: {target_name}\n")
                 f.write("-" * 30 + "\n")
 
@@ -552,11 +528,7 @@ class DesignProgram(BaseOptimizationProgram):
 
                         recipe = cnet.to_recipe()
                         recipe_yaml = dracon.dump(recipe)
-
-                        # hash recipe content for unique identifier
                         recipe_hash = pronounceable_hash48(recipe_yaml.encode('utf-8'))
-
-                        # rich metadata for recipe
                         recipe_metadata = {
                             'target_name': target_name,
                             'datetime': run_datetime,
@@ -570,19 +542,14 @@ class DesignProgram(BaseOptimizationProgram):
                             'model_signature': self._model.signature,
                         }
 
-                        # directory: design_results/{target}/design_{rank:02d}/
                         design_dir = target_results_dir / f"design_{rank:02d}"
                         design_dir.mkdir(exist_ok=True)
-
-                        # save recipe as {hash}.yaml
                         recipe_filename = design_dir / f"{recipe_hash}.yaml"
                         metadata_yaml = yaml.dump(
                             {'_metadata': recipe_metadata}, default_flow_style=False
                         )
                         with open(recipe_filename, 'w') as rf:
                             rf.write(metadata_yaml + '\n' + recipe_yaml)
-
-                        # save network pickle
                         network_pickle = design_dir / f"{recipe_hash}.pickle"
                         with open(network_pickle, 'wb') as npf:
                             pickle.dump(cnet, npf)
@@ -617,7 +584,6 @@ class DesignProgram(BaseOptimizationProgram):
 
                 f.write("\n")
 
-        # save best_per_target dict for later use
         if best_per_target:
             best_designs_file = save_dir / 'best_designs.pickle'
             with open(best_designs_file, 'wb') as f:
@@ -626,7 +592,6 @@ class DesignProgram(BaseOptimizationProgram):
                 pickle.dump(best_per_target, f)
             logger.info(f"Saved best designs data to {best_designs_file}")
 
-        # generate diagnostic summary plots
         if self.plot_results and all_design_results:
             self._generate_design_diagnostic_plots(save_dir, all_design_results)
 
@@ -635,15 +600,44 @@ class DesignProgram(BaseOptimizationProgram):
             logger.info(f"Saved design results to {design_results_dir}")
 
     def _generate_design_diagnostic_plots(self, save_dir, design_results: list[dict]):
-        """Generate diagnostic summary plots for each design result."""
+        """Generate diagnostic plots using batched predictions to avoid JAX recompilation."""
         from biocomptools.plot import PlotJob
         from biocomptools.toollib.figuremakers.designutils import DesignResult
+        from collections import defaultdict
 
         logger.info(f"Generating diagnostic plots for {len(design_results)} designs...")
+
+        by_target: dict[str, list[dict]] = defaultdict(list)
+        for r in design_results:
+            by_target[r['target_name']].append(r)
+
+        precomputed: dict[tuple, dict] = {}
+        for target_name, group in by_target.items():
+            try:
+                pred_data_map, nre_map = self._batch_predictions_for_target(group)
+                for i, r in enumerate(group):
+                    net_key = id(r['network'])
+                    precomputed[(target_name, net_key)] = {
+                        'pred_data': pred_data_map.get(i),
+                        'design_nre': nre_map.get(i),
+                    }
+            except Exception as e:
+                logger.warning(f"Batched prediction failed for target {target_name}: {e}")
+                import traceback
+
+                logger.debug(traceback.format_exc())
+
+        baseline_cache = self._compute_baseline_nres(design_results)
 
         for r in design_results:
             try:
                 design_dir = Path(r['design_dir'])
+                net_key = id(r['network'])
+                precomp = precomputed.get((r['target_name'], net_key), {})
+                baseline_nre = None
+                if isinstance(r['target'], DataTarget) and r['target'].original_network is not None:
+                    baseline_nre = baseline_cache.get(id(r['target'].original_network))
+
                 result = DesignResult(
                     network=r['network'],
                     target=r['target'],
@@ -655,6 +649,9 @@ class DesignProgram(BaseOptimizationProgram):
                     recipe_hash=r['recipe_hash'],
                     run_name=self._run_name,
                     model=self._model,
+                    _pred_data=precomp.get('pred_data'),
+                    _design_nre_value=precomp.get('design_nre'),
+                    _baseline_nre_value=baseline_nre,
                 )
                 PlotJob.invoke(
                     'biocomp-jobs/plot/auto_figures/autofig_design_summary.yaml',
@@ -666,7 +663,137 @@ class DesignProgram(BaseOptimizationProgram):
             except Exception as e:
                 logger.warning(f"Failed to generate plot for {r.get('recipe_hash', '?')}: {e}")
                 import traceback
+
                 logger.debug(traceback.format_exc())
+
+    def _batch_predictions_for_target(self, group: list[dict]):
+        """Returns (pred_data_map, nre_map) keyed by group index."""
+        from biocomptools.modelmodel import NetworkModel
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+        from biocomp.plotutils import PlotData
+        import time
+
+        if not group:
+            return {}, {}
+
+        target = group[0]['target']
+        networks = [r['network'] for r in group]
+        n_networks = len(networks)
+        if isinstance(target, DataTarget):
+            X_latent = target.X
+            Y_gt = target.Y
+            if len(X_latent) > 20000:
+                idx = np.random.default_rng(42).choice(len(X_latent), 20000, replace=False)
+                X_latent = X_latent[idx]
+                Y_gt = Y_gt[idx] if Y_gt is not None else None
+        else:
+            X_latent, _ = target.sample_uniform(10000, seed=42)
+            Y_gt = None
+
+        # build batched NetworkModel with all networks
+        start_time = time.time()
+        logger.info(f"Building batched NetworkModel for {n_networks} networks...")
+        network_model = NetworkModel(model=self._model, network=networks)
+        logger.info(f"Batched NetworkModel built in {time.time() - start_time:.2f}s")
+
+        # prepare predict_at and ground_truth (one per network)
+        predict_at = [X_latent] * n_networks
+        ground_truth = None
+        if isinstance(target, DataTarget) and Y_gt is not None:
+            gt_shaped = Y_gt.reshape(-1, 1) if Y_gt.ndim == 1 else Y_gt
+            ground_truth = [gt_shaped] * n_networks
+
+        predictor = NetworkPrediction(
+            predict_at=predict_at,
+            ground_truth=ground_truth,
+            max_evals=50000,
+            network_model=network_model,
+            already_latent=True,
+            enable_gridstats=isinstance(target, DataTarget),
+            device='gpu',
+            verbose=False,
+        )
+
+        pred_results = predictor.get_data(rescale_latent=True)
+        nre_stats = predictor.get_network_stats() if isinstance(target, DataTarget) else None
+
+        pred_data_map = {}
+        nre_map = {}
+        for i, pred in enumerate(pred_results):
+            pred_data_map[i] = PlotData(
+                xval=pred.x,
+                yval=pred.y,
+                input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
+                output_name='Y',
+            )
+            if nre_stats and i < len(nre_stats):
+                nre_map[i] = nre_stats[i].get('noise_relative_error')
+
+        return pred_data_map, nre_map
+
+    def _compute_baseline_nres(self, design_results: list[dict]) -> dict[int, float | None]:
+        """Returns dict mapping id(original_network) -> NRE value."""
+        from biocomptools.modelmodel import NetworkModel
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+        import time
+
+        baseline_groups: dict[int, tuple] = {}
+        for r in design_results:
+            target = r['target']
+            if not isinstance(target, DataTarget) or target.original_network is None:
+                continue
+            orig_net = target.original_network
+            net_id = id(orig_net)
+            if net_id not in baseline_groups:
+                baseline_groups[net_id] = (orig_net, target)
+
+        if not baseline_groups:
+            return {}
+
+        baseline_items = list(baseline_groups.items())
+        networks = [item[1][0] for item in baseline_items]
+        targets = [item[1][1] for item in baseline_items]
+
+        logger.info(f"Computing baseline NRE for {len(networks)} unique original networks...")
+        start_time = time.time()
+
+        result_map = {}
+        try:
+            network_model = NetworkModel(model=self._model, network=networks)
+            predict_at = []
+            ground_truth = []
+            for target in targets:
+                X, Y = target.X, target.Y
+                if len(X) > 50000:
+                    idx = np.random.default_rng(42).choice(len(X), 50000, replace=False)
+                    X, Y = X[idx], Y[idx]
+                predict_at.append(X)
+                ground_truth.append(Y.reshape(-1, 1) if Y.ndim == 1 else Y)
+
+            predictor = NetworkPrediction(
+                predict_at=predict_at,
+                ground_truth=ground_truth,
+                max_evals=50000,
+                network_model=network_model,
+                already_latent=True,
+                enable_gridstats=True,
+                device='gpu',
+                verbose=False,
+            )
+            stats = predictor.get_network_stats()
+
+            for i, (net_id, _) in enumerate(baseline_items):
+                if stats and i < len(stats):
+                    result_map[net_id] = stats[i].get('noise_relative_error')
+
+            logger.info(f"Baseline NRE computed in {time.time() - start_time:.2f}s")
+        except Exception as e:
+            logger.warning(f"Batched baseline NRE computation failed: {e}")
+            import traceback
+
+            logger.debug(traceback.format_exc())
+
+        return result_map
 
 
 async def main_async():
