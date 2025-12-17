@@ -12,7 +12,8 @@ from biocomp.datautils import DataRescaler
 import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 from biocomptools.logging_config import get_logger
-from biocomptools.toollib.common import config, dict_like
+from biocomptools.toollib.common import config
+from dracon.utils import dict_like
 from biocomp.library import load_lib
 from biocomp.utils import ArbitraryModel
 from tqdm import tqdm
@@ -468,14 +469,23 @@ class NetworkModel(BaseModel):
         collect_out_indices: Optional[np.ndarray] = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
     ) -> np.ndarray:
-        """
-        predict but rescale input data to latent space before prediction
-        (and rescale to original range back after)
+        """Predict from RAW space input, returning RAW space output.
 
-        parameters: c.f. predict()
+        This is a convenience wrapper that handles rescaling automatically:
+        1. Converts X from raw to latent space: scaled_X = rescaler.fwd(X)
+        2. Runs model prediction: scaled_Y = predict(scaled_X)
+        3. Converts Y back to raw space: Y = rescaler.inv(scaled_Y)
 
-        returns:
-            predictions in original range
+        Use this when your input data is in raw fluorescence space (values ~1e6).
+        Use predict() directly when your data is already in latent space (0-1).
+
+        Args:
+            X: Input data in RAW space (e.g., fluorescence values in millions)
+            key: Random key for predictions
+            ... (other params same as predict())
+
+        Returns:
+            Predictions in RAW space (same scale as input X)
         """
         logger.debug("Rescaling input data into latent space before prediction")
         scaled_X = self.model.rescaler.fwd(X)
@@ -507,26 +517,27 @@ class NetworkModel(BaseModel):
         collect_out_indices: Optional[np.ndarray] = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
     ):
-        """
-        make predictions using the model
+        """Predict from LATENT space input, returning LATENT space output.
 
-        parameters:
-            X: input data
-            key: random key for predictions
-            max_points_per_batch: maximum number of output points per batch
-            disable_variational: whether to disable variational parameters
-            with_shared_params: optional ParameterTree to replace shared parameters during prediction
-            with_local_params: optional ParameterTree to replace local parameters during prediction
+        The model internally operates in latent space (normalized 0-1 range).
+        If your data is in raw fluorescence space, use predict_unscaled() instead.
 
-            collection_points: list of points to collect data from. Each point is a NodeSpec,
-            meaning a network id and node id that will be used to index the full, flattened, running output of the network
-            in order to collect input/output data from these specific nodes. Super useful for debugging and visualization
-            (required for inner node plots)
+        Args:
+            X: Input data in LATENT space (values should be ~0-1)
+            key: Random key for predictions (int or JAX PRNGKey)
+            max_points_per_batch: Maximum number of output points per batch
+            disable_variational: Whether to disable variational parameters
+            z_value: Value for z latents, either 'uniform' or a float
+            with_shared_params: Optional ParameterTree to override shared parameters
+            with_local_params: Optional ParameterTree to override local parameters
+            collect_in_indices: Indices for collecting node inputs (for inner node plots)
+            collect_out_indices: Indices for collecting node outputs (for inner node plots)
+            device: Device preference ('cpu' or 'gpu')
 
-            z_value: value for z latents, either 'uniform' or a float
-
-        returns:
-            predictions (the "regular" output of the network stack) and collections (input/output data from specific nodes)
+        Returns:
+            Tuple of (predictions, collections):
+            - predictions: Model output in LATENT space (values ~0-1)
+            - collections: Tuple of (collected_inputs, collected_outputs) for inner nodes
         """
         import jax
         import jax.numpy as jnp

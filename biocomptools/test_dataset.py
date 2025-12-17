@@ -20,7 +20,7 @@ from pathlib import Path
 from dracon.deferred import DeferredNode
 from typing import Optional, Annotated
 from pydantic import Field, BaseModel, ConfigDict
-from biocomptools.toollib.common import config
+from biocomptools.toollib.common import config, make_context_from_types
 from dracon.commandline import make_program, Arg
 import sys
 from rich.console import Console
@@ -54,10 +54,6 @@ import biocomptools.toollib.models as md
 
 setup_logging(force=False)
 logger = get_logger(__name__)
-
-
-def make_context_from_types(types):
-    return {t.__name__: t for t in types}
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

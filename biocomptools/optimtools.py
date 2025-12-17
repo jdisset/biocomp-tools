@@ -1,5 +1,5 @@
 from biocomptools.logging_config import get_logger
-from biocomptools.toollib.common import config
+from biocomptools.toollib.common import config, make_context_from_types
 from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.trainutils import make_unique_dir, make_json_ready, plot_loss, print_matadata
 from biocomp.utils import PartialFunction
@@ -365,10 +365,6 @@ DEFAULT_TYPES = list(
         + PLOT_TYPES
     )
 )
-
-
-def make_context_from_types(types):
-    return {t.__name__: t for t in types}
 
 
 async def run_optimization_program(

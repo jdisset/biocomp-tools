@@ -3,7 +3,7 @@
 from biocomptools.logging_config import get_logger, setup_logging
 from pydantic import BaseModel, ConfigDict, Field
 from tqdm import tqdm
-from biocomptools.toollib.common import maybetqdm
+from biocomptools.toollib.common import maybetqdm, make_context_from_types
 import numpy as np
 
 import dracon as dr
@@ -26,6 +26,7 @@ from biocomptools.toollib.networkprediction import NetworkPrediction
 
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.toollib.pickle_utils import convert_jax_to_numpy_inplace, detach_lazy_plot_data
 from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
     UORFMatrixFigure,
     bundle_uorf_data,
@@ -123,150 +124,6 @@ class PlotResult(BaseModel):
     def __getitem__(self, idx):
         """Index access returns FigureResult for composition, or path for backward compat."""
         return self.figures[idx]
-
-
-def _detached_get_xy(pdata):
-    """Dummy get_xy for detached LazyPlotData - data should already be evaluated."""
-    raise RuntimeError(
-        "LazyPlotData has been detached for pickling - data should already be evaluated"
-    )
-
-
-def _detach_lazy_plot_data(obj, visited=None):
-    """Recursively find LazyPlotData objects and detach their closures for pickling.
-
-    LazyPlotData.get_xy closures capture NetworkPrediction instances which hold
-    BiocompModel with JAX Device objects that cannot be pickled. This function:
-    1. Forces evaluation of lazy data (populates xval/yval)
-    2. Replaces get_xy with a dummy function (no closure references)
-
-    After this, the LazyPlotData contains all the data it needs and is picklable.
-    """
-    from biocomp.plotutils import LazyPlotData
-
-    if visited is None:
-        visited = set()
-
-    obj_id = id(obj)
-    if obj_id in visited:
-        return
-    visited.add(obj_id)
-
-    # Check if this is a LazyPlotData
-    if isinstance(obj, LazyPlotData):
-        # Force evaluation if not already done
-        if obj.xval is None:
-            try:
-                _ = obj.x
-                _ = obj.y
-            except Exception:
-                pass  # Data may not be available, that's OK
-        # Replace get_xy closure with dummy
-        obj.get_xy = _detached_get_xy
-        return
-
-    # Recurse into containers
-    try:
-        if isinstance(obj, dict):
-            for v in obj.values():
-                _detach_lazy_plot_data(v, visited)
-        elif isinstance(obj, (list, tuple)):
-            for v in obj:
-                _detach_lazy_plot_data(v, visited)
-        elif hasattr(obj, '__dict__'):
-            for v in vars(obj).values():
-                _detach_lazy_plot_data(v, visited)
-    except Exception:
-        pass  # Skip objects that can't be traversed (e.g., Pydantic internal types)
-
-
-def _convert_jax_to_numpy_inplace(obj, visited=None):
-    """Recursively convert JAX arrays to numpy arrays in-place for pickling.
-
-    Also removes JAX Device objects which cannot be pickled.
-    """
-    if visited is None:
-        visited = set()
-
-    obj_id = id(obj)
-    if obj_id in visited:
-        return obj
-    visited.add(obj_id)
-
-    try:
-        from jax import Array as JaxArray
-        from jax._src.xla_bridge import Device
-    except ImportError:
-        try:
-            from jax import Array as JaxArray
-
-            Device = None
-        except ImportError:
-            return obj
-
-    # check for JAX Device - return None to remove from containers
-    if Device is not None and isinstance(obj, Device):
-        return None
-
-    # convert JAX Array to numpy
-    if isinstance(obj, JaxArray):
-        return np.asarray(obj)
-
-    # also check for jax.Array via string (in case import differs)
-    type_name = type(obj).__module__ + '.' + type(obj).__name__
-    if 'jax' in type_name.lower() and 'device' in type_name.lower():
-        return None
-    if 'jax' in type_name.lower() and 'array' in type_name.lower():
-        try:
-            return np.asarray(obj)
-        except Exception:
-            pass
-
-    if isinstance(obj, dict):
-        for k, v in list(obj.items()):
-            converted = _convert_jax_to_numpy_inplace(v, visited)
-            if converted is None and v is not None:
-                del obj[k]  # remove Device entries
-            else:
-                obj[k] = converted
-    elif isinstance(obj, list):
-        i = 0
-        while i < len(obj):
-            converted = _convert_jax_to_numpy_inplace(obj[i], visited)
-            if converted is None and obj[i] is not None:
-                obj.pop(i)  # remove Device entries
-            else:
-                obj[i] = converted
-                i += 1
-    elif isinstance(obj, tuple):
-        # tuples are immutable, return converted tuple (filtering out Devices)
-        converted = [_convert_jax_to_numpy_inplace(v, visited) for v in obj]
-        return tuple(c for c, orig in zip(converted, obj) if not (c is None and orig is not None))
-    elif hasattr(obj, '__dict__'):
-        for attr_name in list(vars(obj).keys()):
-            try:
-                val = getattr(obj, attr_name)
-                converted = _convert_jax_to_numpy_inplace(val, visited)
-                if converted is None and val is not None:
-                    # can't delete attribute, set to None
-                    setattr(obj, attr_name, None)
-                elif converted is not val:
-                    setattr(obj, attr_name, converted)
-            except (AttributeError, TypeError):
-                pass
-    elif hasattr(obj, '__slots__'):
-        for slot in obj.__slots__:
-            try:
-                val = getattr(obj, slot)
-                converted = _convert_jax_to_numpy_inplace(val, visited)
-                if converted is None and val is not None:
-                    setattr(obj, slot, None)
-                elif converted is not val:
-                    setattr(obj, slot, converted)
-            except (AttributeError, TypeError):
-                pass
-
-    return obj
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -403,10 +260,6 @@ DEFAULT_TYPES = [
 ]
 
 
-def make_context_from_types(types):
-    return {t.__name__: t for t in types}
-
-
 DEFAULT_CONTEXT = {
     **make_context_from_types(DEFAULT_TYPES),
     'get_pretty_axis_label': get_pretty_axis_label,
@@ -533,10 +386,9 @@ class PlotJob(BaseModel):
                     )
                 ]
 
-                # convert JAX arrays to numpy and detach LazyPlotData closures before pickling
                 for fig in constructed_figures:
-                    _convert_jax_to_numpy_inplace(fig)
-                    _detach_lazy_plot_data(fig)
+                    convert_jax_to_numpy_inplace(fig)
+                    detach_lazy_plot_data(fig)
 
                 # try parallel execution with fallback to sequential if pickling fails
                 parallel_figs, sequential_figs, sequential_indices = [], [], []

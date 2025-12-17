@@ -96,6 +96,9 @@ class DesignProgram(BaseOptimizationProgram):
     ] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
 
+    # TU masking options
+    enable_tu_masking: Annotated[bool, Arg(help='Enable Hard Concrete TU masking for architecture search')] = False
+
     def model_post_init(self, __context):
         # Initialize private attributes
         self._model = None
@@ -181,11 +184,14 @@ class DesignProgram(BaseOptimizationProgram):
             self.targets = [self.targets]
         logger.info(
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
-            f"and {self.sampling.strategy} sampling"
+            f"{self.sampling.strategy} sampling, TU masking={self.enable_tu_masking}"
         )
         self._dmanager = DesignManager(
-            targets=self.targets, networks=networks, sampling=self.sampling
+            targets=self.targets, networks=networks, sampling=self.sampling,
+            enable_tu_masking=self.enable_tu_masking,
         )
+        if self.enable_tu_masking:
+            logger.info(f"TU masking enabled: {self._dmanager.n_tus} TUs identified")
 
     def _get_logger_context(self) -> dict:
         context = super()._get_logger_context()
@@ -294,7 +300,7 @@ class DesignProgram(BaseOptimizationProgram):
         )
 
         logger.info(
-            f"Optimization completed. Final loss shape: {loss_history[-1].shape if loss_history else 'No loss history'}"
+            f"Optimization completed. Final loss: {loss_history[-1]:.4f}" if loss_history else "Optimization completed. No loss history"
         )
 
         if not self.skip_evaluation:
@@ -305,18 +311,18 @@ class DesignProgram(BaseOptimizationProgram):
         return final_params, loss_history, step_history
 
     async def _evaluate_and_save_results(self, final_params, loss_history):
+        import time
         logger.info("=" * 60)
-        logger.info("Evaluating design performance...")
-        logger.debug(
-            f"Evaluation parameters: n_samples={self.n_eval_samples}, seed={self.eval_seed}"
-        )
+        logger.info("POST-OPTIMIZATION EVALUATION")
+        logger.info("=" * 60)
 
         assert self._dmanager is not None
         assert self._model is not None
 
         eval_key = jax.random.key(self.eval_seed)
-        logger.debug("Sampling evaluation data...")
 
+        t0 = time.perf_counter()
+        logger.info(f"[1/3] Sampling {self.n_eval_samples} evaluation points...")
         xraw, yraw = sample_for_evaluation(
             dmanager=self._dmanager,
             dconf=self.design_conf,
@@ -324,11 +330,10 @@ class DesignProgram(BaseOptimizationProgram):
             n_eval_samples=self.n_eval_samples,
             key=eval_key,
         )
+        logger.info(f"  -> Sampled in {time.perf_counter() - t0:.2f}s (shapes: x={xraw.shape}, y={yraw.shape})")
 
-        logger.debug(f"Sampled evaluation data shapes: xraw={xraw.shape}, yraw={yraw.shape}")
-
-        logger.info(f"Running design evaluation with max chunk size={self.max_eval_chunk_size}...")
-
+        t1 = time.perf_counter()
+        logger.info(f"[2/3] Running forward pass evaluation (chunk_size={self.max_eval_chunk_size})...")
         yhatdep, losses = evaluate_design(
             dmanager=self._dmanager,
             dconf=self.design_conf,
@@ -339,15 +344,13 @@ class DesignProgram(BaseOptimizationProgram):
             key=eval_key,
             max_eval_size=self.max_eval_chunk_size,
             max_loss_size=self.max_eval_loss_size,
-            store_predictions=self.plot_results,  # only store if we're plotting
+            store_predictions=self.plot_results,
         )
+        logger.info(f"  -> Evaluated in {time.perf_counter() - t1:.2f}s")
+        logger.info(f"  -> Losses: min={losses.min():.4f}, max={losses.max():.4f}, mean={losses.mean():.4f}")
 
-        logger.debug(f"Evaluation complete. Losses shape: {losses.shape}")
-        logger.debug(
-            f"Loss statistics: min={losses.min():.4f}, max={losses.max():.4f}, mean={losses.mean():.4f}"
-        )
-
-        logger.debug(f"Finding top {self.topk_n} designs for each target...")
+        t2 = time.perf_counter()
+        logger.info(f"[3/3] Finding top {self.topk_n} designs...")
 
         topk = get_topk_replicate_network_pairs(
             losses=losses,
@@ -355,6 +358,7 @@ class DesignProgram(BaseOptimizationProgram):
             dconf=self.design_conf,
             k=self.topk_n,
         )
+        logger.info(f"  -> Top-k found in {time.perf_counter() - t2:.2f}s")
 
         def get_target_name(t):
             if isinstance(t, DataTarget):
@@ -362,7 +366,7 @@ class DesignProgram(BaseOptimizationProgram):
             else:
                 return t.name or Path(t.path).stem
 
-        # Compute baseline loss for DataTargets with original networks
+        t3 = time.perf_counter()
         try:
             baseline_results = compute_baseline_loss(
                 dmanager=self._dmanager,
@@ -370,6 +374,7 @@ class DesignProgram(BaseOptimizationProgram):
                 n_samples=self.n_eval_samples,
                 seed=self.eval_seed,
             )
+            logger.info(f"  -> Baseline computed in {time.perf_counter() - t3:.2f}s")
         except Exception as e:
             logger.warning(f"Failed to compute baseline loss: {e}")
             baseline_results = {}
@@ -433,7 +438,7 @@ class DesignProgram(BaseOptimizationProgram):
             logger.debug(f"Saved final parameters to {params_file}")
 
             if loss_history:
-                all_losses = np.concatenate(loss_history, axis=-1)
+                all_losses = np.array(loss_history)
                 np.save(save_dir / 'loss_history.npy', all_losses)
             else:
                 logger.warning("No loss history to save (0 training steps)")
