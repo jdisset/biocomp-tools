@@ -502,26 +502,33 @@ class HyperoptProgram(BaseModel):
         weights = self._build_per_trial_weights_fast(all_hp)
         params.at("global/per_output_weights", weights, tags=["non_grad", "local"], overwrite=True)
 
-        # Cache batches for reuse across trial batches (major speedup)
+        # Cache batches on CPU for reuse across trial batches (major speedup)
+        # Keeping on CPU avoids GPU memory pressure during validation
         n_batches_needed = batch_conf.n_batches
         batch_size = batch_conf.batch_size
         if self._cached_batches is None:
-            print(f"[vmap] Generating batches (caching for reuse)...")
+            print(f"[vmap] Generating batches (caching on CPU for reuse)...")
             t0 = time.time()
             # Generate enough for max_replicates (first batch size) - subsequent can slice
             flat_n = n_trials * n_batches_needed
             batch_key = jax.random.PRNGKey(self.seed or 42)
             xflat, yflat = self._training_dman.get_batches(flat_n, batch_size, batch_key)
-            self._cached_batches = (xflat, yflat, n_trials)  # store with n_replicates used
+            # Move to CPU for caching (saves GPU memory)
+            cpu = jax.devices("cpu")[0]
+            xflat_cpu = jax.device_put(xflat, cpu)
+            yflat_cpu = jax.device_put(yflat, cpu)
+            del xflat, yflat  # free GPU copies
+            self._cached_batches = (xflat_cpu, yflat_cpu, n_trials)
             print(f"[vmap] Batch generation done ({time.time() - t0:.1f}s)")
 
         xflat, yflat, cached_n_reps = self._cached_batches
         if n_trials <= cached_n_reps:
-            # Slice and reshape cached batches
+            # Slice and reshape cached batches, then move to GPU for training
             flat_n = n_trials * n_batches_needed
+            gpu = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
             xy_batches = (
-                xflat[:flat_n].reshape(n_trials, n_batches_needed, *xflat.shape[1:]),
-                yflat[:flat_n].reshape(n_trials, n_batches_needed, *yflat.shape[1:]),
+                jax.device_put(xflat[:flat_n].reshape(n_trials, n_batches_needed, *xflat.shape[1:]), gpu),
+                jax.device_put(yflat[:flat_n].reshape(n_trials, n_batches_needed, *yflat.shape[1:]), gpu),
             )
         else:
             # Rare case: more trials than cached - regenerate
@@ -552,6 +559,9 @@ class HyperoptProgram(BaseModel):
             xy_batches=xy_batches,
         )
         print(f"[vmap] Training done ({time.time() - t0:.1f}s)")
+
+        # Free GPU copy of batches before validation (CPU cache remains for next batch)
+        del xy_batches
 
         best_stats = None
         if self.use_validation_loss:
