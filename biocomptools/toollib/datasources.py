@@ -1,5 +1,5 @@
 ## {{{                          --     imports     --
-from pydantic import model_validator
+from pydantic import model_validator, ConfigDict
 from typing import Any, Optional, List, Union
 from sqlalchemy.orm.session import make_transient
 import numpy as np
@@ -193,6 +193,121 @@ class DBSource(DataSource, NetworkSet):
                 res.append(d)
 
         return res
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                    --     DataTargetSource     --
+
+
+def _resolve_model(v: Any) -> Optional[Any]:
+    """Resolve model from BiocompModel, path string, model name/signature, or ModelSelector."""
+    if v is None:
+        return None
+
+    from biocomptools.modelmodel import BiocompModel, load_model
+    from biocomptools.toollib.modelselector import ModelSelector
+
+    if isinstance(v, BiocompModel):
+        return v
+    if isinstance(v, ModelSelector):
+        return load_model(v.get_model().path_to_model)
+    if isinstance(v, str):
+        path = Path(v)
+        if path.suffix in (".pickle", ".pkl", ".h5") or "/" in v or "\\" in v:
+            if path.exists():
+                return load_model(path)
+            import os
+
+            expanded = Path(os.path.expandvars(v))
+            if expanded.exists():
+                return load_model(expanded)
+        # treat as model name/signature
+        return load_model(ModelSelector(name=v, pick_best_loss=True).get_model().path_to_model)
+    raise TypeError(f"Cannot resolve model from type {type(v).__name__}")
+
+
+class DataTargetSource(BaseModel):
+    """Generate DataTarget list from a dataset config.
+
+    Example YAML:
+        !define _source: !biocomptools.toollib.datasources.DataTargetSource
+          source: !include file:${dataset_file}
+          model: ${model_path}
+        !define data_targets: ${_source.targets}
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    source: Any  # NetworkSet, CleanupFilter, list of selectors, etc.
+    model: Optional[Any] = None  # BiocompModel, str path, model name, or ModelSelector
+    rescaler: Optional[Any] = None  # direct DataRescaler (alternative to model)
+    lattice_x_extent: tuple[float, float] = (0.0, 0.6)
+    lattice_y_extent: tuple[float, float] = (0.0, 0.6)
+
+    _targets: list = []
+    _networks: list = []
+    _resolved_model: Optional[Any] = None
+
+    @model_validator(mode="after")
+    def _build_targets(self):
+        from biocomp.design import DataTarget
+
+        self._resolved_model = _resolve_model(self.model)
+
+        # normalize source to DBSource
+        if isinstance(self.source, DBSource):
+            dbsource = self.source
+        elif isinstance(self.source, list):
+            dbsource = DBSource(content=self.source)
+        else:
+            dbsource = DBSource(content=[self.source])
+
+        rescaler = self.rescaler or getattr(self._resolved_model, "rescaler", None)
+
+        targets, networks = [], []
+        for pdata in dbsource.get_data():
+            X, Y = np.asarray(pdata.x), np.asarray(pdata.y)
+            if rescaler is not None:
+                X, Y = rescaler.fwd(X), rescaler.fwd(Y)
+
+            built_network = pdata.metadata.get("built_network")
+            targets.append(
+                DataTarget(
+                    X=X,
+                    Y=Y,
+                    name=pdata.metadata.get("network_name", "data_target"),
+                    lattice_x_extent=self.lattice_x_extent,
+                    lattice_y_extent=self.lattice_y_extent,
+                    original_network=built_network,
+                )
+            )
+            if built_network is not None:
+                networks.append(built_network)
+
+        self._targets, self._networks = targets, networks
+        return self
+
+    @property
+    def targets(self) -> list:
+        return self._targets
+
+    @property
+    def networks(self) -> list:
+        return self._networks
+
+    @property
+    def resolved_model(self) -> Optional[Any]:
+        return self._resolved_model
+
+    def __iter__(self):
+        return iter(self._targets)
+
+    def __len__(self):
+        return len(self._targets)
+
+    def __getitem__(self, idx):
+        return self._targets[idx]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

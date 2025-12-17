@@ -33,6 +33,8 @@ class DesignResult:
     _gt_data: Optional[PlotData] = field(default=None, repr=False)
     _pred_data: Optional[PlotData] = field(default=None, repr=False)
     _lattice_data: Optional[PlotData] = field(default=None, repr=False)
+    _baseline_nre_value: Optional[float] = field(default=None, repr=False)
+    _design_nre_value: Optional[float] = field(default=None, repr=False)
 
     def _to_raw_space(self, X: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if self.model is None:
@@ -147,23 +149,29 @@ class DesignResult:
 
     @property
     def baseline_nre(self) -> Optional[float]:
+        if self._baseline_nre_value is not None:
+            return self._baseline_nre_value
         if not self.has_original_network:
             return None
-        if not hasattr(self, '_baseline_nre'):
-            self._baseline_nre = self._compute_nre_for_network(self.target.original_network)
-        return self._baseline_nre
+        if not hasattr(self, '_baseline_nre_computed'):
+            self._baseline_nre_computed = self._compute_nre_for_network(
+                self.target.original_network
+            )
+        return self._baseline_nre_computed
 
     @property
     def design_nre(self) -> Optional[float]:
-        if not hasattr(self, '_design_nre'):
+        if self._design_nre_value is not None:
+            return self._design_nre_value
+        if not hasattr(self, '_design_nre_computed'):
             from biocomp.design import DataTarget
 
-            self._design_nre = (
+            self._design_nre_computed = (
                 self._compute_nre_for_network(self.network)
                 if isinstance(self.target, DataTarget)
                 else None
             )
-        return self._design_nre
+        return self._design_nre_computed
 
 
 def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwargs):
