@@ -22,27 +22,23 @@ class RegressionMetrics:
 
     @classmethod
     def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "RegressionMetrics":
-        y_true, y_pred = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
-        valid = np.isfinite(y_true) & np.isfinite(y_pred)
+        yt, yp = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
+        valid = np.isfinite(yt) & np.isfinite(yp)
         if not np.any(valid):
             return cls(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-
-        y_true, y_pred = y_true[valid], y_pred[valid]
-        errors = y_pred - y_true
-        abs_errors = np.abs(errors)
-
-        ss_res, ss_tot = np.sum(errors**2), np.sum((y_true - np.mean(y_true))**2)
+        yt, yp = yt[valid], yp[valid]
+        err, abs_err = yp - yt, np.abs(yp - yt)
+        ss_res, ss_tot = np.sum(err**2), np.sum((yt - np.mean(yt)) ** 2)
         r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-        pearson_r, pearson_p = stats.pearsonr(y_true, y_pred) if len(y_true) > 2 else (np.nan, np.nan)
-
+        pr, pp = stats.pearsonr(yt, yp) if len(yt) > 2 else (np.nan, np.nan)
         return cls(
-            rmse=float(np.sqrt(np.mean(errors**2))),
-            mae=float(np.mean(abs_errors)),
-            r2=r2,
-            pearson_r=float(pearson_r),
-            pearson_p=float(pearson_p),
-            max_error=float(np.max(abs_errors)),
-            p95_error=float(np.percentile(abs_errors, 95)),
+            float(np.sqrt(np.mean(err**2))),
+            float(np.mean(abs_err)),
+            r2,
+            float(pr),
+            float(pp),
+            float(np.max(abs_err)),
+            float(np.percentile(abs_err, 95)),
         )
 
 
@@ -59,12 +55,16 @@ class DistributionMetrics:
 
     @classmethod
     def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "DistributionMetrics":
-        y_true, y_pred = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
+        yt, yp = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
         return cls(
-            float(np.nanmean(y_true)), float(np.nanstd(y_true)),
-            float(np.nanmin(y_true)), float(np.nanmax(y_true)),
-            float(np.nanmean(y_pred)), float(np.nanstd(y_pred)),
-            float(np.nanmin(y_pred)), float(np.nanmax(y_pred)),
+            float(np.nanmean(yt)),
+            float(np.nanstd(yt)),
+            float(np.nanmin(yt)),
+            float(np.nanmax(yt)),
+            float(np.nanmean(yp)),
+            float(np.nanstd(yp)),
+            float(np.nanmin(yp)),
+            float(np.nanmax(yp)),
         )
 
 
@@ -75,6 +75,15 @@ class LossComponents:
     lncc: Optional[float] = None
     spectral: Optional[float] = None
     over1_penalty: Optional[float] = None
+
+
+@dataclass
+class NREMetrics:
+    design_nre: Optional[float] = None
+    baseline_nre: Optional[float] = None
+    design_nrmse: Optional[float] = None
+    baseline_nrmse: Optional[float] = None
+    data_nrmse: Optional[float] = None
 
 
 @dataclass
@@ -89,15 +98,24 @@ class DesignMetrics:
     regression: RegressionMetrics
     distribution: DistributionMetrics
     recipe_summary: dict = field(default_factory=dict)
+    nre: Optional[NREMetrics] = None
 
     def to_dict(self) -> dict:
-        return {
-            'target_name': self.target_name, 'network_name': self.network_name,
-            'replicate_id': self.replicate_id, 'network_id': self.network_id,
-            'rank': self.rank, 'step': self.step,
-            'loss': asdict(self.loss), 'regression': asdict(self.regression),
-            'distribution': asdict(self.distribution), 'recipe_summary': self.recipe_summary,
+        result = {
+            'target_name': self.target_name,
+            'network_name': self.network_name,
+            'replicate_id': self.replicate_id,
+            'network_id': self.network_id,
+            'rank': self.rank,
+            'step': self.step,
+            'loss': asdict(self.loss),
+            'regression': asdict(self.regression),
+            'distribution': asdict(self.distribution),
+            'recipe_summary': self.recipe_summary,
         }
+        if self.nre is not None:
+            result['nre'] = asdict(self.nre)
+        return result
 
     def to_json(self, path: Path):
         with open(path, 'w') as f:
@@ -106,85 +124,161 @@ class DesignMetrics:
 
 class DesignResultsManager:
     def __init__(self, base_dir: Union[str, Path], step: Optional[int] = None):
-        self.base_dir = Path(base_dir)
-        self.step = step
+        self.base_dir, self.step = Path(base_dir), step
         self.base_dir.mkdir(parents=True, exist_ok=True)
         for subdir in ('targets', 'checkpoints', 'comparison'):
             (self.base_dir / subdir).mkdir(exist_ok=True)
 
     def get_target_dir(self, target_name: str) -> Path:
-        target_dir = self.base_dir / 'targets' / self._sanitize_name(target_name)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        return target_dir
+        d = self.base_dir / 'targets' / self._sanitize_name(target_name)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def get_rank_dir(self, target_name: str, rank: int, step: Optional[int] = None) -> Path:
-        target_dir = self.get_target_dir(target_name)
-        step_dir = target_dir / ('final' if step is None else f'steps/step_{step:06d}')
+        step_dir = self.get_target_dir(target_name) / (
+            'final' if step is None else f'steps/step_{step:06d}'
+        )
         rank_dir = step_dir / f'rank_{rank:02d}'
         rank_dir.mkdir(parents=True, exist_ok=True)
         return rank_dir
 
     def get_checkpoint_dir(self, step: int) -> Path:
-        checkpoint_dir = self.base_dir / 'checkpoints' / f'step_{step:06d}'
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        return checkpoint_dir
+        d = self.base_dir / 'checkpoints' / f'step_{step:06d}'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def get_comparison_dir(self) -> Path:
         return self.base_dir / 'comparison'
 
     @staticmethod
     def _sanitize_name(name: str) -> str:
-        for old, new in {'/' : '_', '\\': '_', ':': '_', '*': '_', '?': '_', '"': '_', '<': '_', '>': '_', '|': '_', ' ': '_'}.items():
-            name = name.replace(old, new)
+        for c in '/ \\ : * ? " < > |'.split():
+            name = name.replace(c, '_')
         return name[:200]
 
     def save_target_summary(self, target_name: str, summary: dict):
-        with open(self.get_target_dir(target_name) / 'target_summary.json', 'w') as f:
-            json.dump(summary, f, indent=2)
+        (self.get_target_dir(target_name) / 'target_summary.json').write_text(
+            json.dumps(summary, indent=2)
+        )
 
     def save_rankings(self, target_name: str, rankings: list, step: Optional[int] = None):
-        out_dir = self.get_target_dir(target_name) / ('final' if step is None else f'steps/step_{step:06d}')
+        out_dir = self.get_target_dir(target_name) / (
+            'final' if step is None else f'steps/step_{step:06d}'
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
-        with open(out_dir / 'rankings.json', 'w') as f:
-            json.dump([{'rank': i+1, 'replicate_id': r, 'network_id': n, 'loss': float(l)} for i, (r, n, l) in enumerate(rankings)], f, indent=2)
+        (out_dir / 'rankings.json').write_text(
+            json.dumps(
+                [
+                    {'rank': i + 1, 'replicate_id': r, 'network_id': n, 'loss': float(loss)}
+                    for i, (r, n, loss) in enumerate(rankings)
+                ],
+                indent=2,
+            )
+        )
+
+
+def compute_nre_for_network(
+    target: Any, network: Any, model: Any, max_evals: int = 50000
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    from biocomp.design import DataTarget
+
+    if not isinstance(target, DataTarget) or model is None or network is None:
+        return None, None, None
+    try:
+        from biocomptools.modelmodel import NetworkModel
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+
+        X, Y = target.X, target.Y
+        if len(X) > max_evals:
+            idx = np.random.default_rng(42).choice(len(X), max_evals, replace=False)
+            X, Y = X[idx], Y[idx]
+
+        predictor = NetworkPrediction(
+            predict_at=[X],
+            ground_truth=[Y.reshape(-1, 1) if Y.ndim == 1 else Y],
+            max_evals=max_evals,
+            network_model=NetworkModel(model=model, network=[network]),
+            already_latent=True,
+            enable_gridstats=True,
+            device='gpu',
+            verbose=False,
+        )
+        s = predictor.get_network_stats()
+        return (
+            (s[0].get('noise_relative_error'), s[0].get('grid_nrmse'), s[0].get('data_nrmse'))
+            if s
+            else (None, None, None)
+        )
+    except Exception as e:
+        logger.warning(f"Failed to compute NRE: {e}")
+        return None, None, None
 
 
 def compute_design_metrics(
-    y_true: np.ndarray, y_pred: np.ndarray, loss_value: float,
-    target_name: str, network_name: str, replicate_id: int, network_id: int,
-    rank: int, step: int, loss_components: Optional[dict] = None, recipe_info: Optional[dict] = None,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    loss_value: float,
+    target_name: str,
+    network_name: str,
+    replicate_id: int,
+    network_id: int,
+    rank: int,
+    step: int,
+    loss_components: Optional[dict] = None,
+    recipe_info: Optional[dict] = None,
+    nre_metrics: Optional[NREMetrics] = None,
 ) -> DesignMetrics:
     lc = loss_components or {}
     return DesignMetrics(
-        target_name=target_name, network_name=network_name,
-        replicate_id=replicate_id, network_id=network_id, rank=rank, step=step,
-        loss=LossComponents(float(loss_value), lc.get('sinkhorn'), lc.get('lncc'), lc.get('spectral'), lc.get('over1_penalty')),
-        regression=RegressionMetrics.compute(y_true, y_pred),
-        distribution=DistributionMetrics.compute(y_true, y_pred),
-        recipe_summary=recipe_info or {},
+        target_name,
+        network_name,
+        replicate_id,
+        network_id,
+        rank,
+        step,
+        LossComponents(
+            float(loss_value),
+            lc.get('sinkhorn'),
+            lc.get('lncc'),
+            lc.get('spectral'),
+            lc.get('over1_penalty'),
+        ),
+        RegressionMetrics.compute(y_true, y_pred),
+        DistributionMetrics.compute(y_true, y_pred),
+        recipe_info or {},
+        nre_metrics,
     )
 
 
 def extract_recipe_summary(network: Any, params: Any = None) -> dict:
-    summary = {'network_name': getattr(network, 'name', 'unknown'), 'uorfs': [], 'ratios': {}, 'parts': []}
+    summary = {
+        'network_name': getattr(network, 'name', 'unknown'),
+        'uorfs': [],
+        'ratios': {},
+        'parts': [],
+    }
     try:
         if hasattr(network, 'graph'):
-            for node_id, node_data in network.graph.nodes.items():
-                extra = node_data.get('extra', {})
-                if 'uorf' in str(node_data.get('type', '')).lower():
-                    summary['uorfs'].append({'node_id': str(node_id), 'value': extra.get('part_name', 'unknown')})
-                if node_data.get('type') == 'aggregation' and 'ratios' in extra:
-                    summary['ratios'][extra.get('cotx_group', 'unknown')] = list(map(float, extra['ratios']))
-        if hasattr(network, 'source_recipe') and network.source_recipe:
-            recipe = network.source_recipe
-            if hasattr(recipe, 'content'):
-                for cotx in recipe.content:
-                    if hasattr(cotx, 'units'):
-                        for tu in cotx.units:
-                            if hasattr(tu, 'slots'):
-                                for slot in tu.slots:
-                                    if 'uORF' in str(slot):
-                                        summary['uorfs'].append(str(slot))
+            for nid, ndata in network.graph.nodes.items():
+                extra = ndata.get('extra', {})
+                if 'uorf' in str(ndata.get('type', '')).lower():
+                    summary['uorfs'].append(
+                        {'node_id': str(nid), 'value': extra.get('part_name', 'unknown')}
+                    )
+                if ndata.get('type') == 'aggregation' and 'ratios' in extra:
+                    summary['ratios'][extra.get('cotx_group', 'unknown')] = list(
+                        map(float, extra['ratios'])
+                    )
+        if (
+            hasattr(network, 'source_recipe')
+            and network.source_recipe
+            and hasattr(network.source_recipe, 'content')
+        ):
+            for cotx in network.source_recipe.content:
+                for tu in getattr(cotx, 'units', []):
+                    for slot in getattr(tu, 'slots', []):
+                        if 'uORF' in str(slot):
+                            summary['uorfs'].append(str(slot))
     except Exception as e:
         logger.warning(f"Failed to extract recipe summary: {e}")
     return summary

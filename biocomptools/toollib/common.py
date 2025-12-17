@@ -46,14 +46,9 @@ Pair = Tuple[T, T]
 DictOrList = Union[Dict[U, T], List[T]]
 
 
-def dict_like(obj) -> bool:
-    return (
-        hasattr(obj, 'keys')
-        and hasattr(obj, 'get')
-        and hasattr(obj, '__getitem__')
-        and hasattr(obj, '__contains__')
-        and hasattr(obj, '__iter__')
-    )
+def make_context_from_types(types):
+    """Convert a list of types to a context dict mapping name -> type."""
+    return {t.__name__: t for t in types}
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

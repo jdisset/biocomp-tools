@@ -1,5 +1,3 @@
-"""Design result data holder and metrics figuremaker."""
-
 from dataclasses import dataclass, field
 from typing import Any, Optional
 import numpy as np
@@ -7,15 +5,19 @@ import matplotlib.axes
 from matplotlib.patches import FancyBboxPatch
 
 from biocomp.plotutils import PlotData
+from biocomptools.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 GOOD_COLOR = "#28a745"
 BAD_COLOR = "#dc3545"
 NEUTRAL_COLOR = "#333"
+BASELINE_COLOR = "#6c757d"
 
 
 @dataclass
 class DesignResult:
-    """Minimal data holder for a single design result (like BenchmarkItem)."""
+    """Data holder for design result. All data properties return RAW space for plotting."""
 
     network: Any
     target: Any
@@ -32,90 +34,275 @@ class DesignResult:
     _pred_data: Optional[PlotData] = field(default=None, repr=False)
     _lattice_data: Optional[PlotData] = field(default=None, repr=False)
 
+    def _to_raw_space(self, X: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if self.model is None:
+            return X, Y
+        return self.model.rescaler.inv(X), self.model.rescaler.inv(Y.reshape(-1, 1)).ravel()
+
     @property
     def gt_data(self) -> PlotData:
-        """Ground truth / target data for plotting."""
         if self._gt_data is None:
             from biocomp.design import DataTarget
 
             if isinstance(self.target, DataTarget):
                 X, Y = self.target.X, np.atleast_1d(self.target.Y.squeeze())
-                if len(X) > 20000:  # subsample
+                if len(X) > 20000:
                     idx = np.random.default_rng(42).choice(len(X), 20000, replace=False)
                     X, Y = X[idx], Y[idx]
             else:
                 X, Y = self.target.sample_uniform(10000, seed=42)
                 Y = Y.ravel()
+            X, Y = self._to_raw_space(X, Y)
             self._gt_data = PlotData(
-                xval=X, yval=Y,
-                input_names=[f'X{i+1}' for i in range(X.shape[1])],
+                xval=X,
+                yval=Y,
+                input_names=[f'X{i + 1}' for i in range(X.shape[1])],
                 output_name='Y',
             )
         return self._gt_data
 
     @property
     def pred_data(self) -> PlotData:
-        """Prediction data for plotting (lazily computed)."""
         if self._pred_data is None:
             from biocomptools.modelmodel import NetworkModel
             from biocomptools.toollib.networkprediction import NetworkPrediction
+            from biocomp.design import DataTarget
 
-            X = self.gt_data.x
+            if isinstance(self.target, DataTarget):
+                X_latent = self.target.X
+                if len(X_latent) > 20000:
+                    idx = np.random.default_rng(42).choice(len(X_latent), 20000, replace=False)
+                    X_latent = X_latent[idx]
+            else:
+                X_latent, _ = self.target.sample_uniform(10000, seed=42)
+
             predictor = NetworkPrediction(
-                predict_at=[X],
+                predict_at=[X_latent],
                 max_evals=50000,
                 network_model=NetworkModel(model=self.model, network=[self.network]),
+                already_latent=True,
                 device='gpu',
             )
-            pred = predictor.get_data()
+            pred = predictor.get_data(rescale_latent=True)
+            X_pred = pred[0].x if pred else X_latent
+            Y_pred = pred[0].y if pred else np.zeros(len(X_pred))
+            if self.model is not None and not pred:
+                X_pred = self.model.rescaler.inv(X_pred)
             self._pred_data = PlotData(
-                xval=X, yval=pred[0].y if pred else self.gt_data.y,
-                input_names=[f'X{i+1}' for i in range(X.shape[1])],
+                xval=X_pred,
+                yval=Y_pred,
+                input_names=[f'X{i + 1}' for i in range(X_pred.shape[1])],
                 output_name='Y',
             )
         return self._pred_data
 
     @property
     def lattice_data(self) -> PlotData:
-        """Target sampled on lattice for design view."""
         if self._lattice_data is None:
             X, Y = self.target.get_lattice((48, 48), seed=0)
+            X, Y_flat = self._to_raw_space(X, Y.ravel())
             self._lattice_data = PlotData(
-                xval=X, yval=Y.ravel(),
-                input_names=[f'X{i+1}' for i in range(X.shape[1])],
+                xval=X,
+                yval=Y_flat,
+                input_names=[f'X{i + 1}' for i in range(X.shape[1])],
                 output_name='Y',
             )
         return self._lattice_data
 
+    @property
+    def has_original_network(self) -> bool:
+        from biocomp.design import DataTarget
+
+        return isinstance(self.target, DataTarget) and self.target.original_network is not None
+
+    def _compute_nre_for_network(self, network: Any, max_evals: int = 50000) -> Optional[float]:
+        from biocomp.design import DataTarget
+
+        if self.model is None or not isinstance(self.target, DataTarget):
+            return None
+        try:
+            from biocomptools.modelmodel import NetworkModel
+            from biocomptools.toollib.networkprediction import NetworkPrediction
+
+            X, Y = self.target.X, self.target.Y
+            if len(X) > max_evals:
+                idx = np.random.default_rng(42).choice(len(X), max_evals, replace=False)
+                X, Y = X[idx], Y[idx]
+
+            predictor = NetworkPrediction(
+                predict_at=[X],
+                ground_truth=[Y.reshape(-1, 1) if Y.ndim == 1 else Y],
+                max_evals=max_evals,
+                network_model=NetworkModel(model=self.model, network=[network]),
+                already_latent=True,
+                enable_gridstats=True,
+                device='gpu',
+                verbose=False,
+            )
+            stats = predictor.get_network_stats()
+            return stats[0].get('noise_relative_error') if stats else None
+        except Exception as e:
+            logger.warning(f"Failed to compute NRE: {e}")
+            return None
+
+    @property
+    def baseline_nre(self) -> Optional[float]:
+        if not self.has_original_network:
+            return None
+        if not hasattr(self, '_baseline_nre'):
+            self._baseline_nre = self._compute_nre_for_network(self.target.original_network)
+        return self._baseline_nre
+
+    @property
+    def design_nre(self) -> Optional[float]:
+        if not hasattr(self, '_design_nre'):
+            from biocomp.design import DataTarget
+
+            self._design_nre = (
+                self._compute_nre_for_network(self.network)
+                if isinstance(self.target, DataTarget)
+                else None
+            )
+        return self._design_nre
+
 
 def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwargs):
-    """Render metrics panel for design result."""
     ax.axis('off')
-    ax.add_patch(FancyBboxPatch(
-        (0, 0), 1, 1, transform=ax.transAxes, boxstyle="round,pad=0.02",
-        facecolor='#EEEEEE', edgecolor='#ccc', linewidth=1, clip_on=False,
-    ))
+    ax.add_patch(
+        FancyBboxPatch(
+            (0, 0),
+            1,
+            1,
+            transform=ax.transAxes,
+            boxstyle="round,pad=0.02",
+            facecolor='#EEEEEE',
+            edgecolor='#ccc',
+            linewidth=1,
+            clip_on=False,
+        )
+    )
 
-    loss_color = GOOD_COLOR if result.loss < 0.5 else (BAD_COLOR if result.loss > 1.5 else NEUTRAL_COLOR)
-    ax.text(0.5, 0.80, f"{result.loss:.4f}", transform=ax.transAxes,
-            fontsize=24, va='center', ha='center', fontweight='bold', color=loss_color)
-    ax.text(0.5, 0.65, "Design Loss", transform=ax.transAxes,
-            fontsize=10, va='center', ha='center', color='gray')
+    loss_color = (
+        GOOD_COLOR if result.loss < 0.5 else (BAD_COLOR if result.loss > 1.5 else NEUTRAL_COLOR)
+    )
+    ax.text(
+        0.5,
+        0.88,
+        f"{result.loss:.4f}",
+        transform=ax.transAxes,
+        fontsize=22,
+        va='center',
+        ha='center',
+        fontweight='bold',
+        color=loss_color,
+    )
+    ax.text(
+        0.5,
+        0.76,
+        "Design Loss",
+        transform=ax.transAxes,
+        fontsize=9,
+        va='center',
+        ha='center',
+        color='gray',
+    )
 
-    ax.text(0.5, 0.45, f"Rank: {result.rank}  |  Replicate: {result.replicate}",
-            transform=ax.transAxes, fontsize=10, va='center', ha='center', family='monospace')
+    if result.has_original_network:
+        baseline_nre, design_nre = result.baseline_nre, result.design_nre
+        nre_y = 0.60
+        if design_nre is not None:
+            if baseline_nre is not None and design_nre <= baseline_nre * 1.5:
+                nre_color = GOOD_COLOR
+            elif design_nre < 5.0:
+                nre_color = NEUTRAL_COLOR
+            else:
+                nre_color = BAD_COLOR
+            ax.text(
+                0.5,
+                nre_y,
+                f"NRE: {design_nre:.2f}",
+                transform=ax.transAxes,
+                fontsize=14,
+                va='center',
+                ha='center',
+                fontweight='bold',
+                color=nre_color,
+            )
+        else:
+            ax.text(
+                0.5,
+                nre_y,
+                "NRE: N/A",
+                transform=ax.transAxes,
+                fontsize=14,
+                va='center',
+                ha='center',
+                color='#aaa',
+            )
+        if baseline_nre is not None:
+            ax.text(
+                0.5,
+                nre_y - 0.10,
+                f"(baseline: {baseline_nre:.2f})",
+                transform=ax.transAxes,
+                fontsize=9,
+                va='center',
+                ha='center',
+                color=BASELINE_COLOR,
+            )
+        info_y = 0.38
+    else:
+        info_y = 0.55
 
-    scaffold = result.scaffold_network_name[:25] + '...' if len(result.scaffold_network_name) > 28 else result.scaffold_network_name
-    ax.text(0.5, 0.30, f"Scaffold: {scaffold}", transform=ax.transAxes,
-            fontsize=8, va='center', ha='center', family='monospace', color='#666')
-
-    ax.text(0.5, 0.15, f"Hash: {result.recipe_hash}", transform=ax.transAxes,
-            fontsize=8, va='center', ha='center', family='monospace', color='#888')
+    ax.text(
+        0.5,
+        info_y,
+        f"Rank: {result.rank}  |  Replicate: {result.replicate}",
+        transform=ax.transAxes,
+        fontsize=10,
+        va='center',
+        ha='center',
+        family='monospace',
+    )
+    scaffold = (
+        result.scaffold_network_name[:25] + '...'
+        if len(result.scaffold_network_name) > 28
+        else result.scaffold_network_name
+    )
+    ax.text(
+        0.5,
+        info_y - 0.12,
+        f"Scaffold: {scaffold}",
+        transform=ax.transAxes,
+        fontsize=8,
+        va='center',
+        ha='center',
+        family='monospace',
+        color='#666',
+    )
+    ax.text(
+        0.5,
+        info_y - 0.22,
+        f"Hash: {result.recipe_hash}",
+        transform=ax.transAxes,
+        fontsize=8,
+        va='center',
+        ha='center',
+        family='monospace',
+        color='#888',
+    )
 
 
 def render_empty_panel(ax: matplotlib.axes.Axes, text: str = "", **_kwargs):
-    """Render empty placeholder panel."""
     ax.axis('off')
     if text:
-        ax.text(0.5, 0.5, text, transform=ax.transAxes,
-                fontsize=10, va='center', ha='center', color='#aaa')
+        ax.text(
+            0.5,
+            0.5,
+            text,
+            transform=ax.transAxes,
+            fontsize=10,
+            va='center',
+            ha='center',
+            color='#aaa',
+        )
