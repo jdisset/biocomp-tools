@@ -201,7 +201,7 @@ class DBSource(DataSource, NetworkSet):
 
 
 def _resolve_model(v: Any) -> Optional[Any]:
-    """Resolve model from BiocompModel, path string, model name/signature, or ModelSelector."""
+    """Resolve model from BiocompModel, path string/Path, model name/signature, or ModelSelector."""
     if v is None:
         return None
 
@@ -212,6 +212,11 @@ def _resolve_model(v: Any) -> Optional[Any]:
         return v
     if isinstance(v, ModelSelector):
         return load_model(v.get_model().path_to_model)
+    if isinstance(v, Path):
+        # Handle Path objects directly
+        if v.exists():
+            return load_model(v)
+        raise FileNotFoundError(f"Model file not found: {v}")
     if isinstance(v, str):
         path = Path(v)
         if path.suffix in (".pickle", ".pkl", ".h5") or "/" in v or "\\" in v:
@@ -270,6 +275,14 @@ class DataTargetSource(BaseModel):
             X, Y = np.asarray(pdata.x), np.asarray(pdata.y)
             if rescaler is not None:
                 X, Y = rescaler.fwd(X), rescaler.fwd(Y)
+
+            if np.abs(X).max() > 100 or np.abs(Y).max() > 100:
+                logger.warning(
+                    f"DataTargetSource: Data appears to be in RAW space (X max={np.abs(X).max():.0f}, "
+                    f"Y max={np.abs(Y).max():.0f}). Expected LATENT space (values roughly -2 to 2). "
+                    f"This usually means model=None was passed, so no rescaler was applied. "
+                    f"Check that model_path is correctly set in your YAML config."
+                )
 
             built_network = pdata.metadata.get("built_network")
             targets.append(

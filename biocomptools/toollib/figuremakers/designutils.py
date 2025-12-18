@@ -39,6 +39,14 @@ class DesignResult:
     def _to_raw_space(self, X: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if self.model is None:
             return X, Y
+        if np.abs(X).max() > 100 or np.abs(Y).max() > 100:
+            logger.warning(
+                f"DesignResult._to_raw_space: Input data appears to be in RAW space already "
+                f"(X max={np.abs(X).max():.0f}, Y max={np.abs(Y).max():.0f}). "
+                f"Expected LATENT space (values roughly -2 to 2). "
+                f"Applying rescaler.inv() to raw data will produce invalid results. "
+                f"This usually indicates DataTarget.X/Y wasn't properly rescaled."
+            )
         return self.model.rescaler.inv(X), self.model.rescaler.inv(Y.reshape(-1, 1)).ravel()
 
     @property
