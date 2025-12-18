@@ -2,6 +2,10 @@
 
 import numpy as np
 from biocomptools.logging_config import get_logger
+from biocomp.metric_utils import (
+    compute_validation_objective,
+    extract_metric_values,
+)
 
 logger = get_logger(__name__)
 
@@ -58,14 +62,14 @@ def print_stats_barplot(
             plt.subplot(1, 1)
             plt.bar(sorted_names, sorted_vals, orientation='h', width=0.8)
             plt.xlabel(metric)
-            current_title = f"Current Trial" + (f" #{trial_num}" if trial_num else "")
+            current_title = "Current Trial" + (f" #{trial_num}" if trial_num else "")
             plt.title(current_title)
 
             # Right: best trial overall
             plt.subplot(1, 2)
             plt.bar(sorted_names, sorted_best, orientation='h', width=0.8)
             plt.xlabel(metric)
-            best_title = f"Best Trial" + (f" #{best_trial_num}" if best_trial_num else "")
+            best_title = "Best Trial" + (f" #{best_trial_num}" if best_trial_num else "")
             plt.title(best_title)
         else:
             # Single column if no best stats
@@ -182,7 +186,9 @@ def _print_stats_table(
         print(f"  {'-' * 70}")
         name_to_best = {}
         if best_stats:
-            name_to_best = {n: best_stats[i] for i, n in enumerate(all_names) if i < len(best_stats)}
+            name_to_best = {
+                n: best_stats[i] for i, n in enumerate(all_names) if i < len(best_stats)
+            }
         for name, val, _ in sorted_pairs[:15]:
             best_val = name_to_best.get(name, {}).get(metric)
             best_str = f"{best_val:.4f}" if best_val is not None and np.isfinite(best_val) else "-"
@@ -224,13 +230,11 @@ def _print_stats_table(
 
 
 def _extract_metric(stats: list[dict], key: str, positive_only: bool = False) -> np.ndarray:
-    """Extract finite metric values from stats list."""
-    vals = [
-        s[key]
-        for s in stats
-        if s.get(key) is not None and np.isfinite(s[key]) and (not positive_only or s[key] > 0)
-    ]
-    return np.array(vals) if vals else np.array([])
+    """Extract finite metric values from stats list.
+
+    delegates to biocomp.metric_utils.extract_metric_values
+    """
+    return extract_metric_values(stats, key, positive_only=positive_only)
 
 
 def compute_loss_from_stats(
@@ -239,82 +243,13 @@ def compute_loss_from_stats(
     softmax_alpha: float = 5.0,
     powermean_p: float = 2.0,
 ) -> float:
-    """Compute scalar loss from network statistics."""
-    if objective == "mean_rmse":
-        vals = _extract_metric(stats, 'rmse')
-        return float(np.mean(vals)) if len(vals) else float('inf')
+    """Compute scalar loss from network statistics.
 
-    if objective == "softmax_nrmse":
-        vals = _extract_metric(stats, 'grid_nrmse')
-        if len(vals) == 0:
-            # Fallback to softmax of RMSE if no valid grid_nrmse values
-            import warnings
-
-            rmse_vals = _extract_metric(stats, 'rmse')
-            if len(rmse_vals) > 0:
-                warnings.warn(
-                    "No valid grid_nrmse values, falling back to softmax of rmse",
-                    stacklevel=2,
-                )
-                vals = rmse_vals
-            else:
-                return float('inf')
-        mx = np.max(vals)
-        return float(mx + np.log(np.sum(np.exp(softmax_alpha * (vals - mx)))) / softmax_alpha)
-
-    if objective == "geomean_nrmse":
-        from scipy.stats import gmean
-
-        vals = _extract_metric(stats, 'grid_nrmse', positive_only=True)
-        if len(vals) == 0:
-            # Fallback to mean_rmse if no valid grid_nrmse values
-            import warnings
-
-            rmse_vals = _extract_metric(stats, 'rmse')
-            if len(rmse_vals) > 0:
-                warnings.warn(
-                    "No valid grid_nrmse values, falling back to mean_rmse",
-                    stacklevel=2,
-                )
-                return float(np.mean(rmse_vals))
-            return float('inf')
-        return float(gmean(vals))
-
-    if objective == "geomean_nre":
-        from scipy.stats import gmean
-
-        vals = _extract_metric(stats, 'noise_relative_error', positive_only=True)
-        if len(vals) == 0:
-            # Fallback to mean_rmse if no valid NRE values
-            import warnings
-
-            rmse_vals = _extract_metric(stats, 'rmse')
-            if len(rmse_vals) > 0:
-                warnings.warn(
-                    "No valid noise_relative_error values, falling back to mean_rmse * 10",
-                    stacklevel=2,
-                )
-                return float(np.mean(rmse_vals)) * 10  # scale up to make comparable
-            return float('inf')
-        return float(gmean(vals))
-
-    if objective == "powermean_nre":
-        vals = _extract_metric(stats, 'noise_relative_error', positive_only=True)
-        if len(vals) == 0:
-            # Fallback to mean_rmse if no valid NRE values
-            import warnings
-
-            rmse_vals = _extract_metric(stats, 'rmse')
-            if len(rmse_vals) > 0:
-                warnings.warn(
-                    "No valid noise_relative_error values, falling back to mean_rmse * 10",
-                    stacklevel=2,
-                )
-                return float(np.mean(rmse_vals)) * 10  # scale up to make comparable
-            return float('inf')
-        return float(np.power(np.mean(np.power(vals, powermean_p)), 1.0 / powermean_p))
-
-    raise ValueError(f"Unknown validation objective: {objective}")
+    delegates to biocomp.metric_utils.compute_validation_objective
+    """
+    return compute_validation_objective(
+        stats, objective, softmax_alpha=softmax_alpha, powermean_p=powermean_p
+    )
 
 
 class ValidationRunner:
@@ -449,7 +384,14 @@ class ValidationRunner:
 
         # Use rich progress for stats computation
         if verbose:
-            from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+            from rich.progress import (
+                Progress,
+                SpinnerColumn,
+                BarColumn,
+                TextColumn,
+                TimeElapsedColumn,
+            )
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),

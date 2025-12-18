@@ -3,15 +3,20 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Any, Union
 from dataclasses import dataclass, field, asdict
-from scipy import stats
 
 from biocomptools.logging_config import get_logger
+from biocomp.metric_utils import RegressionStats, DistributionStats
 
 logger = get_logger(__name__)
 
 
 @dataclass
 class RegressionMetrics:
+    """regression metrics for design evaluation.
+
+    wraps biocomp.metric_utils.RegressionStats with design-specific field names.
+    """
+
     rmse: float
     mae: float
     r2: float
@@ -22,28 +27,25 @@ class RegressionMetrics:
 
     @classmethod
     def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "RegressionMetrics":
-        yt, yp = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
-        valid = np.isfinite(yt) & np.isfinite(yp)
-        if not np.any(valid):
-            return cls(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-        yt, yp = yt[valid], yp[valid]
-        err, abs_err = yp - yt, np.abs(yp - yt)
-        ss_res, ss_tot = np.sum(err**2), np.sum((yt - np.mean(yt)) ** 2)
-        r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-        pr, pp = stats.pearsonr(yt, yp) if len(yt) > 2 else (np.nan, np.nan)
+        stats = RegressionStats.compute(y_true, y_pred)
         return cls(
-            float(np.sqrt(np.mean(err**2))),
-            float(np.mean(abs_err)),
-            r2,
-            float(pr),
-            float(pp),
-            float(np.max(abs_err)),
-            float(np.percentile(abs_err, 95)),
+            rmse=stats.rmse,
+            mae=stats.mae,
+            r2=stats.r2,
+            pearson_r=stats.pearson_r,
+            pearson_p=stats.pearson_p,
+            max_error=stats.max_error,
+            p95_error=stats.p95_error,
         )
 
 
 @dataclass
 class DistributionMetrics:
+    """distribution metrics for design evaluation.
+
+    wraps biocomp.metric_utils.DistributionStats with design-specific field names.
+    """
+
     target_mean: float
     target_std: float
     target_min: float
@@ -55,16 +57,16 @@ class DistributionMetrics:
 
     @classmethod
     def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "DistributionMetrics":
-        yt, yp = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
+        stats = DistributionStats.compute(y_true, y_pred)
         return cls(
-            float(np.nanmean(yt)),
-            float(np.nanstd(yt)),
-            float(np.nanmin(yt)),
-            float(np.nanmax(yt)),
-            float(np.nanmean(yp)),
-            float(np.nanstd(yp)),
-            float(np.nanmin(yp)),
-            float(np.nanmax(yp)),
+            target_mean=stats.target_mean,
+            target_std=stats.target_std,
+            target_min=stats.target_min,
+            target_max=stats.target_max,
+            prediction_mean=stats.pred_mean,
+            prediction_std=stats.pred_std,
+            prediction_min=stats.pred_min,
+            prediction_max=stats.pred_max,
         )
 
 

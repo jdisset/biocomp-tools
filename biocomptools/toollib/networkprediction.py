@@ -12,6 +12,15 @@ import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomp.plotting.plotting_core import knn_stats, build_tree
 from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
+from biocomp.metric_utils import (
+    grid_mse as compute_grid_mse,
+    grid_rmse as compute_grid_rmse,
+    grid_r_squared as compute_grid_r_squared,
+    grid_snr as compute_grid_snr,
+    grid_kl_divergence as compute_grid_kl,
+    compute_nrmse,
+    noise_relative_error as compute_nre,
+)
 from pathlib import Path
 import time
 
@@ -323,13 +332,12 @@ def _calculate_single_network_stats(
             grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
             network_stats.update(grid_stats)
 
-            # Compute data noise floor (split-half nRMSE) and noise-relative error
+            # compute data noise floor (split-half nRMSE) and noise-relative error
             data_nrmse = _compute_split_half_nrmse(latent_x, latent_gt, gridstats_params)
             network_stats['data_nrmse'] = data_nrmse
-            if np.isfinite(data_nrmse) and data_nrmse > 0:
-                network_stats['noise_relative_error'] = grid_stats['grid_nrmse'] / data_nrmse
-            else:
-                network_stats['noise_relative_error'] = np.nan
+            network_stats['noise_relative_error'] = compute_nre(
+                grid_stats['grid_nrmse'], data_nrmse
+            )
 
     return network_stats
 
@@ -363,8 +371,6 @@ def _calculate_grid_stats(
 
     global_var = np.var(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
     global_range = np.ptp(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
-    ROBUST_EPSILON = max(0.01, 0.01 * global_range)
-    EPSILON = 1e-9
 
     tree = build_tree(valid_latent_x)
 
@@ -406,69 +412,34 @@ def _calculate_grid_stats(
         min_points=params['min_points'],
     )
 
+    # use centralized metric functions from biocomp.metric_utils
     sq_error = (yhat_mean - gt_mean) ** 2
-    grid_mse = np.nanmean(sq_error)
-    grid_rmse = np.sqrt(grid_mse)
-    grid_gt_var = np.nanvar(gt_mean)
-    grid_r_squared = 1 - (grid_mse / (grid_gt_var + EPSILON))
-
-    # --- nRMSE calculation ---
     local_var = gt_stdev**2
 
-    # Bayesian variance smoothing: stabilizes estimates in sparse regions
-    PRIOR_STRENGTH = 100.0
-    smoothed_var = (local_var * n_eff + global_var * PRIOR_STRENGTH) / (n_eff + PRIOR_STRENGTH)
-
-    # Intensity-scaled tolerance: allows error proportional to signal magnitude
-    REL_TOLERANCE = 0.05  # 5% relative error acceptable
-    ABS_TOLERANCE = 0.01  # absolute floor for near-zero regions
-    tolerance_var = (REL_TOLERANCE * np.abs(gt_mean) + ABS_TOLERANCE) ** 2
-
-    # Denominator: smoothed variance + tolerance
-    denom_var = smoothed_var + tolerance_var
-    safe_denom = np.maximum(np.sqrt(denom_var), ROBUST_EPSILON)
-
-    # Soft-capped density weights: after 10% of k, weights are essentially equal
-    # This prevents over-weighting dense regions while still down-weighting very sparse ones
-    WEIGHT_CAP = 0.1 * params['k']
-    capped_weights = np.minimum(n_eff, WEIGHT_CAP)
-
-    # nRMSE with capped density weighting
-    norm_sq_error = sq_error / (safe_denom**2)
-    weights_flat = capped_weights.flatten()
-    norm_sq_flat = norm_sq_error.flatten()
-    mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
-
-    if np.any(mask):
-        grid_nrmse = np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask]))
-    else:
-        grid_nrmse = np.nan
-
-    # --- SNR (Signal to Noise Ratio) in dB ---
-    local_var_safe = np.maximum(local_var, EPSILON)
-    avg_noise_power = np.nanmean(local_var_safe)
-    avg_signal_power = np.nanmean((gt_mean - np.nanmean(gt_mean)) ** 2)
-    grid_snr = 10 * np.log10((avg_signal_power / avg_noise_power) + EPSILON)
-
-    # KL divergence between prediction and ground truth distributions
-    safe_yhat_stdev = np.maximum(yhat_stdev, EPSILON)
-    safe_gt_stdev = np.maximum(gt_stdev, EPSILON)
-    log_term = np.log(safe_yhat_stdev / safe_gt_stdev)
-    numerator_term = safe_gt_stdev**2 + (gt_mean - yhat_mean) ** 2
-    denominator_term = 2 * safe_yhat_stdev**2
-    kl_divergences = np.maximum(log_term + numerator_term / denominator_term - 0.5, 0.0)
-    kl_mean = np.nanmean(kl_divergences)
-    grid_kl_similarity = np.nanmean(np.exp(-kl_divergences)) * 100
+    mse_val = compute_grid_mse(yhat_mean, gt_mean)
+    rmse_val = compute_grid_rmse(yhat_mean, gt_mean)
+    r_squared_val = compute_grid_r_squared(yhat_mean, gt_mean)
+    snr_val = compute_grid_snr(gt_mean, local_var)
+    kl_mean, kl_similarity = compute_grid_kl(yhat_mean, yhat_stdev, gt_mean, gt_stdev)
+    nrmse_val = compute_nrmse(
+        sq_error,
+        local_var,
+        n_eff,
+        global_var,
+        global_range,
+        gt_mean,
+        k=params['k'],
+    )
 
     return {
-        'grid_gt_var': grid_gt_var,
-        'grid_mse': grid_mse,
-        'grid_rmse': grid_rmse,
-        'grid_nrmse': grid_nrmse,
-        'grid_snr': grid_snr,
+        'grid_gt_var': float(np.nanvar(gt_mean)),
+        'grid_mse': mse_val,
+        'grid_rmse': rmse_val,
+        'grid_nrmse': nrmse_val,
+        'grid_snr': snr_val,
         'grid_kl': kl_mean,
-        'grid_kl_similarity': grid_kl_similarity,
-        'grid_r_squared': grid_r_squared,
+        'grid_kl_similarity': kl_similarity,
+        'grid_r_squared': r_squared_val,
     }
 
 
@@ -532,7 +503,9 @@ class NetworkPrediction(DataSource):
 
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
-    already_latent: bool = False  # Set True if predict_at is in latent space (0-1). See class docstring.
+    already_latent: bool = (
+        False  # Set True if predict_at is in latent space (0-1). See class docstring.
+    )
 
     enable_gridstats: bool = True  # enable grid statistics calculation
     gridstats_hypercube_res: int = 8  # resolution per dimension (8³=512 cells for 3D)
@@ -1138,18 +1111,20 @@ class NetworkPrediction(DataSource):
             if self.per_prediction_info is not None and i < len(self.per_prediction_info):
                 network_info['extra_prediction_info'] = self.per_prediction_info[i]
 
-            tasks.append({
-                'network_idx': i,
-                'yhat': yhat,
-                'gt': gt,
-                'x': x,
-                'dependent_output_pos': dependent_output_pos,
-                'nb_points_in_eval': nb_points_in_eval,
-                'rescaler': rescaler,
-                'gridstats_params': gridstats_params,
-                'network_info': network_info,
-                'enable_gridstats': self.enable_gridstats,
-            })
+            tasks.append(
+                {
+                    'network_idx': i,
+                    'yhat': yhat,
+                    'gt': gt,
+                    'x': x,
+                    'dependent_output_pos': dependent_output_pos,
+                    'nb_points_in_eval': nb_points_in_eval,
+                    'rescaler': rescaler,
+                    'gridstats_params': gridstats_params,
+                    'network_info': network_info,
+                    'enable_gridstats': self.enable_gridstats,
+                }
+            )
 
         # Process tasks (parallel if n_stats_workers > 1)
         all_stats = [None] * len(tasks)
@@ -1157,6 +1132,7 @@ class NetworkPrediction(DataSource):
 
         if self.n_stats_workers > 1 and len(tasks) > 1:
             from tqdm import tqdm
+
             with PoolExecutor(max_workers=self.n_stats_workers) as executor:
                 future_to_idx = {
                     executor.submit(_calculate_single_network_stats, **task): task['network_idx']
@@ -1177,6 +1153,7 @@ class NetworkPrediction(DataSource):
                         all_stats[idx] = {'network_name': net_name, 'error': str(e)}
         else:
             from tqdm import tqdm
+
             task_iter = tasks
             if show_progress:
                 task_iter = tqdm(tasks, desc="Stats", leave=False, ncols=80)
