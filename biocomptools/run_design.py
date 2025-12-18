@@ -32,6 +32,7 @@ import dracon
 import asyncio
 
 import sys
+import traceback
 import numpy as np
 import jax
 import yaml
@@ -604,6 +605,7 @@ class DesignProgram(BaseOptimizationProgram):
         from biocomptools.plot import PlotJob
         from biocomptools.toollib.figuremakers.designutils import DesignResult
         from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         logger.info(f"Generating diagnostic plots for {len(design_results)} designs...")
 
@@ -623,13 +625,12 @@ class DesignProgram(BaseOptimizationProgram):
                     }
             except Exception as e:
                 logger.warning(f"Batched prediction failed for target {target_name}: {e}")
-                import traceback
-
                 logger.debug(traceback.format_exc())
 
         baseline_cache = self._compute_baseline_nres(design_results)
 
-        for r in design_results:
+        def _generate_single_plot(r: dict) -> tuple[str, Exception | None]:
+            """Worker function to generate a single design plot."""
             try:
                 design_dir = Path(r['design_dir'])
                 net_key = id(r['network'])
@@ -658,13 +659,26 @@ class DesignProgram(BaseOptimizationProgram):
                     result=result,
                     output_dir=str(design_dir),
                 )
-                logger.debug(f"Generated summary plot: {design_dir / r['recipe_hash']}_summary.pdf")
-
+                return r['recipe_hash'], None
             except Exception as e:
-                logger.warning(f"Failed to generate plot for {r.get('recipe_hash', '?')}: {e}")
-                import traceback
+                return r.get('recipe_hash', '?'), e
 
-                logger.debug(traceback.format_exc())
+        max_workers = min(8, len(design_results))
+        completed, failed = 0, 0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_generate_single_plot, r): r for r in design_results}
+            for future in as_completed(futures):
+                recipe_hash, error = future.result()
+                if error is None:
+                    completed += 1
+                    logger.debug(f"Generated summary plot for {recipe_hash}")
+                else:
+                    failed += 1
+                    logger.warning(f"Failed to generate plot for {recipe_hash}: {error}")
+                    logger.debug(traceback.format_exc())
+
+        logger.info(f"Plot generation complete: {completed} succeeded, {failed} failed")
 
     def _batch_predictions_for_target(self, group: list[dict]):
         """Returns (pred_data_map, nre_map) keyed by group index."""
@@ -789,8 +803,6 @@ class DesignProgram(BaseOptimizationProgram):
             logger.info(f"Baseline NRE computed in {time.time() - start_time:.2f}s")
         except Exception as e:
             logger.warning(f"Batched baseline NRE computation failed: {e}")
-            import traceback
-
             logger.debug(traceback.format_exc())
 
         return result_map
