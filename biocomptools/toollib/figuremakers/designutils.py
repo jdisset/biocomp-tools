@@ -54,13 +54,15 @@ class DesignResult:
         if self._gt_data is None:
             from biocomp.design import DataTarget
 
+            # use rank as part of seed to avoid correlation between results
+            seed = hash((self.rank, self.replicate, self.target_name)) % (2**31)
             if isinstance(self.target, DataTarget):
                 X, Y = self.target.X, np.atleast_1d(self.target.Y.squeeze())
                 if len(X) > 20000:
-                    idx = np.random.default_rng(42).choice(len(X), 20000, replace=False)
+                    idx = np.random.default_rng(seed).choice(len(X), 20000, replace=False)
                     X, Y = X[idx], Y[idx]
             else:
-                X, Y = self.target.sample_uniform(10000, seed=42)
+                X, Y = self.target.sample_uniform(10000, seed=seed)
                 Y = Y.ravel()
             X, Y = self._to_raw_space(X, Y)
             self._gt_data = PlotData(
@@ -78,13 +80,14 @@ class DesignResult:
             from biocomptools.toollib.networkprediction import NetworkPrediction
             from biocomp.design import DataTarget
 
+            seed = hash((self.rank, self.replicate, self.target_name)) % (2**31)
             if isinstance(self.target, DataTarget):
                 X_latent = self.target.X
                 if len(X_latent) > 20000:
-                    idx = np.random.default_rng(42).choice(len(X_latent), 20000, replace=False)
+                    idx = np.random.default_rng(seed).choice(len(X_latent), 20000, replace=False)
                     X_latent = X_latent[idx]
             else:
-                X_latent, _ = self.target.sample_uniform(10000, seed=42)
+                X_latent, _ = self.target.sample_uniform(10000, seed=seed)
 
             predictor = NetworkPrediction(
                 predict_at=[X_latent],
@@ -134,9 +137,10 @@ class DesignResult:
             from biocomptools.modelmodel import NetworkModel
             from biocomptools.toollib.networkprediction import NetworkPrediction
 
+            seed = hash((self.rank, self.replicate, self.target_name, id(network))) % (2**31)
             X, Y = self.target.X, self.target.Y
             if len(X) > max_evals:
-                idx = np.random.default_rng(42).choice(len(X), max_evals, replace=False)
+                idx = np.random.default_rng(seed).choice(len(X), max_evals, replace=False)
                 X, Y = X[idx], Y[idx]
 
             predictor = NetworkPrediction(

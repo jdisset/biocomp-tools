@@ -8,6 +8,7 @@ from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.trainutils import make_json_ready
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.hashutils import pronounceable_hash48
+from biocomptools.toollib.design_eval import DesignEvaluator
 
 from biocomp.design import (
     start,
@@ -604,30 +605,12 @@ class DesignProgram(BaseOptimizationProgram):
         """Generate diagnostic plots using batched predictions to avoid JAX recompilation."""
         from biocomptools.plot import PlotJob
         from biocomptools.toollib.figuremakers.designutils import DesignResult
-        from collections import defaultdict
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         logger.info(f"Generating diagnostic plots for {len(design_results)} designs...")
 
-        by_target: dict[str, list[dict]] = defaultdict(list)
-        for r in design_results:
-            by_target[r['target_name']].append(r)
-
-        precomputed: dict[tuple, dict] = {}
-        for target_name, group in by_target.items():
-            try:
-                pred_data_map, nre_map = self._batch_predictions_for_target(group)
-                for i, r in enumerate(group):
-                    net_key = id(r['network'])
-                    precomputed[(target_name, net_key)] = {
-                        'pred_data': pred_data_map.get(i),
-                        'design_nre': nre_map.get(i),
-                    }
-            except Exception as e:
-                logger.warning(f"Batched prediction failed for target {target_name}: {e}")
-                logger.debug(traceback.format_exc())
-
-        baseline_cache = self._compute_baseline_nres(design_results)
+        evaluator = DesignEvaluator(self._model, max_evals=50000)
+        precomputed, baseline_cache = evaluator.precompute_for_design_results(design_results)
 
         def _generate_single_plot(r: dict) -> tuple[str, Exception | None]:
             """Worker function to generate a single design plot."""
@@ -679,133 +662,6 @@ class DesignProgram(BaseOptimizationProgram):
                     logger.debug(traceback.format_exc())
 
         logger.info(f"Plot generation complete: {completed} succeeded, {failed} failed")
-
-    def _batch_predictions_for_target(self, group: list[dict]):
-        """Returns (pred_data_map, nre_map) keyed by group index."""
-        from biocomptools.modelmodel import NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction
-        from biocomp.plotutils import PlotData
-        import time
-
-        if not group:
-            return {}, {}
-
-        target = group[0]['target']
-        networks = [r['network'] for r in group]
-        n_networks = len(networks)
-        if isinstance(target, DataTarget):
-            X_latent = target.X
-            Y_gt = target.Y
-            if len(X_latent) > 20000:
-                idx = np.random.default_rng(42).choice(len(X_latent), 20000, replace=False)
-                X_latent = X_latent[idx]
-                Y_gt = Y_gt[idx] if Y_gt is not None else None
-        else:
-            X_latent, _ = target.sample_uniform(10000, seed=42)
-            Y_gt = None
-
-        # build batched NetworkModel with all networks
-        start_time = time.time()
-        logger.info(f"Building batched NetworkModel for {n_networks} networks...")
-        network_model = NetworkModel(model=self._model, network=networks)
-        logger.info(f"Batched NetworkModel built in {time.time() - start_time:.2f}s")
-
-        # prepare predict_at and ground_truth (one per network)
-        predict_at = [X_latent] * n_networks
-        ground_truth = None
-        if isinstance(target, DataTarget) and Y_gt is not None:
-            gt_shaped = Y_gt.reshape(-1, 1) if Y_gt.ndim == 1 else Y_gt
-            ground_truth = [gt_shaped] * n_networks
-
-        predictor = NetworkPrediction(
-            predict_at=predict_at,
-            ground_truth=ground_truth,
-            max_evals=50000,
-            network_model=network_model,
-            already_latent=True,
-            enable_gridstats=isinstance(target, DataTarget),
-            device='gpu',
-            verbose=False,
-        )
-
-        pred_results = predictor.get_data(rescale_latent=True)
-        nre_stats = predictor.get_network_stats() if isinstance(target, DataTarget) else None
-
-        pred_data_map = {}
-        nre_map = {}
-        for i, pred in enumerate(pred_results):
-            pred_data_map[i] = PlotData(
-                xval=pred.x,
-                yval=pred.y,
-                input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
-                output_name='Y',
-            )
-            if nre_stats and i < len(nre_stats):
-                nre_map[i] = nre_stats[i].get('noise_relative_error')
-
-        return pred_data_map, nre_map
-
-    def _compute_baseline_nres(self, design_results: list[dict]) -> dict[int, float | None]:
-        """Returns dict mapping id(original_network) -> NRE value."""
-        from biocomptools.modelmodel import NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction
-        import time
-
-        baseline_groups: dict[int, tuple] = {}
-        for r in design_results:
-            target = r['target']
-            if not isinstance(target, DataTarget) or target.original_network is None:
-                continue
-            orig_net = target.original_network
-            net_id = id(orig_net)
-            if net_id not in baseline_groups:
-                baseline_groups[net_id] = (orig_net, target)
-
-        if not baseline_groups:
-            return {}
-
-        baseline_items = list(baseline_groups.items())
-        networks = [item[1][0] for item in baseline_items]
-        targets = [item[1][1] for item in baseline_items]
-
-        logger.info(f"Computing baseline NRE for {len(networks)} unique original networks...")
-        start_time = time.time()
-
-        result_map = {}
-        try:
-            network_model = NetworkModel(model=self._model, network=networks)
-            predict_at = []
-            ground_truth = []
-            for target in targets:
-                X, Y = target.X, target.Y
-                if len(X) > 50000:
-                    idx = np.random.default_rng(42).choice(len(X), 50000, replace=False)
-                    X, Y = X[idx], Y[idx]
-                predict_at.append(X)
-                ground_truth.append(Y.reshape(-1, 1) if Y.ndim == 1 else Y)
-
-            predictor = NetworkPrediction(
-                predict_at=predict_at,
-                ground_truth=ground_truth,
-                max_evals=50000,
-                network_model=network_model,
-                already_latent=True,
-                enable_gridstats=True,
-                device='gpu',
-                verbose=False,
-            )
-            stats = predictor.get_network_stats()
-
-            for i, (net_id, _) in enumerate(baseline_items):
-                if stats and i < len(stats):
-                    result_map[net_id] = stats[i].get('noise_relative_error')
-
-            logger.info(f"Baseline NRE computed in {time.time() - start_time:.2f}s")
-        except Exception as e:
-            logger.warning(f"Batched baseline NRE computation failed: {e}")
-            logger.debug(traceback.format_exc())
-
-        return result_map
 
 
 async def main_async():
