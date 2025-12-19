@@ -285,6 +285,11 @@ class DataTargetSource(BaseModel):
                 )
 
             built_network = pdata.metadata.get("built_network")
+            # Extract input_names: alphabetical protein names corresponding to X columns
+            input_names = pdata.metadata.get("input_names")
+            if input_names is None and built_network is not None:
+                input_names = sorted(built_network.get_inverted_input_proteins())
+
             targets.append(
                 DataTarget(
                     X=X,
@@ -293,6 +298,7 @@ class DataTargetSource(BaseModel):
                     lattice_x_extent=self.lattice_x_extent,
                     lattice_y_extent=self.lattice_y_extent,
                     original_network=built_network,
+                    input_names=input_names,
                 )
             )
             if built_network is not None:

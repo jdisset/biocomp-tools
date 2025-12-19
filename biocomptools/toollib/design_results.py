@@ -76,7 +76,7 @@ class LossComponents:
     sinkhorn: Optional[float] = None
     lncc: Optional[float] = None
     spectral: Optional[float] = None
-    over1_penalty: Optional[float] = None
+    tucount_penalty: Optional[float] = None
 
 
 @dataclass
@@ -190,7 +190,9 @@ def compute_nre_for_network(
         from biocomptools.modelmodel import NetworkModel
         from biocomptools.toollib.networkprediction import NetworkPrediction
 
-        X, Y = target.X, target.Y
+        # Use get_reordered_X to align columns for the target network
+        X = target.get_reordered_X(network)
+        Y = target.Y
         if len(X) > max_evals:
             idx = np.random.default_rng(42).choice(len(X), max_evals, replace=False)
             X, Y = X[idx], Y[idx]
@@ -243,7 +245,7 @@ def compute_design_metrics(
             lc.get('sinkhorn'),
             lc.get('lncc'),
             lc.get('spectral'),
-            lc.get('over1_penalty'),
+            lc.get('tucount_penalty'),
         ),
         RegressionMetrics.compute(y_true, y_pred),
         DistributionMetrics.compute(y_true, y_pred),

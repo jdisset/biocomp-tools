@@ -303,6 +303,8 @@ class DesignSummaryLogger(Logger):
     def _get_evaluation_data(
         self, target: Any, network: Any, target_id: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        from biocomp.design import DataTarget
+
         if hasattr(target, 'get_lattice'):
             X, Y_true = target.get_lattice(self.grid_resolution)
         elif hasattr(target, 'get_samples'):
@@ -315,6 +317,10 @@ class DesignSummaryLogger(Logger):
                 np.zeros(self.grid_resolution[0] * self.grid_resolution[1]),
             )
         X, Y_true = np.asarray(X), np.asarray(Y_true).squeeze()
+
+        # For DataTarget, reorder X columns to match design network's expected input order
+        if isinstance(target, DataTarget):
+            X = target.get_reordered_X(network)
 
         if self.model is not None:
             try:
