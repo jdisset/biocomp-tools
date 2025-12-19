@@ -517,6 +517,8 @@ class NetworkPrediction(DataSource):
 
     shuffle_inputs: bool = True  # shuffle inputs before prediction
 
+    skip_input_reorder: bool = False  # skip input column reordering (for design visualization)
+
     n_stats_workers: int = 8  # number of workers for parallel processing of statistics
 
     verbose: bool = False  # print prediction statistics to the console
@@ -659,21 +661,18 @@ class NetworkPrediction(DataSource):
         for i, (x, gt, network) in enumerate(
             zip(self.predict_at, self.ground_truth, self.network_model.network, strict=True)
         ):
-            inverse_order = self._get_inverse_input_order(network)
-
-            # Reorder x columns from alphabetical to network order if needed
-            if inverse_order is not None:
-                logger.debug(
-                    f"network {i}: reordering input columns with inverse_order={inverse_order}"
-                )
-                x = x[:, inverse_order]
+            if not self.skip_input_reorder:
+                inverse_order = self._get_inverse_input_order(network)
+                if inverse_order is not None:
+                    logger.debug(
+                        f"network {i}: reordering input columns with inverse_order={inverse_order}"
+                    )
+                    x = x[:, inverse_order]
             logger.debug(
                 f"aligning network {i}: x.shape={x.shape}, gt={None if gt is None else gt.shape}"
             )
 
             if len(x) < effective_max_evals:
-                # pad with zeros if shorter than desired length
-                f"padding prediction queries for network {i} from {len(x)} to {effective_max_evals} points"
                 zeros = np.zeros((effective_max_evals - len(x), x.shape[1]))
                 padded_x = np.vstack([x, zeros])
                 aligned_predict_at.append(padded_x)
@@ -685,7 +684,6 @@ class NetworkPrediction(DataSource):
                 else:
                     aligned_ground_truth.append(None)
             else:
-                # truncate if longer than desired length
                 logger.debug(
                     f"truncating prediction queries for network {i} from {len(x)} to {effective_max_evals} points"
                 )
@@ -1280,12 +1278,14 @@ class NetworkPrediction(DataSource):
         if self.collection_points is not None and len(self.collection_points) > 0:
             return self._get_collection_data_lazy(with_shared_params, with_local_params)
 
-        # otherwise, continue with normal network data
         plot_data_list = []
-        input_order = self._normalize_input_order()
-        logger.debug(f"normalized input_order: {input_order}")
+        if self.skip_input_reorder:
+            input_order = [list(range(net.nb_inputs)) for net in self.network_model.network]
+            logger.debug(f"skip_input_reorder=True, using identity input_order: {input_order}")
+        else:
+            input_order = self._normalize_input_order()
+            logger.debug(f"normalized input_order: {input_order}")
 
-        # create plot data for each network
         for i, network in enumerate(self.network_model.network):
             metadata = self._create_network_metadata(i, network)
             plot_data = self._extract_plot_data(

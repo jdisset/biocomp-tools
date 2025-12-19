@@ -62,9 +62,11 @@ class DesignResult:
                     idx = np.random.default_rng(seed).choice(len(X), 20000, replace=False)
                     X, Y = X[idx], Y[idx]
             else:
-                X, Y = self.target.sample_uniform(10000, seed=seed)
-                Y = Y.ravel()
+                X, Y_grid = self.target.get_lattice((300, 300), seed=seed)
+                Y = Y_grid.ravel()
+
             X, Y = self._to_raw_space(X, Y)
+
             self._gt_data = PlotData(
                 xval=X,
                 yval=Y,
@@ -79,6 +81,7 @@ class DesignResult:
             from biocomptools.modelmodel import NetworkModel
             from biocomptools.toollib.networkprediction import NetworkPrediction
             from biocomp.design import DataTarget
+            from biocomp.plotutils import make_xy_grid
 
             seed = hash((self.rank, self.replicate, self.target_name)) % (2**31)
             if isinstance(self.target, DataTarget):
@@ -87,20 +90,30 @@ class DesignResult:
                     idx = np.random.default_rng(seed).choice(len(X_latent), 20000, replace=False)
                     X_latent = X_latent[idx]
             else:
-                X_latent, _ = self.target.sample_uniform(10000, seed=seed)
+                grid_res = 300
+                X_latent = make_xy_grid(
+                    xmin=self.target.lattice_x_extent[0],
+                    xmax=self.target.lattice_x_extent[1],
+                    ymin=self.target.lattice_y_extent[0],
+                    ymax=self.target.lattice_y_extent[1],
+                    xres=grid_res,
+                    yres=grid_res,
+                )
 
             predictor = NetworkPrediction(
                 predict_at=[X_latent],
-                max_evals=50000,
+                max_evals=100000,
                 network_model=NetworkModel(model=self.model, network=[self.network]),
                 already_latent=True,
                 device='gpu',
+                skip_input_reorder=True,  # Design optimization uses X in alphabetical order
             )
             pred = predictor.get_data(rescale_latent=True)
             X_pred = pred[0].x if pred else X_latent
             Y_pred = pred[0].y if pred else np.zeros(len(X_pred))
             if self.model is not None and not pred:
                 X_pred = self.model.rescaler.inv(X_pred)
+
             self._pred_data = PlotData(
                 xval=X_pred,
                 yval=Y_pred,
@@ -114,6 +127,7 @@ class DesignResult:
         if self._lattice_data is None:
             X, Y = self.target.get_lattice((48, 48), seed=0)
             X, Y_flat = self._to_raw_space(X, Y.ravel())
+
             self._lattice_data = PlotData(
                 xval=X,
                 yval=Y_flat,
@@ -128,7 +142,9 @@ class DesignResult:
 
         return isinstance(self.target, DataTarget) and self.target.original_network is not None
 
-    def _compute_nre_for_network(self, network: Any, max_evals: int = 50000) -> Optional[float]:
+    def _compute_nre_for_network(
+        self, network: Any, max_evals: int = 50000, skip_input_reorder: bool = False
+    ) -> Optional[float]:
         from biocomp.design import DataTarget
 
         if self.model is None or not isinstance(self.target, DataTarget):
@@ -138,7 +154,8 @@ class DesignResult:
             from biocomptools.toollib.networkprediction import NetworkPrediction
 
             seed = hash((self.rank, self.replicate, self.target_name, id(network))) % (2**31)
-            X, Y = self.target.X, self.target.Y
+            X = self.target.X
+            Y = self.target.Y
             if len(X) > max_evals:
                 idx = np.random.default_rng(seed).choice(len(X), max_evals, replace=False)
                 X, Y = X[idx], Y[idx]
@@ -152,6 +169,7 @@ class DesignResult:
                 enable_gridstats=True,
                 device='gpu',
                 verbose=False,
+                skip_input_reorder=skip_input_reorder,
             )
             stats = predictor.get_network_stats()
             return stats[0].get('noise_relative_error') if stats else None
@@ -179,7 +197,7 @@ class DesignResult:
             from biocomp.design import DataTarget
 
             self._design_nre_computed = (
-                self._compute_nre_for_network(self.network)
+                self._compute_nre_for_network(self.network, skip_input_reorder=True)
                 if isinstance(self.target, DataTarget)
                 else None
             )
