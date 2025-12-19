@@ -27,6 +27,16 @@ db:
 mlflow:
   server: ${getenv('BIOCOMP_MLFLOW_SERVER', 'https://mlf.rachael.jdisset.com')}
 
+# Debug pickle saves for design and plot modules
+# Enable to save comprehensive state at critical points for debugging axis inversion, etc.
+debug:
+  design:
+    enabled: ${getenv('BIOCOMP_DEBUG_DESIGN', False)}
+    # Saves go to: {design_output_dir}/_debug_dumps/
+  plot:
+    enabled: ${getenv('BIOCOMP_DEBUG_PLOT', False)}
+    # Saves go to: {figure_output_dir}/_debug_dumps/
+
 calib:
   paths:
     - "./data/calibrated"

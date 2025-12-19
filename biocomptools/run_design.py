@@ -23,7 +23,9 @@ from biocomp.design import (
     SamplingConfigUnion,
     UniformSampling,
     compute_baseline_loss,
+    set_design_debug_output_dir,
 )
+from biocomp.designdebug import save_debug_state, is_design_debug_enabled
 from biocomp.network import Network, recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
@@ -166,7 +168,14 @@ class DesignProgram(BaseOptimizationProgram):
 
         if self.scaffolds is not None:
             for scaffold in self.scaffolds:
+                if not scaffold.has_axis_mapping():
+                    logger.warning(
+                        f"Scaffold '{scaffold.name}' has no axis_mapping - may cause axis alignment issues"
+                    )
                 scaffold_networks = recipe_to_networks(scaffold, invert=True, inversion_mode="main")
+                for net in scaffold_networks:
+                    if scaffold.has_axis_mapping() and not net.has_axis_mapping():
+                        logger.error(f"axis_mapping lost: {scaffold.name} -> {net.name}")
                 networks.extend(scaffold_networks)
             logger.debug(f"Generated {len(networks)} networks from {len(self.scaffolds)} scaffolds")
 
@@ -251,6 +260,13 @@ class DesignProgram(BaseOptimizationProgram):
     async def execute_optimization(self, logger_callbacks, async_handler):
         logger.info("Starting design optimization...")
         assert self._dmanager is not None
+
+        # Set debug output directory for design module
+        set_design_debug_output_dir(str(self._save_dir))
+        if is_design_debug_enabled():
+            logger.info(
+                f"Design debug enabled - saving debug dumps to {self._save_dir}/_debug_dumps/"
+            )
 
         target_names = [_target_name(t) for t in self.targets]
         logger.info(f"Optimizing for {self._dmanager.n_targets} targets: {', '.join(target_names)}")
@@ -464,14 +480,18 @@ class DesignProgram(BaseOptimizationProgram):
                 processed = []
                 for lh in loss_history:
                     arr = np.array(lh)
-                    if arr.ndim == 2:
+                    if arr.ndim == 0:
+                        # scalar -> (1, 1)
+                        processed.append(arr.reshape(1, 1))
+                    elif arr.ndim == 1:
+                        # (n_replicates,) -> (n_replicates, 1)
+                        processed.append(arr.reshape(-1, 1))
+                    elif arr.ndim == 2:
                         # (n_replicates, n_targets) -> average over targets -> (n_replicates, 1)
                         processed.append(np.nanmean(arr, axis=1, keepdims=True))
-                    elif arr.ndim >= 3:
-                        # (n_replicates, n_targets, ...) -> average over targets
-                        processed.append(np.nanmean(arr, axis=1))
                     else:
-                        processed.append(arr.reshape(-1, 1) if arr.ndim == 1 else arr)
+                        # ndim >= 3: (n_replicates, n_targets, ...) -> average over targets
+                        processed.append(np.nanmean(arr, axis=1))
                 if processed:
                     self.save_loss_plot(processed, save_dir)
             except Exception as e:
@@ -486,14 +506,20 @@ class DesignProgram(BaseOptimizationProgram):
         design_results_dir.mkdir(exist_ok=True)
 
         final_params = self._evaluation_results[0] if hasattr(self, '_evaluation_results') else None
-        assert final_params is not None, "Final params required to save designs"
-        assert self._model is not None, "Model required to save designs"
-        assert self._dmanager is not None, "Design manager required to save designs"
+        assert final_params is not None, "final_params required to save designs"
+        assert self._model is not None, "model required to save designs"
+        assert self._dmanager is not None, "design manager required to save designs"
+
+        n_targets = len(self.targets)
+        n_networks = len(self._dmanager.networks)
+        n_replicates = self.design_conf.n_replicates
+
+        assert len(topk) == n_targets, f"topk length {len(topk)} != n_targets {n_targets}"
 
         import biocomp.compute as cmp
 
         stack = cmp.ComputeStack(networks=self._dmanager.networks)
-        stack.build(self._model.compute_config)
+        stack.build(self._model.compute_config, enable_tu_masking=True)
 
         run_datetime = datetime.now().isoformat()
         run_name = self._run_name
@@ -517,6 +543,15 @@ class DesignProgram(BaseOptimizationProgram):
                 target_results_dir.mkdir(exist_ok=True)
 
                 for rank, (rep_id, net_id, loss_val) in enumerate(topk[tid], 1):
+                    assert 0 <= rep_id < n_replicates, (
+                        f"rep_id {rep_id} out of bounds [0, {n_replicates}) "
+                        f"for target {tid} rank {rank}"
+                    )
+                    assert 0 <= net_id < n_networks, (
+                        f"net_id {net_id} out of bounds [0, {n_networks}) "
+                        f"for target {tid} rank {rank}"
+                    )
+
                     network_name = self._dmanager.networks[net_id].name
                     f.write(f"  Rank {rank}: Replicate {rep_id}, Network '{network_name}'\n")
                     f.write(f"           Loss: {loss_val:.6f}\n")
@@ -525,8 +560,11 @@ class DesignProgram(BaseOptimizationProgram):
 
                     try:
                         committed_networks = stack.commit(bparams)
+                        assert len(committed_networks) == n_networks, (
+                            f"commit returned {len(committed_networks)} networks, expected {n_networks}"
+                        )
                         cnet = committed_networks[net_id]
-                        assert cnet is not None, f"Committed network {net_id} is None"
+                        assert cnet is not None, f"committed network {net_id} is None"
 
                         recipe = cnet.to_recipe()
                         recipe_yaml = dracon.dump(recipe)
@@ -556,6 +594,13 @@ class DesignProgram(BaseOptimizationProgram):
                         with open(network_pickle, 'wb') as npf:
                             pickle.dump(cnet, npf)
 
+                        target_input_names = getattr(target, 'input_names', None)
+                        scaffold_input_proteins = None
+                        try:
+                            scaffold_input_proteins = cnet.get_inverted_input_proteins()
+                        except Exception:
+                            pass
+
                         design_info = {
                             'rank': rank,
                             'replicate': rep_id,
@@ -570,6 +615,8 @@ class DesignProgram(BaseOptimizationProgram):
                             'target_name': target_name,
                             'target': target,
                             'target_id': tid,
+                            'target_input_names': target_input_names,
+                            'scaffold_input_proteins': scaffold_input_proteins,
                         }
 
                         all_design_results.append(design_info)
@@ -607,17 +654,27 @@ class DesignProgram(BaseOptimizationProgram):
         from biocomptools.toollib.figuremakers.designutils import DesignResult
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        logger.info(f"Generating diagnostic plots for {len(design_results)} designs...")
+        n_results = len(design_results)
+        logger.info(f"Generating diagnostic plots for {n_results} designs...")
 
         evaluator = DesignEvaluator(self._model, max_evals=50000)
         precomputed, baseline_cache = evaluator.precompute_for_design_results(design_results)
+
+        # every design result should have a corresponding precomputed entry
+        assert len(precomputed) == n_results, (
+            f"precomputed count {len(precomputed)} != design_results count {n_results}"
+        )
 
         def _generate_single_plot(r: dict) -> tuple[str, Exception | None]:
             """Worker function to generate a single design plot."""
             try:
                 design_dir = Path(r['design_dir'])
                 net_key = id(r['network'])
-                precomp = precomputed.get((r['target_name'], net_key), {})
+                lookup_key = (r['target_name'], net_key)
+                assert lookup_key in precomputed, (
+                    f"missing precomputed entry for {r['target_name']} rank {r['rank']}"
+                )
+                precomp = precomputed[lookup_key]
                 baseline_nre = None
                 if isinstance(r['target'], DataTarget) and r['target'].original_network is not None:
                     baseline_nre = baseline_cache.get(id(r['target'].original_network))
@@ -637,6 +694,44 @@ class DesignProgram(BaseOptimizationProgram):
                     _design_nre_value=precomp.get('design_nre'),
                     _baseline_nre_value=baseline_nre,
                 )
+
+                if is_design_debug_enabled():
+                    target = r['target']
+                    network = r['network']
+                    pred_data = precomp.get('pred_data')
+                    save_debug_state(
+                        f"design_result_rank{r['rank']}",
+                        {
+                            'target_X': getattr(target, 'X', None),
+                            'target_Y': getattr(target, 'Y', None),
+                            'pred_X': pred_data.xval if pred_data else None,
+                            'pred_Y': pred_data.yval if pred_data else None,
+                        },
+                        {
+                            'target_name': r['target_name'],
+                            'rank': r['rank'],
+                            'replicate': r['replicate'],
+                            'loss': r['loss'],
+                            'recipe_hash': r['recipe_hash'],
+                            'target_input_names': getattr(target, 'input_names', None),
+                            'network_name': getattr(network, 'name', None),
+                            'network_inputs': (
+                                network.get_inverted_input_proteins()
+                                if hasattr(network, 'get_inverted_input_proteins')
+                                else None
+                            ),
+                            'original_network_inputs': (
+                                target.original_network.get_inverted_input_proteins()
+                                if hasattr(target, 'original_network') and target.original_network
+                                else None
+                            ),
+                            'design_nre': precomp.get('design_nre'),
+                            'baseline_nre': baseline_nre,
+                        },
+                        output_dir=str(design_dir),
+                        mode="design",
+                    )
+
                 PlotJob.invoke(
                     'biocomp-jobs/plot/auto_figures/autofig_design_summary.yaml',
                     result=result,

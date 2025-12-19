@@ -11,6 +11,7 @@ from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from biocomptools.logging_config import get_logger
 from biocomptools.trainutils import make_json_ready
+from biocomp.designdebug import is_plot_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -235,9 +236,56 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
+            # Debug save: capture figure state after all tasks complete
+            if is_plot_debug_enabled():
+                self._save_plot_debug_state(metadata)
+
             if finalize:
                 self.figure_spec.metadata = metadata
                 self.figure_spec.finalize(self._figax)  # type: ignore
+
+    def _save_plot_debug_state(self, metadata: dict):
+        """Save comprehensive plot debug state after all tasks complete."""
+        import numpy as np
+
+        data = {}
+        meta = {
+            "output_path": str(self.figure_spec.output_path),
+            "output_dir": str(self.figure_spec.output_dir),
+            "output_file": str(self.figure_spec.output_file),
+            "n_tasks": len(self._ptasks) if self._ptasks else 0,
+            "metadata": metadata,
+        }
+
+        # Extract plot data from each task's plot_method kwargs
+        for i, pt in enumerate(self._ptasks or []):
+            if pt.plot_method is None:
+                continue
+
+            # Look for common data containers in plot method kwargs
+            for key, val in pt.plot_method.kwargs.items():
+                if hasattr(val, 'xval') and hasattr(val, 'yval'):
+                    # PlotData-like object
+                    data[f"task_{i}_{key}_X"] = np.asarray(val.xval)
+                    data[f"task_{i}_{key}_Y"] = np.asarray(val.yval)
+                    if hasattr(val, 'input_names'):
+                        meta[f"task_{i}_{key}_input_names"] = val.input_names
+                elif hasattr(val, 'x') and hasattr(val, 'y'):
+                    # DataSource-like object
+                    data[f"task_{i}_{key}_X"] = np.asarray(val.x)
+                    data[f"task_{i}_{key}_Y"] = np.asarray(val.y)
+                    if hasattr(val, 'input_names'):
+                        meta[f"task_{i}_{key}_input_names"] = val.input_names
+                    if hasattr(val, 'metadata'):
+                        meta[f"task_{i}_{key}_metadata"] = val.metadata
+
+        save_debug_state(
+            stage="figure_complete",
+            data=data,
+            metadata=meta,
+            output_dir=str(self.figure_spec.output_dir),
+            mode="plot",
+        )
 
     @property
     def fig(self):
