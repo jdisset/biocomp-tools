@@ -779,7 +779,8 @@ class ParamGradLogger(Logger):
                 return
 
             if step_history is None or 'latest_params' not in step_history:
-                logger.warning("No 'latest_params' in step_history for ParamGradLogger.")
+                # expected when period doesn't align with sync points
+                logger.debug(f"Skipping ParamGradLogger at step {step}: not a sync point")
                 return
 
             logger.info(f"ParamGradLogger: Generating diagnostic plots for step {step}...")

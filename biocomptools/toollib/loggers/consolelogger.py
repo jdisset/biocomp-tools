@@ -202,17 +202,21 @@ class EnhancedConsoleLogger(Logger):
             top_k_flat_indices = np.argsort(flat_losses)[:top_k_actual]
             
             # plot each top-k (rep, net) pair over time
+            all_positive = True
             for rank, flat_idx in enumerate(top_k_flat_indices):
                 rep_id = flat_idx // n_networks
                 net_id = flat_idx % n_networks
-                
+
                 # extract history for this specific (rep, net) pair across all logged steps
                 step_numbers = []
                 pair_history = []
                 for step, step_losses in self._design_losses_history:
                     step_numbers.append(step)
-                    pair_history.append(step_losses[rep_id, target_id, net_id])
-                
+                    val = step_losses[rep_id, target_id, net_id]
+                    pair_history.append(val)
+                    if val <= 0:
+                        all_positive = False
+
                 color = colors[rank % len(colors)]
                 step_avg_loss = ranking_target_losses[rep_id, net_id]
                 plt.plot(
@@ -223,7 +227,8 @@ class EnhancedConsoleLogger(Logger):
                     label=f"R{rep_id}N{net_id} ({step_avg_loss:.3f})",
                 )
 
-            plt.yscale("log")
+            if all_positive:
+                plt.yscale("log")
             plt.title(f"Target {target_id}: Top {self.top_k_designs} (Rep,Net) Pairs")
             plt.xlabel("Step")
             plt.ylabel("Loss (log)")
@@ -243,6 +248,7 @@ class EnhancedConsoleLogger(Logger):
 
         # Plot each replicate as a separate line
         colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'white']
+        all_positive = True
         for replicate_id, loss_history in self._replicate_histories.items():
             if loss_history:  # only plot if we have data
                 x_values = list(range(len(loss_history)))
@@ -254,8 +260,11 @@ class EnhancedConsoleLogger(Logger):
                     color=color,
                     label=f"Rep {replicate_id}",
                 )
+                if any(v <= 0 for v in loss_history):
+                    all_positive = False
 
-        plt.yscale("log")
+        if all_positive:
+            plt.yscale("log")
         plt.title(f"Training Loss per Replicate (best avg: {self._best_mean_loss:.4f})")
         plt.xlabel("Batch")
         plt.ylabel("Loss (log scale)")

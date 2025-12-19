@@ -43,7 +43,8 @@ class CheckpointLogger(Logger):
                     return
 
                 if 'latest_params' not in step_history:
-                    logger.warning("No 'latest_params' in step_history for CheckpointLogger.")
+                    # expected when checkpoint period doesn't align with sync points
+                    logger.debug(f"Skipping checkpoint at step {step}: not a sync point")
                     return
 
                 params = step_history['latest_params']
