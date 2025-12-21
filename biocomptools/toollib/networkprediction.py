@@ -621,30 +621,6 @@ class NetworkPrediction(DataSource):
         self.predict_at = new_predict_at
         self.ground_truth = new_gt
 
-    def _get_inverse_input_order(self, network) -> Optional[List[int]]:
-        """Get the inverse of input_order to map from alphabetical display order to network order.
-
-        PlotData.x columns are in alphabetical order (for display), but the model expects
-        columns in network input order. This function computes the permutation needed
-        to convert alphabetical back to network order.
-
-        Returns None if no reordering is needed (already in network order).
-        """
-        input_order, _, _, _ = get_reordered_protein_names(network)
-        # input_order maps network order -> alphabetical
-        # We need the inverse: alphabetical -> network order
-
-        # Check if already identity (no reordering needed)
-        if input_order == list(range(len(input_order))):
-            return None
-
-        # Compute inverse permutation
-        inverse_order = [0] * len(input_order)
-        for new_idx, old_idx in enumerate(input_order):
-            inverse_order[old_idx] = new_idx
-
-        return inverse_order
-
     def _prepare_inputs(self) -> Tuple[List[NdArray], List[Optional[NdArray]]]:
         """prepare inputs by padding or truncating to the same length"""
         max_prediction_length = max(len(x) for x in self.predict_at)
@@ -661,17 +637,6 @@ class NetworkPrediction(DataSource):
         for i, (x, gt, network) in enumerate(
             zip(self.predict_at, self.ground_truth, self.network_model.network, strict=True)
         ):
-            if not self.skip_input_reorder:
-                inverse_order = self._get_inverse_input_order(network)
-                if inverse_order is not None:
-                    logger.debug(
-                        f"network {i}: reordering input columns with inverse_order={inverse_order}"
-                    )
-                    x = x[:, inverse_order]
-            logger.debug(
-                f"aligning network {i}: x.shape={x.shape}, gt={None if gt is None else gt.shape}"
-            )
-
             if len(x) < effective_max_evals:
                 zeros = np.zeros((effective_max_evals - len(x), x.shape[1]))
                 padded_x = np.vstack([x, zeros])

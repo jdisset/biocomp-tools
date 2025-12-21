@@ -32,7 +32,7 @@ from dracon.commandline import make_program, Arg
 from biocomp.train import TrainingConfig
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
-from biocomp.design import DesignManager, DesignConfig, Target, DataTarget
+from biocomp.design import DesignManager, DesignConfig, Target, SVGTarget, DataTarget
 from biocomp.network import Network
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot
 
@@ -357,6 +357,7 @@ DEFAULT_TYPES = list(
             DesignConfig,
             DesignManager,
             Target,
+            SVGTarget,
             DataTarget,
             Network,
             # Utility types

@@ -1,13 +1,20 @@
-from dataclasses import dataclass, field
-from typing import Any, Optional
-import numpy as np
+"""Design result visualization utilities.
+
+DesignResult is a pure data holder - all values must be precomputed via DesignEvaluator.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
 import matplotlib.axes
 from matplotlib.patches import FancyBboxPatch
 
 from biocomp.plotutils import PlotData
-from biocomptools.logging_config import get_logger
+from biocomp.design import DataTarget
 
-logger = get_logger(__name__)
+if TYPE_CHECKING:
+    from biocomptools.toollib.design_eval import EvaluatedDesign
 
 GOOD_COLOR = "#28a745"
 BAD_COLOR = "#dc3545"
@@ -17,7 +24,11 @@ BASELINE_COLOR = "#6c757d"
 
 @dataclass
 class DesignResult:
-    """Data holder for design result. All data properties return RAW space for plotting."""
+    """Pure data holder for design result visualization.
+
+    All data must be precomputed via DesignEvaluator.evaluate_designs().
+    No lazy computation - all fields required at construction.
+    """
 
     network: Any
     target: Any
@@ -27,184 +38,60 @@ class DesignResult:
     scaffold_network_name: str
     loss: float
     recipe_hash: str
-    run_name: str = ""
-    model: Any = None
+    run_name: str
+    model: Any
 
-    _gt_data: Optional[PlotData] = field(default=None, repr=False)
-    _pred_data: Optional[PlotData] = field(default=None, repr=False)
-    _lattice_data: Optional[PlotData] = field(default=None, repr=False)
-    _baseline_nre_value: Optional[float] = field(default=None, repr=False)
-    _design_nre_value: Optional[float] = field(default=None, repr=False)
-
-    def _to_raw_space(self, X: np.ndarray, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if self.model is None:
-            return X, Y
-        if np.abs(X).max() > 100 or np.abs(Y).max() > 100:
-            logger.warning(
-                f"DesignResult._to_raw_space: Input data appears to be in RAW space already "
-                f"(X max={np.abs(X).max():.0f}, Y max={np.abs(Y).max():.0f}). "
-                f"Expected LATENT space (values roughly -2 to 2). "
-                f"Applying rescaler.inv() to raw data will produce invalid results. "
-                f"This usually indicates DataTarget.X/Y wasn't properly rescaled."
-            )
-        return self.model.rescaler.inv(X), self.model.rescaler.inv(Y.reshape(-1, 1)).ravel()
-
-    @property
-    def gt_data(self) -> PlotData:
-        if self._gt_data is None:
-            from biocomp.design import DataTarget
-
-            # use rank as part of seed to avoid correlation between results
-            seed = hash((self.rank, self.replicate, self.target_name)) % (2**31)
-            if isinstance(self.target, DataTarget):
-                X, Y = self.target.X, np.atleast_1d(self.target.Y.squeeze())
-                if len(X) > 20000:
-                    idx = np.random.default_rng(seed).choice(len(X), 20000, replace=False)
-                    X, Y = X[idx], Y[idx]
-            else:
-                X, Y_grid = self.target.get_lattice((300, 300), seed=seed)
-                Y = Y_grid.ravel()
-
-            X, Y = self._to_raw_space(X, Y)
-
-            self._gt_data = PlotData(
-                xval=X,
-                yval=Y,
-                input_names=[f'X{i + 1}' for i in range(X.shape[1])],
-                output_name='Y',
-            )
-        return self._gt_data
-
-    @property
-    def pred_data(self) -> PlotData:
-        if self._pred_data is None:
-            from biocomptools.modelmodel import NetworkModel
-            from biocomptools.toollib.networkprediction import NetworkPrediction
-            from biocomp.design import DataTarget
-            from biocomp.plotutils import make_xy_grid
-
-            seed = hash((self.rank, self.replicate, self.target_name)) % (2**31)
-            if isinstance(self.target, DataTarget):
-                X_latent = self.target.X
-                if len(X_latent) > 20000:
-                    idx = np.random.default_rng(seed).choice(len(X_latent), 20000, replace=False)
-                    X_latent = X_latent[idx]
-            else:
-                grid_res = 300
-                X_latent = make_xy_grid(
-                    xmin=self.target.lattice_x_extent[0],
-                    xmax=self.target.lattice_x_extent[1],
-                    ymin=self.target.lattice_y_extent[0],
-                    ymax=self.target.lattice_y_extent[1],
-                    xres=grid_res,
-                    yres=grid_res,
-                )
-
-            predictor = NetworkPrediction(
-                predict_at=[X_latent],
-                max_evals=100000,
-                network_model=NetworkModel(model=self.model, network=[self.network]),
-                already_latent=True,
-                device='gpu',
-                skip_input_reorder=True,  # Design optimization uses X in alphabetical order
-            )
-            pred = predictor.get_data(rescale_latent=True)
-            X_pred = pred[0].x if pred else X_latent
-            Y_pred = pred[0].y if pred else np.zeros(len(X_pred))
-            if self.model is not None and not pred:
-                X_pred = self.model.rescaler.inv(X_pred)
-
-            self._pred_data = PlotData(
-                xval=X_pred,
-                yval=Y_pred,
-                input_names=[f'X{i + 1}' for i in range(X_pred.shape[1])],
-                output_name='Y',
-            )
-        return self._pred_data
-
-    @property
-    def lattice_data(self) -> PlotData:
-        if self._lattice_data is None:
-            X, Y = self.target.get_lattice((48, 48), seed=0)
-            X, Y_flat = self._to_raw_space(X, Y.ravel())
-
-            self._lattice_data = PlotData(
-                xval=X,
-                yval=Y_flat,
-                input_names=[f'X{i + 1}' for i in range(X.shape[1])],
-                output_name='Y',
-            )
-        return self._lattice_data
+    gt_data: PlotData
+    pred_data: PlotData
+    lattice_data: PlotData | None
+    lattice_grid: Any | None  # np.ndarray (yres, xres) for pixel-perfect rendering
+    lattice_extent: tuple[float, float, float, float] | None  # (xmin, xmax, ymin, ymax)
+    lattice_resolution: tuple[int, int] | None  # (xres, yres)
+    design_nre: float | None
+    baseline_nre: float | None
 
     @property
     def has_original_network(self) -> bool:
-        from biocomp.design import DataTarget
-
         return isinstance(self.target, DataTarget) and self.target.original_network is not None
 
-    def _compute_nre_for_network(
-        self, network: Any, max_evals: int = 50000, skip_input_reorder: bool = False
-    ) -> Optional[float]:
-        from biocomp.design import DataTarget
+    @classmethod
+    def from_evaluated(cls, ev: EvaluatedDesign) -> DesignResult:
+        """Create DesignResult from EvaluatedDesign."""
+        return cls(
+            network=ev.input.network,
+            target=ev.input.target,
+            target_name=ev.input.target_name,
+            rank=ev.input.rank,
+            replicate=ev.input.replicate,
+            scaffold_network_name=ev.input.scaffold_network_name,
+            loss=ev.input.loss,
+            recipe_hash=ev.input.recipe_hash,
+            run_name=ev.input.run_name,
+            model=None,  # not needed after evaluation
+            gt_data=ev.gt_data,
+            pred_data=ev.pred_data,
+            lattice_data=ev.lattice_data,
+            lattice_grid=ev.lattice_grid,
+            lattice_extent=ev.lattice_extent,
+            lattice_resolution=ev.lattice_resolution,
+            design_nre=ev.design_nre,
+            baseline_nre=ev.baseline_nre,
+        )
 
-        if self.model is None or not isinstance(self.target, DataTarget):
-            return None
-        try:
-            from biocomptools.modelmodel import NetworkModel
-            from biocomptools.toollib.networkprediction import NetworkPrediction
 
-            seed = hash((self.rank, self.replicate, self.target_name, id(network))) % (2**31)
-            X = self.target.X
-            Y = self.target.Y
-            if len(X) > max_evals:
-                idx = np.random.default_rng(seed).choice(len(X), max_evals, replace=False)
-                X, Y = X[idx], Y[idx]
-
-            predictor = NetworkPrediction(
-                predict_at=[X],
-                ground_truth=[Y.reshape(-1, 1) if Y.ndim == 1 else Y],
-                max_evals=max_evals,
-                network_model=NetworkModel(model=self.model, network=[network]),
-                already_latent=True,
-                enable_gridstats=True,
-                device='gpu',
-                verbose=False,
-                skip_input_reorder=skip_input_reorder,
-            )
-            stats = predictor.get_network_stats()
-            return stats[0].get('noise_relative_error') if stats else None
-        except Exception as e:
-            logger.warning(f"Failed to compute NRE: {e}")
-            return None
-
-    @property
-    def baseline_nre(self) -> Optional[float]:
-        if self._baseline_nre_value is not None:
-            return self._baseline_nre_value
-        if not self.has_original_network:
-            return None
-        if not hasattr(self, '_baseline_nre_computed'):
-            self._baseline_nre_computed = self._compute_nre_for_network(
-                self.target.original_network
-            )
-        return self._baseline_nre_computed
-
-    @property
-    def design_nre(self) -> Optional[float]:
-        if self._design_nre_value is not None:
-            return self._design_nre_value
-        if not hasattr(self, '_design_nre_computed'):
-            from biocomp.design import DataTarget
-
-            self._design_nre_computed = (
-                self._compute_nre_for_network(self.network, skip_input_reorder=True)
-                if isinstance(self.target, DataTarget)
-                else None
-            )
-        return self._design_nre_computed
+def nre_color(design_nre: float | None, baseline_nre: float | None) -> str:
+    """Determine color for NRE display based on quality."""
+    if design_nre is None:
+        return NEUTRAL_COLOR
+    if baseline_nre is not None and design_nre <= baseline_nre * 1.5:
+        return GOOD_COLOR
+    if design_nre < 5.0:
+        return NEUTRAL_COLOR
+    return BAD_COLOR
 
 
 def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwargs):
+    """Render design metrics panel."""
     ax.axis('off')
     ax.add_patch(
         FancyBboxPatch(
@@ -246,25 +133,19 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
     )
 
     if result.has_original_network:
-        baseline_nre, design_nre = result.baseline_nre, result.design_nre
         nre_y = 0.60
-        if design_nre is not None:
-            if baseline_nre is not None and design_nre <= baseline_nre * 1.5:
-                nre_color = GOOD_COLOR
-            elif design_nre < 5.0:
-                nre_color = NEUTRAL_COLOR
-            else:
-                nre_color = BAD_COLOR
+        color = nre_color(result.design_nre, result.baseline_nre)
+        if result.design_nre is not None:
             ax.text(
                 0.5,
                 nre_y,
-                f"NRE: {design_nre:.2f}",
+                f"NRE: {result.design_nre:.2f}",
                 transform=ax.transAxes,
                 fontsize=14,
                 va='center',
                 ha='center',
                 fontweight='bold',
-                color=nre_color,
+                color=color,
             )
         else:
             ax.text(
@@ -277,11 +158,11 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
                 ha='center',
                 color='#aaa',
             )
-        if baseline_nre is not None:
+        if result.baseline_nre is not None:
             ax.text(
                 0.5,
                 nre_y - 0.10,
-                f"(baseline: {baseline_nre:.2f})",
+                f"(baseline: {result.baseline_nre:.2f})",
                 transform=ax.transAxes,
                 fontsize=9,
                 va='center',
@@ -302,6 +183,7 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
         ha='center',
         family='monospace',
     )
+
     scaffold = (
         result.scaffold_network_name[:25] + '...'
         if len(result.scaffold_network_name) > 28
@@ -332,6 +214,7 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
 
 
 def render_empty_panel(ax: matplotlib.axes.Axes, text: str = "", **_kwargs):
+    """Render empty panel with optional text."""
     ax.axis('off')
     if text:
         ax.text(
@@ -344,3 +227,78 @@ def render_empty_panel(ax: matplotlib.axes.Axes, text: str = "", **_kwargs):
             ha='center',
             color='#aaa',
         )
+
+
+def render_lattice_heatmap(
+    ax: matplotlib.axes.Axes,
+    result: DesignResult,
+    title: str = "Design View (Lattice)",
+    cmap: str = "viridis",
+    draw_colorbar: bool = False,
+    **_kwargs,
+):
+    """Render pixel-perfect lattice heatmap showing exactly what design loss sees.
+
+    Uses imshow with the exact grid resolution so each pixel corresponds to one
+    lattice sample point used during design optimization.
+    """
+    import numpy as np
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    if result.lattice_grid is None or result.lattice_extent is None:
+        ax.axis('off')
+        ax.text(0.5, 0.5, "No lattice data", transform=ax.transAxes, ha='center', va='center')
+        return
+
+    grid = np.asarray(result.lattice_grid)
+    xmin, xmax, ymin, ymax = result.lattice_extent
+
+    im = ax.imshow(
+        grid,
+        origin='lower',
+        aspect='equal',
+        extent=[xmin, xmax, ymin, ymax],
+        cmap=cmap,
+        interpolation='nearest',
+    )
+
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel("X1")
+    ax.set_ylabel("X2")
+    if title:
+        ax.set_title(title)
+
+    if draw_colorbar:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        ax.figure.colorbar(im, cax=cax)
+
+
+def render_smooth_with_extent(
+    ax: matplotlib.axes.Axes,
+    plot_data: PlotData,
+    extent: tuple[float, float, float, float] | None,
+    title: str = "",
+    draw_colorbar: bool = False,
+    **kwargs,
+):
+    """Render smooth KNN plot with explicit axis limits from target extent."""
+    from biocomp.plotutils import smooth
+    from biocomp.datautils import DataRescaler
+
+    rescaler = kwargs.pop('rescaler', DataRescaler())
+
+    xlims = (extent[0], extent[1]) if extent else (None, None)
+    ylims = (extent[2], extent[3]) if extent else (None, None)
+
+    smooth(
+        plot_data=plot_data,
+        ax=ax,
+        rescaler=rescaler,
+        xlims=xlims,
+        ylims=ylims,
+        title=title,
+        draw_colorbar=draw_colorbar,
+        **kwargs,
+    )

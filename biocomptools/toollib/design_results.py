@@ -1,95 +1,47 @@
+"""Design metrics and results management.
+
+Data structures for design evaluation metrics. Metric computation is handled by
+DesignEvaluator in design_eval.py - this module only defines data structures.
+"""
+
 import json
 import numpy as np
 from pathlib import Path
-from typing import Optional, Any, Union
+from typing import Any
 from dataclasses import dataclass, field, asdict
 
-from biocomptools.logging_config import get_logger
 from biocomp.metric_utils import RegressionStats, DistributionStats
+from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass
-class RegressionMetrics:
-    """regression metrics for design evaluation.
-
-    wraps biocomp.metric_utils.RegressionStats with design-specific field names.
-    """
-
-    rmse: float
-    mae: float
-    r2: float
-    pearson_r: float
-    pearson_p: float
-    max_error: float
-    p95_error: float
-
-    @classmethod
-    def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "RegressionMetrics":
-        stats = RegressionStats.compute(y_true, y_pred)
-        return cls(
-            rmse=stats.rmse,
-            mae=stats.mae,
-            r2=stats.r2,
-            pearson_r=stats.pearson_r,
-            pearson_p=stats.pearson_p,
-            max_error=stats.max_error,
-            p95_error=stats.p95_error,
-        )
-
-
-@dataclass
-class DistributionMetrics:
-    """distribution metrics for design evaluation.
-
-    wraps biocomp.metric_utils.DistributionStats with design-specific field names.
-    """
-
-    target_mean: float
-    target_std: float
-    target_min: float
-    target_max: float
-    prediction_mean: float
-    prediction_std: float
-    prediction_min: float
-    prediction_max: float
-
-    @classmethod
-    def compute(cls, y_true: np.ndarray, y_pred: np.ndarray) -> "DistributionMetrics":
-        stats = DistributionStats.compute(y_true, y_pred)
-        return cls(
-            target_mean=stats.target_mean,
-            target_std=stats.target_std,
-            target_min=stats.target_min,
-            target_max=stats.target_max,
-            prediction_mean=stats.pred_mean,
-            prediction_std=stats.pred_std,
-            prediction_min=stats.pred_min,
-            prediction_max=stats.pred_max,
-        )
-
-
-@dataclass
 class LossComponents:
+    """Design loss breakdown."""
+
     total: float
-    sinkhorn: Optional[float] = None
-    lncc: Optional[float] = None
-    spectral: Optional[float] = None
-    tucount_penalty: Optional[float] = None
+    sinkhorn: float | None = None
+    lncc: float | None = None
+    spectral: float | None = None
+    tucount_penalty: float | None = None
 
 
 @dataclass
 class NREMetrics:
-    design_nre: Optional[float] = None
-    baseline_nre: Optional[float] = None
-    design_nrmse: Optional[float] = None
-    baseline_nrmse: Optional[float] = None
-    data_nrmse: Optional[float] = None
+    """NRE-specific metrics for design evaluation."""
+
+    design_nre: float | None = None
+    baseline_nre: float | None = None
+    design_nrmse: float | None = None
+    baseline_nrmse: float | None = None
+    data_nrmse: float | None = None
 
 
 @dataclass
 class DesignMetrics:
+    """Complete design result metrics."""
+
     target_name: str
     network_name: str
     replicate_id: int
@@ -97,13 +49,13 @@ class DesignMetrics:
     rank: int
     step: int
     loss: LossComponents
-    regression: RegressionMetrics
-    distribution: DistributionMetrics
+    regression: RegressionStats
+    distribution: DistributionStats
     recipe_summary: dict = field(default_factory=dict)
-    nre: Optional[NREMetrics] = None
+    nre: NREMetrics | None = None
 
     def to_dict(self) -> dict:
-        result = {
+        return {
             'target_name': self.target_name,
             'network_name': self.network_name,
             'replicate_id': self.replicate_id,
@@ -114,10 +66,8 @@ class DesignMetrics:
             'regression': asdict(self.regression),
             'distribution': asdict(self.distribution),
             'recipe_summary': self.recipe_summary,
+            **(({'nre': asdict(self.nre)}) if self.nre else {}),
         }
-        if self.nre is not None:
-            result['nre'] = asdict(self.nre)
-        return result
 
     def to_json(self, path: Path):
         with open(path, 'w') as f:
@@ -125,8 +75,11 @@ class DesignMetrics:
 
 
 class DesignResultsManager:
-    def __init__(self, base_dir: Union[str, Path], step: Optional[int] = None):
-        self.base_dir, self.step = Path(base_dir), step
+    """File I/O for design results."""
+
+    def __init__(self, base_dir: str | Path, step: int | None = None):
+        self.base_dir = Path(base_dir)
+        self.step = step
         self.base_dir.mkdir(parents=True, exist_ok=True)
         for subdir in ('targets', 'checkpoints', 'comparison'):
             (self.base_dir / subdir).mkdir(exist_ok=True)
@@ -136,7 +89,7 @@ class DesignResultsManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def get_rank_dir(self, target_name: str, rank: int, step: Optional[int] = None) -> Path:
+    def get_rank_dir(self, target_name: str, rank: int, step: int | None = None) -> Path:
         step_dir = self.get_target_dir(target_name) / (
             'final' if step is None else f'steps/step_{step:06d}'
         )
@@ -163,7 +116,7 @@ class DesignResultsManager:
             json.dumps(summary, indent=2)
         )
 
-    def save_rankings(self, target_name: str, rankings: list, step: Optional[int] = None):
+    def save_rankings(self, target_name: str, rankings: list, step: int | None = None):
         out_dir = self.get_target_dir(target_name) / (
             'final' if step is None else f'steps/step_{step:06d}'
         )
@@ -179,45 +132,6 @@ class DesignResultsManager:
         )
 
 
-def compute_nre_for_network(
-    target: Any, network: Any, model: Any, max_evals: int = 50000
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    from biocomp.design import DataTarget
-
-    if not isinstance(target, DataTarget) or model is None or network is None:
-        return None, None, None
-    try:
-        from biocomptools.modelmodel import NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction
-
-        # Use get_reordered_X to align columns for the target network
-        X = target.get_reordered_X(network)
-        Y = target.Y
-        if len(X) > max_evals:
-            idx = np.random.default_rng(42).choice(len(X), max_evals, replace=False)
-            X, Y = X[idx], Y[idx]
-
-        predictor = NetworkPrediction(
-            predict_at=[X],
-            ground_truth=[Y.reshape(-1, 1) if Y.ndim == 1 else Y],
-            max_evals=max_evals,
-            network_model=NetworkModel(model=model, network=[network]),
-            already_latent=True,
-            enable_gridstats=True,
-            device='gpu',
-            verbose=False,
-        )
-        s = predictor.get_network_stats()
-        return (
-            (s[0].get('noise_relative_error'), s[0].get('grid_nrmse'), s[0].get('data_nrmse'))
-            if s
-            else (None, None, None)
-        )
-    except Exception as e:
-        logger.warning(f"Failed to compute NRE: {e}")
-        return None, None, None
-
-
 def compute_design_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -228,34 +142,36 @@ def compute_design_metrics(
     network_id: int,
     rank: int,
     step: int,
-    loss_components: Optional[dict] = None,
-    recipe_info: Optional[dict] = None,
-    nre_metrics: Optional[NREMetrics] = None,
+    loss_components: dict | None = None,
+    recipe_info: dict | None = None,
+    nre_metrics: NREMetrics | None = None,
 ) -> DesignMetrics:
+    """Create DesignMetrics from evaluation data."""
     lc = loss_components or {}
     return DesignMetrics(
-        target_name,
-        network_name,
-        replicate_id,
-        network_id,
-        rank,
-        step,
-        LossComponents(
-            float(loss_value),
-            lc.get('sinkhorn'),
-            lc.get('lncc'),
-            lc.get('spectral'),
-            lc.get('tucount_penalty'),
+        target_name=target_name,
+        network_name=network_name,
+        replicate_id=replicate_id,
+        network_id=network_id,
+        rank=rank,
+        step=step,
+        loss=LossComponents(
+            total=float(loss_value),
+            sinkhorn=lc.get('sinkhorn'),
+            lncc=lc.get('lncc'),
+            spectral=lc.get('spectral'),
+            tucount_penalty=lc.get('tucount_penalty'),
         ),
-        RegressionMetrics.compute(y_true, y_pred),
-        DistributionMetrics.compute(y_true, y_pred),
-        recipe_info or {},
-        nre_metrics,
+        regression=RegressionStats.compute(y_true, y_pred),
+        distribution=DistributionStats.compute(y_true, y_pred),
+        recipe_summary=recipe_info or {},
+        nre=nre_metrics,
     )
 
 
 def extract_recipe_summary(network: Any, params: Any = None) -> dict:
-    summary = {
+    """Extract recipe information from a network."""
+    summary: dict = {
         'network_name': getattr(network, 'name', 'unknown'),
         'uorfs': [],
         'ratios': {},

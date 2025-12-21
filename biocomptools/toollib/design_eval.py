@@ -1,202 +1,206 @@
-"""Design evaluation utilities - batched prediction and baseline NRE computation.
+"""Design evaluation utilities - batched prediction and NRE computation.
 
-All committed networks are batched into ONE NetworkModel to avoid repeated JIT compilation.
-This module uses defensive assertions to ensure correct indexing throughout the pipeline.
+Single source of truth for all design evaluation. All networks are batched into
+ONE NetworkModel to avoid repeated JIT compilation (~25s savings per batch).
 """
 
 import numpy as np
 import time
 import traceback
-from typing import Optional, Any
+from dataclasses import dataclass
+from typing import Any
 
 from biocomp.plotutils import PlotData
 from biocomp.design import DataTarget
 from biocomptools.logging_config import get_logger
+from biocomptools.toollib.design_data import prepare_target_data
 
 logger = get_logger(__name__)
 
 
-class DesignEvaluator:
-    """Evaluates design candidates via batched predictions for efficiency.
+def is_valid_network(network: Any) -> bool:
+    """Check if network has valid structure for evaluation."""
+    if network is None:
+        return False
+    cg = getattr(network, 'compute_graph', None)
+    if cg is None or not cg.nodes:
+        return False
+    return sum(1 for n in cg.nodes.values() if n.node_type == "output") == 1
 
-    Key optimization: ALL committed networks are batched into ONE NetworkModel,
-    avoiding repeated JIT compilation (~25s per batch).
-    """
+
+@dataclass
+class DesignInput:
+    """Input for design evaluation - minimal required fields."""
+
+    network: Any
+    target: Any
+    target_name: str
+    rank: int
+    replicate: int
+    scaffold_network_name: str
+    loss: float
+    recipe_hash: str
+    run_name: str = ""
+    design_dir: str = ""
+
+
+@dataclass
+class EvaluatedDesign:
+    """Complete evaluated design with all computed data."""
+
+    input: DesignInput
+    gt_data: PlotData
+    pred_data: PlotData
+    lattice_data: PlotData | None
+    lattice_grid: np.ndarray | None  # (yres, xres) for pixel-perfect rendering
+    lattice_extent: tuple[float, float, float, float] | None  # (xmin, xmax, ymin, ymax)
+    lattice_resolution: tuple[int, int] | None  # (xres, yres)
+    design_nre: float | None
+    baseline_nre: float | None
+    is_valid: bool = True
+
+
+class DesignEvaluator:
+    """Batched design evaluation - single source of truth for predictions and NRE."""
 
     def __init__(self, model: Any, max_evals: int = 50000):
+        assert model is not None, "model required for evaluation"
         self.model = model
         self.max_evals = max_evals
 
-    def _prepare_target_data(
-        self, target: Any, network: Any = None, max_samples: int = 20000, seed: int = 42
-    ) -> tuple[np.ndarray, Optional[np.ndarray]]:
-        """Prepare X/Y data for a target, subsampling if needed.
+    def evaluate_designs(self, inputs: list[DesignInput]) -> list[EvaluatedDesign]:
+        """Evaluate all designs in ONE batched call. Returns fully populated results."""
+        if not inputs:
+            return []
 
-        Args:
-            target: The design target (DataTarget, SVGTarget, etc.)
-            network: If provided and target is DataTarget, reorder X columns to match
-                     the network's expected input order.
-            max_samples: Maximum samples to return (subsample if needed)
-            seed: Random seed for subsampling
+        valid_inputs = [(i, inp) for i, inp in enumerate(inputs) if is_valid_network(inp.network)]
+        invalid_indices = {i for i in range(len(inputs))} - {i for i, _ in valid_inputs}
 
-        Returns:
-            (X_latent, Y_gt) tuple where X columns are ordered to match network's inputs
-        """
-        if isinstance(target, DataTarget):
-            if network is not None:
-                X_latent = target.get_reordered_X(network)
+        if invalid_indices:
+            logger.info(f"Skipping {len(invalid_indices)} invalid networks")
+
+        if not valid_inputs:
+            return [self._make_invalid_result(inp) for inp in inputs]
+
+        precomputed, baseline_cache = self._batch_compute(valid_inputs)
+
+        results = []
+        for i, inp in enumerate(inputs):
+            if i in invalid_indices:
+                results.append(self._make_invalid_result(inp))
             else:
-                X_latent = target.X
-            Y_gt = target.Y
-            if len(X_latent) > max_samples:
-                idx = np.random.default_rng(seed).choice(len(X_latent), max_samples, replace=False)
-                X_latent = X_latent[idx]
-                Y_gt = Y_gt[idx] if Y_gt is not None else None
-        else:
-            X_latent, _ = target.sample_uniform(min(10000, max_samples), seed=seed)
-            Y_gt = None
-        return X_latent, Y_gt
+                key = (inp.target_name, id(inp.network))
+                pred_data = precomputed[key]['pred_data']
+                design_nre = precomputed[key]['design_nre']
+                baseline_nre = self._get_baseline_nre(inp.target, baseline_cache)
+                gt_data = self._compute_gt_data(inp)
+                lattice_data, lattice_grid, lattice_extent, lattice_resolution = (
+                    self._compute_lattice_data(inp)
+                )
 
-    def precompute_for_design_results(
-        self, design_results: list[dict]
-    ) -> tuple[dict[tuple, dict], dict[int, Optional[float]]]:
-        """Precompute predictions for ALL design results in ONE batched call.
+                results.append(
+                    EvaluatedDesign(
+                        input=inp,
+                        gt_data=gt_data,
+                        pred_data=pred_data,
+                        lattice_data=lattice_data,
+                        lattice_grid=lattice_grid,
+                        lattice_extent=lattice_extent,
+                        lattice_resolution=lattice_resolution,
+                        design_nre=design_nre,
+                        baseline_nre=baseline_nre,
+                    )
+                )
+        return results
 
-        Optimization: Instead of building a separate NetworkModel per target group,
-        we build ONE NetworkModel with ALL committed networks across all targets.
-        This avoids ~25s JIT compilation per target group.
-
-        Returns:
-            (precomputed, baseline_cache) where:
-            - precomputed: dict[(target_name, net_id)] -> {'pred_data': ..., 'design_nre': ...}
-            - baseline_cache: dict[id(original_network)] -> baseline_nre
-        """
+    def _batch_compute(
+        self, valid_inputs: list[tuple[int, DesignInput]]
+    ) -> tuple[dict[tuple, dict], dict[int, float | None]]:
+        """Batch compute predictions and NREs for all valid inputs."""
         from biocomptools.modelmodel import NetworkModel
         from biocomptools.toollib.networkprediction import NetworkPrediction
 
-        if not design_results:
-            return {}, {}
+        n = len(valid_inputs)
+        logger.info(f"Batching predictions for {n} designs...")
+        start = time.time()
 
-        n_results = len(design_results)
-        logger.info(f"Batching predictions for {n_results} design results in ONE call...")
-        start_time = time.time()
+        networks, predict_at, ground_truth, keys = [], [], [], []
+        for _, inp in valid_inputs:
+            td = prepare_target_data(inp.target, max_samples=self.max_evals, seed=42)
+            networks.append(inp.network)
+            predict_at.append(td.X)
+            ground_truth.append(td.reshape_Y_for_prediction())
+            keys.append((inp.target_name, id(inp.network)))
 
-        all_networks = []
-        all_predict_at = []
-        all_ground_truth = []
-        result_indices = []  # tracks (target_name, network_id(obj)) for each position
-
-        for i, r in enumerate(design_results):
-            network = r['network']
-            target = r['target']
-            target_name = r['target_name']
-
-            assert network is not None, f"design_results[{i}] has None network"
-            assert target is not None, f"design_results[{i}] has None target"
-
-            X, Y = self._prepare_target_data(target, network=network)
-            assert X.ndim == 2, f"X must be 2D, got {X.ndim}D for result {i}"
-
-            all_networks.append(network)
-            all_predict_at.append(X)
-            if isinstance(target, DataTarget) and Y is not None:
-                Y_shaped = Y.reshape(-1, 1) if Y.ndim == 1 else Y
-                all_ground_truth.append(Y_shaped)
-            else:
-                all_ground_truth.append(None)
-
-            result_indices.append((target_name, id(network)))
-
-        assert len(all_networks) == n_results, f"network count mismatch: {len(all_networks)} != {n_results}"
-        assert len(result_indices) == n_results, f"index count mismatch: {len(result_indices)} != {n_results}"
-
-        logger.info(f"Building batched NetworkModel for {n_results} networks (all targets)...")
-        model_start = time.time()
-        network_model = NetworkModel(model=self.model, network=all_networks)
-        logger.info(f"Batched NetworkModel built in {time.time() - model_start:.2f}s")
-
-        has_any_gt = any(gt is not None for gt in all_ground_truth)
-        enable_gridstats = has_any_gt
+        has_gt = any(gt is not None for gt in ground_truth)
+        network_model = NetworkModel(model=self.model, network=networks)
 
         predictor = NetworkPrediction(
-            predict_at=all_predict_at,
-            ground_truth=all_ground_truth if has_any_gt else None,
+            predict_at=predict_at,
+            ground_truth=ground_truth if has_gt else None,
             max_evals=self.max_evals,
             network_model=network_model,
             already_latent=True,
-            enable_gridstats=enable_gridstats,
+            enable_gridstats=has_gt,
             device='gpu',
             verbose=False,
+            skip_input_reorder=True,  # design: X was passed positionally during optimization
         )
 
-        pred_results = predictor.get_data(rescale_latent=True)
-        nre_stats = predictor.get_network_stats() if enable_gridstats else None
+        preds = predictor.get_data(rescale_latent=True)
+        stats = predictor.get_network_stats() if has_gt else None
 
-        assert len(pred_results) == n_results, (
-            f"prediction count mismatch: {len(pred_results)} != {n_results}"
-        )
+        assert len(preds) == n, f"prediction count {len(preds)} != {n}"
 
-        precomputed: dict[tuple, dict] = {}
-        for i, pred in enumerate(pred_results):
-            key = result_indices[i]
-            assert key not in precomputed, f"duplicate key {key} at index {i}"
-
+        precomputed = {}
+        for i, pred in enumerate(preds):
             pred_data = PlotData(
                 xval=pred.x,
                 yval=pred.y,
                 input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
                 output_name='Y',
             )
-            nre = nre_stats[i].get('noise_relative_error') if nre_stats and i < len(nre_stats) else None
+            nre = stats[i].get('noise_relative_error') if stats else None
+            precomputed[keys[i]] = {'pred_data': pred_data, 'design_nre': nre}
 
-            precomputed[key] = {'pred_data': pred_data, 'design_nre': nre}
+        logger.info(f"Batched {n} predictions in {time.time() - start:.2f}s")
 
-        assert len(precomputed) == n_results, (
-            f"precomputed count mismatch: {len(precomputed)} != {n_results}"
-        )
-
-        logger.info(f"All {n_results} predictions computed in {time.time() - start_time:.2f}s")
-
-        baseline_cache = self._compute_baseline_nres(design_results)
+        baseline_cache = self._batch_compute_baselines(valid_inputs)
         return precomputed, baseline_cache
 
-    def _compute_baseline_nres(self, design_results: list[dict]) -> dict[int, Optional[float]]:
-        """Compute baseline NRE for original networks (batched)."""
+    def _batch_compute_baselines(
+        self, valid_inputs: list[tuple[int, DesignInput]]
+    ) -> dict[int, float | None]:
+        """Batch compute baseline NREs for original networks."""
         from biocomptools.modelmodel import NetworkModel
         from biocomptools.toollib.networkprediction import NetworkPrediction
 
-        baseline_groups: dict[int, tuple] = {}
-        for r in design_results:
-            target = r['target']
-            if not isinstance(target, DataTarget) or target.original_network is None:
+        groups: dict[int, tuple] = {}
+        for _, inp in valid_inputs:
+            if not isinstance(inp.target, DataTarget) or inp.target.original_network is None:
                 continue
-            orig_net = target.original_network
-            net_key = id(orig_net)
-            if net_key not in baseline_groups:
-                baseline_groups[net_key] = (orig_net, target)
+            net_key = id(inp.target.original_network)
+            if net_key not in groups:
+                groups[net_key] = (inp.target.original_network, inp.target)
 
-        if not baseline_groups:
+        if not groups:
             return {}
 
-        baseline_items = list(baseline_groups.items())
-        n_baselines = len(baseline_items)
-        networks = [item[1][0] for item in baseline_items]
-        targets = [item[1][1] for item in baseline_items]
+        items = list(groups.items())
+        networks = [item[1][0] for item in items]
+        targets = [item[1][1] for item in items]
+        n = len(networks)
 
-        logger.info(f"Computing baseline NRE for {n_baselines} unique original networks...")
-        start_time = time.time()
+        logger.info(f"Computing baseline NRE for {n} original networks...")
+        start = time.time()
 
-        assert len(networks) == len(targets), f"networks/targets length mismatch: {len(networks)} != {len(targets)}"
-
-        result_map = {}
         try:
             network_model = NetworkModel(model=self.model, network=networks)
-
             predict_at, ground_truth = [], []
-            for net, target in zip(networks, targets, strict=True):
-                X, Y = self._prepare_target_data(target, network=net)
-                predict_at.append(X)
-                ground_truth.append(Y.reshape(-1, 1) if Y.ndim == 1 else Y)
+            for _net, target in zip(networks, targets, strict=True):
+                td = prepare_target_data(target, max_samples=self.max_evals, seed=42)
+                predict_at.append(td.X)
+                ground_truth.append(td.reshape_Y_for_prediction())
 
             predictor = NetworkPrediction(
                 predict_at=predict_at,
@@ -207,22 +211,110 @@ class DesignEvaluator:
                 enable_gridstats=True,
                 device='gpu',
                 verbose=False,
+                skip_input_reorder=True,  # baseline: preserve positional axis mapping
             )
             stats = predictor.get_network_stats()
+            assert stats and len(stats) == n
 
-            assert stats is not None, "expected stats from baseline prediction"
-            assert len(stats) == n_baselines, f"stats count {len(stats)} != {n_baselines}"
-
-            for i, (net_key, _) in enumerate(baseline_items):
-                result_map[net_key] = stats[i].get('noise_relative_error')
-
-            logger.info(f"Baseline NRE computed in {time.time() - start_time:.2f}s")
+            result = {items[i][0]: stats[i].get('noise_relative_error') for i in range(n)}
+            logger.info(f"Baseline NRE computed in {time.time() - start:.2f}s")
+            return result
         except Exception as e:
-            logger.warning(f"Batched baseline NRE computation failed: {e}")
+            logger.warning(f"Baseline NRE computation failed: {e}")
             logger.debug(traceback.format_exc())
+            return {}
 
-        return result_map
+    def _get_baseline_nre(self, target: Any, cache: dict[int, float | None]) -> float | None:
+        if not isinstance(target, DataTarget) or target.original_network is None:
+            return None
+        return cache.get(id(target.original_network))
 
-    # kept for backward compatibility but prefer precompute_for_design_results
-    def compute_baseline_nres(self, design_results: list[dict]) -> dict[int, Optional[float]]:
-        return self._compute_baseline_nres(design_results)
+    def _compute_gt_data(self, inp: DesignInput) -> PlotData:
+        """Compute ground truth data for plotting."""
+        seed = hash((inp.rank, inp.replicate, inp.target_name)) % (2**31)
+        td = prepare_target_data(inp.target, max_samples=20000, seed=seed)
+        return td.to_plot_data(model=self.model)
+
+    def _compute_lattice_data(
+        self, inp: DesignInput
+    ) -> tuple[PlotData | None, np.ndarray | None, tuple | None, tuple | None]:
+        """Compute lattice visualization data.
+
+        Returns:
+            lattice_data: PlotData for smooth plotting (flattened)
+            lattice_grid: 2D array (yres, xres) for pixel-perfect rendering (latent space)
+            lattice_extent: (xmin, xmax, ymin, ymax) in latent space
+            lattice_resolution: (xres, yres) for reference
+        """
+        if not hasattr(inp.target, 'get_lattice'):
+            return None, None, None, None
+
+        resolution = (48, 48)
+        x_ext = getattr(inp.target, 'lattice_x_extent', (0.0, 1.0))
+        y_ext = getattr(inp.target, 'lattice_y_extent', (0.0, 1.0))
+
+        X_grid, Y_grid = inp.target.get_lattice(resolution, seed=0)
+        lattice_extent = (x_ext[0], x_ext[1], y_ext[0], y_ext[1])
+
+        Y_grid_2d = Y_grid if Y_grid.ndim == 2 else Y_grid.reshape(resolution[1], resolution[0])
+
+        td = prepare_target_data(inp.target, max_samples=48 * 48, seed=0, grid_resolution=resolution)
+        lattice_data = td.to_plot_data(model=self.model)
+
+        return lattice_data, Y_grid_2d, lattice_extent, resolution
+
+    def _make_invalid_result(self, inp: DesignInput) -> EvaluatedDesign:
+        """Create placeholder result for invalid network."""
+        empty = PlotData(
+            xval=np.zeros((0, 2)),
+            yval=np.zeros(0),
+            input_names=['X1', 'X2'],
+            output_name='Y',
+        )
+        return EvaluatedDesign(
+            input=inp,
+            gt_data=empty,
+            pred_data=empty,
+            lattice_data=None,
+            lattice_grid=None,
+            lattice_extent=None,
+            lattice_resolution=None,
+            design_nre=None,
+            baseline_nre=None,
+            is_valid=False,
+        )
+
+
+# Legacy API for backward compatibility
+def _is_valid_network(network: Any) -> bool:
+    return is_valid_network(network)
+
+
+def precompute_for_design_results(
+    model: Any, design_results: list[dict], max_evals: int = 50000
+) -> tuple[dict[tuple, dict], dict[int, float | None]]:
+    """Legacy function - use DesignEvaluator.evaluate_designs() instead."""
+    evaluator = DesignEvaluator(model, max_evals)
+
+    inputs = [
+        DesignInput(
+            network=r['network'],
+            target=r['target'],
+            target_name=r['target_name'],
+            rank=r.get('rank', 0),
+            replicate=r.get('replicate', 0),
+            scaffold_network_name=r.get('network_name', ''),
+            loss=r.get('loss', 0.0),
+            recipe_hash=r.get('recipe_hash', ''),
+            run_name=r.get('run_name', ''),
+            design_dir=r.get('design_dir', ''),
+        )
+        for r in design_results
+    ]
+
+    valid = [(i, inp) for i, inp in enumerate(inputs) if is_valid_network(inp.network)]
+    if not valid:
+        return {}, {}
+
+    precomputed, baseline_cache = evaluator._batch_compute(valid)
+    return precomputed, baseline_cache

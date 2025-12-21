@@ -8,7 +8,7 @@ from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.trainutils import make_json_ready
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.hashutils import pronounceable_hash48
-from biocomptools.toollib.design_eval import DesignEvaluator
+from biocomptools.toollib.design_eval import DesignEvaluator, DesignInput
 
 from biocomp.design import (
     start,
@@ -27,6 +27,7 @@ from biocomp.design import (
 )
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
 from biocomp.network import Network, recipe_to_networks
+from biocomp.graphengine import GraphState
 from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
 
@@ -52,6 +53,16 @@ def _target_name(t) -> str:
     if isinstance(t, DataTarget):
         return t.name or "data_target"
     return t.name or Path(t.path).stem
+
+
+def _safe_get_input_proteins(network) -> list | None:
+    """Safely get inverted input proteins, returning None on failure."""
+    if not network or not hasattr(network, 'get_inverted_input_proteins'):
+        return None
+    try:
+        return network.get_inverted_input_proteins()
+    except (AssertionError, AttributeError):
+        return None
 
 
 class DesignProgram(BaseOptimizationProgram):
@@ -168,14 +179,14 @@ class DesignProgram(BaseOptimizationProgram):
 
         if self.scaffolds is not None:
             for scaffold in self.scaffolds:
-                if not scaffold.has_axis_mapping():
+                if not scaffold.has_input_order():
                     logger.warning(
-                        f"Scaffold '{scaffold.name}' has no axis_mapping - may cause axis alignment issues"
+                        f"Scaffold '{scaffold.name}' has no input_order - may cause axis alignment issues"
                     )
                 scaffold_networks = recipe_to_networks(scaffold, invert=True, inversion_mode="main")
                 for net in scaffold_networks:
-                    if scaffold.has_axis_mapping() and not net.has_axis_mapping():
-                        logger.error(f"axis_mapping lost: {scaffold.name} -> {net.name}")
+                    if scaffold.has_input_order() and not net.has_input_order():
+                        logger.error(f"input_order lost: {scaffold.name} -> {net.name}")
                 networks.extend(scaffold_networks)
             logger.debug(f"Generated {len(networks)} networks from {len(self.scaffolds)} scaffolds")
 
@@ -360,11 +371,14 @@ class DesignProgram(BaseOptimizationProgram):
         t2 = time.perf_counter()
         logger.info(f"[3/3] Finding top {self.topk_n} designs...")
 
+        # Request 3x candidates to handle empty recipes after commit
+        # (some designs may become empty due to aggressive TU pruning)
+        topk_candidate_pool = 3
         topk = get_topk_replicate_network_pairs(
             losses=losses,
             dmanager=self._dmanager,
             dconf=self.design_conf,
-            k=self.topk_n,
+            k=self.topk_n * topk_candidate_pool,
         )
         logger.info(f"  -> Top-k found in {time.perf_counter() - t2:.2f}s")
 
@@ -517,6 +531,7 @@ class DesignProgram(BaseOptimizationProgram):
         assert len(topk) == n_targets, f"topk length {len(topk)} != n_targets {n_targets}"
 
         import biocomp.compute as cmp
+        import time
 
         stack = cmp.ComputeStack(networks=self._dmanager.networks)
         stack.build(self._model.compute_config, enable_tu_masking=True)
@@ -524,6 +539,37 @@ class DesignProgram(BaseOptimizationProgram):
         run_datetime = datetime.now().isoformat()
         run_name = self._run_name
         all_design_results = []
+
+        # Pre-compute all unique (rep_id, tid) pairs needed from topk
+        needed_pairs: set[tuple[int, int]] = set()
+        for tid in range(n_targets):
+            for rep_id, net_id, loss_val in topk[tid]:
+                needed_pairs.add((rep_id, tid))
+
+        # Pre-commit all needed parameter sets (expensive operation, do once per pair)
+        commit_cache: dict[tuple[int, int], list] = {}
+        commit_failures: list[tuple[int, int, str]] = []
+        t0 = time.perf_counter()
+        logger.info(f"Pre-committing {len(needed_pairs)} unique (replicate, target) pairs...")
+        for i, (rep_id, tid) in enumerate(sorted(needed_pairs)):
+            bparams = tree_get(final_params, (rep_id, tid))
+            try:
+                commit_cache[(rep_id, tid)] = stack.commit(bparams)
+            except Exception as e:
+                # Log error but don't crash - return empty network list
+                error_msg = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    f"Commit failed for (rep={rep_id}, target={tid}): {error_msg}"
+                )
+                commit_failures.append((rep_id, tid, error_msg))
+                # Create empty network list so downstream code can handle gracefully
+                commit_cache[(rep_id, tid)] = [
+                    Network(compute_graph=GraphState(nodes={}, edges={}))
+                    for _ in range(n_networks)
+                ]
+        if commit_failures:
+            logger.warning(f"  -> {len(commit_failures)} commits failed (will be skipped)")
+        logger.info(f"  -> Commits completed in {time.perf_counter() - t0:.2f}s")
 
         with open(summary_file, 'w') as f:
             f.write("BEST DESIGN SUMMARY\n")
@@ -542,31 +588,51 @@ class DesignProgram(BaseOptimizationProgram):
                 target_results_dir = design_results_dir / target_name
                 target_results_dir.mkdir(exist_ok=True)
 
-                for rank, (rep_id, net_id, loss_val) in enumerate(topk[tid], 1):
+                # Track valid designs (non-empty recipes) and skip empty ones
+                valid_rank = 0
+                empty_count = 0
+                for rep_id, net_id, loss_val in topk[tid]:
+                    # Stop when we have enough valid designs
+                    if valid_rank >= self.topk_n:
+                        break
+
                     assert 0 <= rep_id < n_replicates, (
                         f"rep_id {rep_id} out of bounds [0, {n_replicates}) "
-                        f"for target {tid} rank {rank}"
+                        f"for target {tid}"
                     )
                     assert 0 <= net_id < n_networks, (
                         f"net_id {net_id} out of bounds [0, {n_networks}) "
-                        f"for target {tid} rank {rank}"
+                        f"for target {tid}"
                     )
-
-                    network_name = self._dmanager.networks[net_id].name
-                    f.write(f"  Rank {rank}: Replicate {rep_id}, Network '{network_name}'\n")
-                    f.write(f"           Loss: {loss_val:.6f}\n")
 
                     bparams = tree_get(final_params, (rep_id, tid))
 
                     try:
-                        committed_networks = stack.commit(bparams)
-                        assert len(committed_networks) == n_networks, (
-                            f"commit returned {len(committed_networks)} networks, expected {n_networks}"
-                        )
+                        # Use pre-computed commit result (all pairs committed upfront)
+                        committed_networks = commit_cache[(rep_id, tid)]
                         cnet = committed_networks[net_id]
                         assert cnet is not None, f"committed network {net_id} is None"
 
                         recipe = cnet.to_recipe()
+
+                        # Skip empty recipes (all TUs were pruned)
+                        if not recipe.content:
+                            empty_count += 1
+                            network_name = self._dmanager.networks[net_id].name
+                            logger.warning(
+                                f"Skipping empty recipe for target '{target_name}' "
+                                f"(rep={rep_id}, net={net_id}, scaffold='{network_name}', "
+                                f"loss={loss_val:.6f}) - all TUs pruned after commit"
+                            )
+                            continue
+
+                        valid_rank += 1
+                        rank = valid_rank  # Use 1-indexed rank for output
+
+                        network_name = self._dmanager.networks[net_id].name
+                        f.write(f"  Rank {rank}: Replicate {rep_id}, Network '{network_name}'\n")
+                        f.write(f"           Loss: {loss_val:.6f}\n")
+
                         recipe_yaml = dracon.dump(recipe)
                         recipe_hash = pronounceable_hash48(recipe_yaml.encode('utf-8'))
                         recipe_metadata = {
@@ -628,8 +694,17 @@ class DesignProgram(BaseOptimizationProgram):
                         logger.debug(f"Saved design {target_name} rank {rank}: {recipe_hash}")
 
                     except Exception as e:
-                        logger.warning(f"Failed to save design {target_name} rank {rank}: {e}")
-                        f.write(f"           Recipe: Failed ({e})\n")
+                        logger.warning(
+                            f"Failed to process design for target '{target_name}' "
+                            f"(rep={rep_id}, net={net_id}): {e}"
+                        )
+
+                # Log summary of empty recipes for this target
+                if empty_count > 0:
+                    logger.info(
+                        f"Target '{target_name}': skipped {empty_count} empty recipes, "
+                        f"saved {valid_rank} valid designs"
+                    )
 
                 f.write("\n")
 
@@ -649,7 +724,7 @@ class DesignProgram(BaseOptimizationProgram):
             logger.info(f"Saved design results to {design_results_dir}")
 
     def _generate_design_diagnostic_plots(self, save_dir, design_results: list[dict]):
-        """Generate diagnostic plots using batched predictions to avoid JAX recompilation."""
+        """Generate diagnostic plots using batched evaluation."""
         from biocomptools.plot import PlotJob
         from biocomptools.toollib.figuremakers.designutils import DesignResult
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -657,76 +732,90 @@ class DesignProgram(BaseOptimizationProgram):
         n_results = len(design_results)
         logger.info(f"Generating diagnostic plots for {n_results} designs...")
 
+        # convert dicts to DesignInput objects
+        inputs = [
+            DesignInput(
+                network=r['network'],
+                target=r['target'],
+                target_name=r['target_name'],
+                rank=r['rank'],
+                replicate=r['replicate'],
+                scaffold_network_name=r['network_name'],
+                loss=r['loss'],
+                recipe_hash=r['recipe_hash'],
+                run_name=self._run_name,
+                design_dir=r['design_dir'],
+            )
+            for r in design_results
+        ]
+
+        # batch evaluate all designs
         evaluator = DesignEvaluator(self._model, max_evals=50000)
-        precomputed, baseline_cache = evaluator.precompute_for_design_results(design_results)
+        evaluated = evaluator.evaluate_designs(inputs)
 
-        # every design result should have a corresponding precomputed entry
-        assert len(precomputed) == n_results, (
-            f"precomputed count {len(precomputed)} != design_results count {n_results}"
-        )
+        n_valid = sum(1 for ev in evaluated if ev.is_valid)
+        if n_valid < n_results:
+            logger.warning(
+                f"Skipped {n_results - n_valid} design(s) with invalid network structure. "
+                f"Proceeding with {n_valid} valid designs."
+            )
 
-        def _generate_single_plot(r: dict) -> tuple[str, Exception | None]:
+        def _generate_single_plot(ev) -> tuple[str, Exception | None]:
             """Worker function to generate a single design plot."""
             try:
-                design_dir = Path(r['design_dir'])
-                net_key = id(r['network'])
-                lookup_key = (r['target_name'], net_key)
-                assert lookup_key in precomputed, (
-                    f"missing precomputed entry for {r['target_name']} rank {r['rank']}"
-                )
-                precomp = precomputed[lookup_key]
-                baseline_nre = None
-                if isinstance(r['target'], DataTarget) and r['target'].original_network is not None:
-                    baseline_nre = baseline_cache.get(id(r['target'].original_network))
+                if not ev.is_valid:
+                    return ev.input.recipe_hash, None
+
+                inp = ev.input
+                design_dir = Path(inp.design_dir)
 
                 result = DesignResult(
-                    network=r['network'],
-                    target=r['target'],
-                    target_name=r['target_name'],
-                    rank=r['rank'],
-                    replicate=r['replicate'],
-                    scaffold_network_name=r['network_name'],
-                    loss=r['loss'],
-                    recipe_hash=r['recipe_hash'],
-                    run_name=self._run_name,
+                    network=inp.network,
+                    target=inp.target,
+                    target_name=inp.target_name,
+                    rank=inp.rank,
+                    replicate=inp.replicate,
+                    scaffold_network_name=inp.scaffold_network_name,
+                    loss=inp.loss,
+                    recipe_hash=inp.recipe_hash,
+                    run_name=inp.run_name,
                     model=self._model,
-                    _pred_data=precomp.get('pred_data'),
-                    _design_nre_value=precomp.get('design_nre'),
-                    _baseline_nre_value=baseline_nre,
+                    gt_data=ev.gt_data,
+                    pred_data=ev.pred_data,
+                    lattice_data=ev.lattice_data,
+                    lattice_grid=ev.lattice_grid,
+                    lattice_extent=ev.lattice_extent,
+                    lattice_resolution=ev.lattice_resolution,
+                    design_nre=ev.design_nre,
+                    baseline_nre=ev.baseline_nre,
                 )
 
                 if is_design_debug_enabled():
-                    target = r['target']
-                    network = r['network']
-                    pred_data = precomp.get('pred_data')
                     save_debug_state(
-                        f"design_result_rank{r['rank']}",
+                        f"design_result_rank{inp.rank}",
                         {
-                            'target_X': getattr(target, 'X', None),
-                            'target_Y': getattr(target, 'Y', None),
-                            'pred_X': pred_data.xval if pred_data else None,
-                            'pred_Y': pred_data.yval if pred_data else None,
+                            'target_X': getattr(inp.target, 'X', None),
+                            'target_Y': getattr(inp.target, 'Y', None),
+                            'pred_X': ev.pred_data.xval,
+                            'pred_Y': ev.pred_data.yval,
                         },
                         {
-                            'target_name': r['target_name'],
-                            'rank': r['rank'],
-                            'replicate': r['replicate'],
-                            'loss': r['loss'],
-                            'recipe_hash': r['recipe_hash'],
-                            'target_input_names': getattr(target, 'input_names', None),
-                            'network_name': getattr(network, 'name', None),
-                            'network_inputs': (
-                                network.get_inverted_input_proteins()
-                                if hasattr(network, 'get_inverted_input_proteins')
-                                else None
-                            ),
+                            'target_name': inp.target_name,
+                            'rank': inp.rank,
+                            'replicate': inp.replicate,
+                            'loss': inp.loss,
+                            'recipe_hash': inp.recipe_hash,
+                            'target_input_names': getattr(inp.target, 'input_names', None),
+                            'network_name': getattr(inp.network, 'name', None),
+                            'network_inputs': _safe_get_input_proteins(inp.network),
                             'original_network_inputs': (
-                                target.original_network.get_inverted_input_proteins()
-                                if hasattr(target, 'original_network') and target.original_network
+                                _safe_get_input_proteins(inp.target.original_network)
+                                if hasattr(inp.target, 'original_network')
+                                and inp.target.original_network
                                 else None
                             ),
-                            'design_nre': precomp.get('design_nre'),
-                            'baseline_nre': baseline_nre,
+                            'design_nre': ev.design_nre,
+                            'baseline_nre': ev.baseline_nre,
                         },
                         output_dir=str(design_dir),
                         mode="design",
@@ -737,15 +826,15 @@ class DesignProgram(BaseOptimizationProgram):
                     result=result,
                     output_dir=str(design_dir),
                 )
-                return r['recipe_hash'], None
+                return inp.recipe_hash, None
             except Exception as e:
-                return r.get('recipe_hash', '?'), e
+                return ev.input.recipe_hash, e
 
-        max_workers = min(8, len(design_results))
+        max_workers = min(8, len(evaluated))
         completed, failed = 0, 0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_generate_single_plot, r): r for r in design_results}
+            futures = {executor.submit(_generate_single_plot, ev): ev for ev in evaluated}
             for future in as_completed(futures):
                 recipe_hash, error = future.result()
                 if error is None:
