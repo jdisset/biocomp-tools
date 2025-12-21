@@ -24,8 +24,8 @@ logger = get_logger(__name__)
     context_types=[Recipe, FigureSpec, GeneticCircuitFigure, NetworkDiagramFigure],
 )
 class CircuitPlotConfig(BaseModel):
-    recipe: Optional[Recipe] = Field(default=None, description="Recipe object (from dracon yaml)")
-    recipe_file: Annotated[Optional[str], Arg(short="r", help="Path to recipe file (json5)")] = None
+    recipe: Optional[Recipe] = Field(default=None, description="Recipe object")
+    recipe_file: Annotated[Optional[str], Arg(short="r", help="Path to recipe file (json5 or yaml)")] = None
     output: Annotated[str, Arg(short="o", help="Output file path")] = "circuit.pdf"
     plot_type: Annotated[Literal["circuit", "diagram", "card", "all"], Arg(short="t", help="Type of plot: circuit (genetic), diagram (network), card, or all")] = "circuit"
     simplified: Annotated[bool, Arg(help="Hide inverse chains in diagram")] = True

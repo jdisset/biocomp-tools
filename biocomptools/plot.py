@@ -18,6 +18,7 @@ from dracon.commandline import Arg, dracon_program
 from dracon.deferred import DeferredNode
 
 from biocomp.utils import PartialFunction
+import biocomp
 from biocomp.datautils import DataRescaler
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout, MergeSpec
 from biocomptools.toollib.datasources import DataSource, DBSource
@@ -257,6 +258,7 @@ DEFAULT_TYPES = [
     histogram,
     histogram2d,
     digitize,
+    biocomp
 ]
 
 
@@ -386,9 +388,9 @@ class PlotJob(BaseModel):
                     )
                 ]
 
-                for fig in constructed_figures:
-                    convert_jax_to_numpy_inplace(fig)
-                    detach_lazy_plot_data(fig)
+                # for fig in constructed_figures:
+                    # _detach_lazy_plot_data(fig)
+                    # _convert_jax_to_numpy_inplace(fig)
 
                 # try parallel execution with fallback to sequential if pickling fails
                 parallel_figs, sequential_figs, sequential_indices = [], [], []
