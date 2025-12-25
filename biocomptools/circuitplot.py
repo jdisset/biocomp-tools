@@ -11,8 +11,14 @@ from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, PartsLibrary
 from biocomp.plotutils import FigureSpec
 
-from biocomptools.toollib.figuremakers.geneticcircuit import GeneticCircuitFigure
-from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagramFigure
+from biocomptools.toollib.figuremakers.geneticcircuit import (
+    GeneticCircuitFigure,
+    render_circuit_to_ax,
+)
+from biocomptools.toollib.figuremakers.networkdiagram import (
+    NetworkDiagramFigure,
+    render_diagram_to_ax,
+)
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -25,9 +31,14 @@ logger = get_logger(__name__)
 )
 class CircuitPlotConfig(BaseModel):
     recipe: Optional[Recipe] = Field(default=None, description="Recipe object")
-    recipe_file: Annotated[Optional[str], Arg(short="r", help="Path to recipe file (json5 or yaml)")] = None
+    recipe_file: Annotated[
+        Optional[str], Arg(short="r", help="Path to recipe file (json5 or yaml)")
+    ] = None
     output: Annotated[str, Arg(short="o", help="Output file path")] = "circuit.pdf"
-    plot_type: Annotated[Literal["circuit", "diagram", "card", "all"], Arg(short="t", help="Type of plot: circuit (genetic), diagram (network), card, or all")] = "circuit"
+    plot_type: Annotated[
+        Literal["circuit", "diagram", "card", "all"],
+        Arg(short="t", help="Type of plot: circuit (genetic), diagram (network), card, or all"),
+    ] = "circuit"
     simplified: Annotated[bool, Arg(help="Hide inverse chains in diagram")] = True
     hide_marker_tus: Annotated[bool, Arg(help="Hide marker TUs in circuit")] = True
     show_recipe: Annotated[bool, Arg(help="Show recipe JSON in card view")] = False
@@ -74,6 +85,7 @@ def ensure_library():
     lib = LibraryContext.get_library()
     if lib is None:
         from biocomptools.toollib.common import config as bconfig
+
         lib = PartsLibrary.from_file(bconfig.paths.parts_library)
         LibraryContext.set_library(lib)
     return lib
@@ -92,28 +104,37 @@ def run_circuitplot(config: CircuitPlotConfig):
     output.parent.mkdir(parents=True, exist_ok=True)
 
     fig_spec = FigureSpec(
-        output_dir=str(output.parent), output_file=output.name,
-        extra_args={"figsize": config.figsize, "dpi": config.dpi}
+        output_dir=str(output.parent),
+        output_file=output.name,
+        extra_args={"figsize": config.figsize, "dpi": config.dpi},
     )
 
     if config.plot_type == "circuit":
         figure = GeneticCircuitFigure(
-            figure_spec=fig_spec, network=network,
-            hide_marker_tus=config.hide_marker_tus, style_overrides=config.style,
+            figure_spec=fig_spec,
+            network=network,
+            hide_marker_tus=config.hide_marker_tus,
+            style_overrides=config.style,
         )
         figure.run()
 
     elif config.plot_type == "diagram":
         figure = NetworkDiagramFigure(
-            figure_spec=fig_spec, network=network,
-            simplified=config.simplified, style_overrides=config.style,
+            figure_spec=fig_spec,
+            network=network,
+            simplified=config.simplified,
+            style_overrides=config.style,
         )
         figure.run()
 
     elif config.plot_type == "all":
         fig, axes = plt.subplots(1, 2, figsize=(config.figsize[0] * 2, config.figsize[1]))
-        _render_diagram(network, axes[0], config)
-        _render_circuit(network, axes[1], config)
+        render_diagram_to_ax(
+            network, axes[0], simplified=config.simplified, style_overrides=config.style
+        )
+        render_circuit_to_ax(
+            network, axes[1], hide_marker_tus=config.hide_marker_tus, style_overrides=config.style
+        )
         axes[0].set_title("Network Diagram")
         axes[1].set_title("Genetic Circuit")
         fig.savefig(output, dpi=config.dpi, bbox_inches="tight", pad_inches=0.1)
@@ -129,51 +150,18 @@ def run_circuitplot(config: CircuitPlotConfig):
     return str(output)
 
 
-def _render_circuit(network, ax, config: CircuitPlotConfig):
-    from jeanplot.network_schematic_v2 import NetworkGeneticSchematicV2
-    from jeanplot.container import Container
-    from jeanplot.models import LayoutConstraints
-    from jeanplot.matplotlib_renderer import MatplotlibRenderer
-    from jeanplot.style import jstyle
-
-    if config.style:
-        jstyle.update(config.style)
-
-    schematic = NetworkGeneticSchematicV2(network=network, hide_marker_tus=config.hide_marker_tus)
-    root = Container(children=[schematic], layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"))
-    jstyle.apply(root)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_facecolor("none")
-    MatplotlibRenderer().render_component(ax, root, adjust_lims=True)
-
-
-def _render_diagram(network, ax, config: CircuitPlotConfig):
-    from jeanplot.network_diagram_v2 import NetworkDiagramV2
-    from jeanplot.container import Container
-    from jeanplot.models import LayoutConstraints
-    from jeanplot.matplotlib_renderer import MatplotlibRenderer
-    from jeanplot.style import jstyle
-
-    if config.style:
-        jstyle.update(config.style)
-
-    diagram = NetworkDiagramV2(network=network, simplified=config.simplified)
-    root = Container(children=[diagram], layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"))
-    jstyle.apply(root)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    MatplotlibRenderer().render_component(ax, root, adjust_lims=True)
-
-
 def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
-    from jeanplot.network_diagram_v2 import NetworkDiagramV2
-    from jeanplot.network_schematic_v2 import NetworkGeneticSchematicV2
-    from jeanplot.container import Container
-    from jeanplot.text import Text
-    from jeanplot.models import LayoutConstraints, BoxStyle, Shadow
-    from jeanplot.matplotlib_renderer import MatplotlibRenderer
-    from jeanplot.style import jstyle
+    from jeanplot import (
+        Container,
+        Text,
+        LayoutConstraints,
+        BoxStyle,
+        Shadow,
+        MatplotlibRenderer,
+        jstyle,
+    )
+    from jeanplot._deprecated.network_diagram_v2 import NetworkDiagramV2
+    from jeanplot._deprecated.network_schematic_v2 import NetworkGeneticSchematicV2
 
     if config.style:
         jstyle.update(config.style)
@@ -182,15 +170,27 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
     schematic = NetworkGeneticSchematicV2(network=network, hide_marker_tus=config.hide_marker_tus)
 
     info_title = Container(
-        children=[Text(text=network.name or "Network", font_size=8, color="#333", style_class=["info_title"], vertical_align="middle")],
+        children=[
+            Text(
+                text=network.name or "Network",
+                font_size=8,
+                color="#333",
+                style_class=["info_title"],
+                vertical_align="middle",
+            )
+        ],
         style_class=["info_title_box"],
-        layout=LayoutConstraints(direction="column", gap=5, justify_content="center", align_items="center"),
+        layout=LayoutConstraints(
+            direction="column", gap=5, justify_content="center", align_items="center"
+        ),
         style=BoxStyle(padding=(5, 5, 5, 5), corner_radius=3),
     )
 
     maincard = Container(
         children=[diagram, schematic],
-        layout=LayoutConstraints(direction="column", gap=40, justify_content="space-around", align_items="center"),
+        layout=LayoutConstraints(
+            direction="column", gap=40, justify_content="space-around", align_items="center"
+        ),
         style_class=["maincard"],
         style=BoxStyle(padding=(20, 20, 20, 20)),
     )
@@ -200,25 +200,59 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
         recipe_text = recipe.model_dump_json(indent=2)
         recipebox = Container(
             children=[
-                Text(text=recipe_text, font_size=5, color="#787471", style_class=["info_box"], vertical_align="middle"),
-                Text(text="Recipe", font_size=8, color="#787471", style_class=["info_title"], vertical_align="middle"),
+                Text(
+                    text=recipe_text,
+                    font_size=5,
+                    color="#787471",
+                    style_class=["info_box"],
+                    vertical_align="middle",
+                ),
+                Text(
+                    text="Recipe",
+                    font_size=8,
+                    color="#787471",
+                    style_class=["info_title"],
+                    vertical_align="middle",
+                ),
             ],
-            layout=LayoutConstraints(direction="column", gap=10, justify_content="center", align_items="center"),
+            layout=LayoutConstraints(
+                direction="column", gap=10, justify_content="center", align_items="center"
+            ),
             style_class=["recipebox"],
-            style=BoxStyle(padding=(30, 50, 30, 30), background_color="#FEF9F2", corner_radius=3, border_color="#555", border_width=0.25),
+            style=BoxStyle(
+                padding=(30, 50, 30, 30),
+                background_color="#FEF9F2",
+                corner_radius=3,
+                border_color="#555",
+                border_width=0.25,
+            ),
         )
         body_children = [recipebox] + body_children
 
     body = Container(
         children=body_children,
-        layout=LayoutConstraints(direction="row", gap=30 if config.show_recipe else 0, justify_content="start" if config.show_recipe else "center", align_items="stretch"),
+        layout=LayoutConstraints(
+            direction="row",
+            gap=30 if config.show_recipe else 0,
+            justify_content="start" if config.show_recipe else "center",
+            align_items="stretch",
+        ),
         z_index=-100,
-        style=BoxStyle(padding=(10, 10, 10, 10), corner_radius=3, background_color="#fff", border_color="#222", border_width=0.25, shadow=Shadow(color="#aaa4", blur_radius=25)),
+        style=BoxStyle(
+            padding=(10, 10, 10, 10),
+            corner_radius=3,
+            background_color="#fff",
+            border_color="#222",
+            border_width=0.25,
+            shadow=Shadow(color="#aaa4", blur_radius=25),
+        ),
     )
 
     root = Container(
         children=[body, info_title],
-        layout=LayoutConstraints(direction="column", gap=10, justify_content="center", align_items="stretch"),
+        layout=LayoutConstraints(
+            direction="column", gap=10, justify_content="center", align_items="stretch"
+        ),
     )
 
     jstyle.apply(root)

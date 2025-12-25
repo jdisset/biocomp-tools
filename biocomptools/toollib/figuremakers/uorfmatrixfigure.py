@@ -2,15 +2,14 @@ import matplotlib as mpl
 from dracon.draconstructor import resolve_all_lazy
 from typing import TypeVar, Union
 from collections import defaultdict
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Tuple
 from biocomp.utils import PartialFunction
 from biocomp.plotutils import GridLayout
 from biocomptools.toollib.plot import PlotTask, PlotConfig, Figure, load_default_plotconf
 from biocomp.plotutils import PlotData
 from biocomptools.logging_config import get_logger
-from biocomptools.toollib.datasources import DataSource
 from matplotlib.lines import Line2D
-from pydantic import BaseModel, Field, BeforeValidator
+from pydantic import BaseModel, Field
 import numpy as np
 
 logger = get_logger(__name__)
@@ -573,7 +572,7 @@ class UORFMatrixFigure(Figure):
 
 def bundle_uorf_data(
     plot_data: List[PlotData],
-    uorf_values: List[float] = [0, 5, 10, 20, 30, 40, 50, 60, 80],
+    uorf_values: List[float] | None = None,
     same_xp: bool = False,
 ) -> List[List[PlotData]]:
     """
@@ -588,7 +587,8 @@ def bundle_uorf_data(
     Returns:
         List of PlotData bundles, where each bundle can be used to create a uORF matrix figure
     """
-    # Convert uorf_values to set for faster lookup
+    if uorf_values is None:
+        uorf_values = [0, 5, 10, 20, 30, 40, 50, 60, 80]
     required_values = set(uorf_values)
 
     # Group data by experiment if needed

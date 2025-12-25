@@ -40,6 +40,7 @@ class BenchmarkItem:
 
 class BenchmarkData(BaseModel):
     """Benchmark computation for a model on a dataset."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     model_path: Optional[str] = None
@@ -65,8 +66,14 @@ class BenchmarkData(BaseModel):
         from biocomptools.toollib.networkprediction import NetworkPrediction
         from biocomptools.toollib.datasources import DBSource
         from biocomptools.toollib.networkselector import (
-            NetworkSet, NetworkSetUnion, NetworkSetDifference, NetworkSetIntersection,
-            CleanupFilter, NetworkFilter, Regex, iRegex,
+            NetworkSet,
+            NetworkSetUnion,
+            NetworkSetDifference,
+            NetworkSetIntersection,
+            CleanupFilter,
+            NetworkFilter,
+            Regex,
+            iRegex,
         )
         from dracon import load
 
@@ -77,16 +84,27 @@ class BenchmarkData(BaseModel):
         else:
             self._model = BiocompModel.load(self.model_path)
 
-        self._dataset_name = self.dataset_file.split('/')[-1].rsplit('.', 1)[0] if self.dataset_file else "unknown"
+        self._dataset_name = (
+            self.dataset_file.split('/')[-1].rsplit('.', 1)[0] if self.dataset_file else "unknown"
+        )
 
         ctx = {
-            'NetworkSet': NetworkSet, 'NetworkSetUnion': NetworkSetUnion,
-            'NetworkSetDifference': NetworkSetDifference, 'NetworkSetIntersection': NetworkSetIntersection,
-            'CleanupFilter': CleanupFilter, 'NetworkFilter': NetworkFilter,
-            'Regex': Regex, 'iRegex': iRegex, 'DBSource': DBSource,
+            'NetworkSet': NetworkSet,
+            'NetworkSetUnion': NetworkSetUnion,
+            'NetworkSetDifference': NetworkSetDifference,
+            'NetworkSetIntersection': NetworkSetIntersection,
+            'CleanupFilter': CleanupFilter,
+            'NetworkFilter': NetworkFilter,
+            'Regex': Regex,
+            'iRegex': iRegex,
+            'DBSource': DBSource,
         }
         dataset = load(self.dataset_file, context=ctx)
-        ground_truth = dataset.get_data() if hasattr(dataset, 'get_data') else DBSource(content=dataset).get_data()
+        ground_truth = (
+            dataset.get_data()
+            if hasattr(dataset, 'get_data')
+            else DBSource(content=dataset).get_data()
+        )
 
         max_n = int(self.max_items) if self.max_items else None
         items_to_plot = ground_truth[:max_n] if max_n else ground_truth
@@ -108,13 +126,17 @@ class BenchmarkData(BaseModel):
         network_stats = predictor.get_network_stats()
 
         training_content = self._model.metadata.get('training_set', {}).get('content', [])
-        training_names = {item.get('network_name', '') for item in training_content if isinstance(item, dict)}
+        training_names = {
+            item.get('network_name', '') for item in training_content if isinstance(item, dict)
+        }
 
         self._items = []
         all_nrmses = []
         all_snrs = []
         all_nres = []
-        for i, (gt, pred, stats) in enumerate(zip(items_to_plot, prediction_data, network_stats, strict=True)):
+        for i, (gt, pred, stats) in enumerate(
+            zip(items_to_plot, prediction_data, network_stats, strict=True)
+        ):
             net_name = gt.metadata.get('network_name', f'Item_{i}')
             rmse = stats.get('grid_rmse') or stats.get('rmse')
             nrmse = stats.get('grid_nrmse')
@@ -141,13 +163,21 @@ class BenchmarkData(BaseModel):
             else:
                 gt_truncated = gt
 
-            self._items.append(BenchmarkItem(
-                idx=i, gt_data=gt_truncated, pred_data=pred,
-                network=gt.metadata.get('built_network'),
-                network_name=net_name, rmse=rmse, nrmse=nrmse, snr=snr,
-                in_training=net_name in training_names,
-                data_nrmse=data_nrmse, nre=nre,
-            ))
+            self._items.append(
+                BenchmarkItem(
+                    idx=i,
+                    gt_data=gt_truncated,
+                    pred_data=pred,
+                    network=gt.metadata.get('built_network'),
+                    network_name=net_name,
+                    rmse=rmse,
+                    nrmse=nrmse,
+                    snr=snr,
+                    in_training=net_name in training_names,
+                    data_nrmse=data_nrmse,
+                    nre=nre,
+                )
+            )
 
         if all_nrmses:
             arr = np.array(all_nrmses)
@@ -157,7 +187,9 @@ class BenchmarkData(BaseModel):
             self._aggregate_stats = {
                 'mean_nrmse': float(np.mean(arr)),
                 'geomean_nrmse': float(gmean(positive)) if len(positive) > 0 else None,
-                'softmax_nrmse': float(max_val + (1/alpha) * np.log(np.sum(np.exp(alpha * (arr - max_val))))),
+                'softmax_nrmse': float(
+                    max_val + (1 / alpha) * np.log(np.sum(np.exp(alpha * (arr - max_val))))
+                ),
             }
         if all_snrs:
             self._aggregate_stats['mean_snr'] = float(np.mean(all_snrs))
@@ -165,7 +197,7 @@ class BenchmarkData(BaseModel):
             arr_nre = np.array(all_nres)
             self._aggregate_stats['mean_nre'] = float(np.mean(arr_nre))
             self._aggregate_stats['geomean_nre'] = float(gmean(arr_nre))
-            self._aggregate_stats['powermean_nre'] = float(np.sqrt(np.mean(arr_nre ** 2)))
+            self._aggregate_stats['powermean_nre'] = float(np.sqrt(np.mean(arr_nre**2)))
 
     @property
     def loaded_model(self):
@@ -193,7 +225,9 @@ class BenchmarkData(BaseModel):
 
     @property
     def all_nrmses(self) -> list[float]:
-        return [item.nrmse for item in self._items if item.nrmse is not None and np.isfinite(item.nrmse)]
+        return [
+            item.nrmse for item in self._items if item.nrmse is not None and np.isfinite(item.nrmse)
+        ]
 
     @property
     def mean_rmse(self) -> Optional[float]:
@@ -234,7 +268,11 @@ class BenchmarkData(BaseModel):
 
     @property
     def all_nres(self) -> list[float]:
-        return [item.nre for item in self._items if item.nre is not None and np.isfinite(item.nre) and item.nre > 0]
+        return [
+            item.nre
+            for item in self._items
+            if item.nre is not None and np.isfinite(item.nre) and item.nre > 0
+        ]
 
     @property
     def mean_nre(self) -> Optional[float]:
@@ -259,24 +297,66 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
         f"Benchmark: {bench.dataset_name}",
         f"N items: {bench.n_items}",
     ]
-    ax.text(0.02, 0.95, '\n'.join(info_lines), transform=ax.transAxes,
-            fontsize=10, va='top', ha='left', family='monospace',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
+    ax.text(
+        0.02,
+        0.95,
+        '\n'.join(info_lines),
+        transform=ax.transAxes,
+        fontsize=10,
+        va='top',
+        ha='left',
+        family='monospace',
+        bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8),
+    )
 
     # Main metrics display - NRE as primary metric (falls back to nRMSE if unavailable)
     y_pos = 0.75
     if bench.powermean_nre is not None:
         color = GOOD_COLOR if bench.powermean_nre < NRE_THRESHOLD else BAD_COLOR
-        ax.text(0.32, y_pos, f"{bench.powermean_nre:.2f}x", transform=ax.transAxes,
-                fontsize=28, va='center', ha='center', fontweight='bold', color=color)
-        ax.text(0.32, y_pos - 0.12, "RMS NRE (p=2)", transform=ax.transAxes,
-                fontsize=10, va='center', ha='center', color='gray')
+        ax.text(
+            0.32,
+            y_pos,
+            f"{bench.powermean_nre:.2f}x",
+            transform=ax.transAxes,
+            fontsize=28,
+            va='center',
+            ha='center',
+            fontweight='bold',
+            color=color,
+        )
+        ax.text(
+            0.32,
+            y_pos - 0.12,
+            "RMS NRE (p=2)",
+            transform=ax.transAxes,
+            fontsize=10,
+            va='center',
+            ha='center',
+            color='gray',
+        )
     elif bench.geomean_nrmse is not None:
         color = GOOD_COLOR if bench.geomean_nrmse < NRMSE_THRESHOLD else BAD_COLOR
-        ax.text(0.32, y_pos, f"{bench.geomean_nrmse:.3f}", transform=ax.transAxes,
-                fontsize=28, va='center', ha='center', fontweight='bold', color=color)
-        ax.text(0.32, y_pos - 0.12, "Geomean nRMSE", transform=ax.transAxes,
-                fontsize=10, va='center', ha='center', color='gray')
+        ax.text(
+            0.32,
+            y_pos,
+            f"{bench.geomean_nrmse:.3f}",
+            transform=ax.transAxes,
+            fontsize=28,
+            va='center',
+            ha='center',
+            fontweight='bold',
+            color=color,
+        )
+        ax.text(
+            0.32,
+            y_pos - 0.12,
+            "Geomean nRMSE",
+            transform=ax.transAxes,
+            fontsize=10,
+            va='center',
+            ha='center',
+            color='gray',
+        )
 
     # Secondary stats
     stats_parts = []
@@ -285,15 +365,41 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
     if bench.mean_snr is not None:
         stats_parts.append(f"SNR={bench.mean_snr:.1f}dB")
     if stats_parts:
-        ax.text(0.32, 0.38, "  ".join(stats_parts), transform=ax.transAxes,
-                fontsize=9, va='center', ha='center', family='monospace', color='#555')
+        ax.text(
+            0.32,
+            0.38,
+            "  ".join(stats_parts),
+            transform=ax.transAxes,
+            fontsize=9,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#555',
+        )
 
     if bench.mean_rmse is not None:
-        ax.text(0.32, 0.25, f"RMSE={bench.mean_rmse:.4f}", transform=ax.transAxes,
-                fontsize=9, va='center', ha='center', family='monospace', color='#555')
+        ax.text(
+            0.32,
+            0.25,
+            f"RMSE={bench.mean_rmse:.4f}",
+            transform=ax.transAxes,
+            fontsize=9,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#555',
+        )
 
-    ax.text(0.32, 0.12, "NRE: 1.0=perfect (noise floor), lower=better", transform=ax.transAxes,
-            fontsize=8, va='center', ha='center', color='gray')
+    ax.text(
+        0.32,
+        0.12,
+        "NRE: 1.0=perfect (noise floor), lower=better",
+        transform=ax.transAxes,
+        fontsize=8,
+        va='center',
+        ha='center',
+        color='gray',
+    )
 
     # Bar plot - use NRE if available, otherwise nRMSE
     bar_data = bench.all_nres if bench.all_nres else bench.all_nrmses
@@ -305,26 +411,42 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
         y_pos = np.arange(len(bar_data))
         inset.barh(y_pos, bar_data, color=colors, edgecolor='#666', linewidth=0.5)
         inset.set_yticks(y_pos)
-        inset.set_yticklabels(bench.network_names[:len(bar_data)], fontsize=7)
+        inset.set_yticklabels(bench.network_names[: len(bar_data)], fontsize=7)
         inset.set_xlabel(bar_label, fontsize=9)
         inset.axvline(x=bar_threshold, color=GOOD_COLOR, linestyle='--', alpha=0.7, linewidth=1)
         inset.set_xlim(0, max(bar_data) * 1.1 if bar_data else 1)
         inset.invert_yaxis()
         inset.spines['top'].set_visible(False)
         inset.spines['right'].set_visible(False)
-        inset.legend(handles=[
-            Patch(facecolor=IN_TRAINING_COLOR, edgecolor='#666', label='In training'),
-            Patch(facecolor=NOT_IN_TRAINING_COLOR, edgecolor='#666', label='Not in training'),
-        ], loc='lower right', fontsize=7)
+        inset.legend(
+            handles=[
+                Patch(facecolor=IN_TRAINING_COLOR, edgecolor='#666', label='In training'),
+                Patch(facecolor=NOT_IN_TRAINING_COLOR, edgecolor='#666', label='Not in training'),
+            ],
+            loc='lower right',
+            fontsize=7,
+        )
 
 
-def render_metrics_panel(ax: matplotlib.axes.Axes, item: BenchmarkItem, bench: 'BenchmarkData' = None, **_kwargs):
+def render_metrics_panel(
+    ax: matplotlib.axes.Axes, item: BenchmarkItem, bench: 'BenchmarkData' = None, **_kwargs
+):
     """Render metrics panel for a single benchmark item."""
     ax.axis('off')
 
-    ax.add_patch(FancyBboxPatch(
-        (0, 0), 1, 1, transform=ax.transAxes, boxstyle="round,pad=0.02",
-        facecolor=NOT_IN_TRAINING_COLOR, edgecolor='#ccc', linewidth=1, clip_on=False))
+    ax.add_patch(
+        FancyBboxPatch(
+            (0, 0),
+            1,
+            1,
+            transform=ax.transAxes,
+            boxstyle="round,pad=0.02",
+            facecolor=NOT_IN_TRAINING_COLOR,
+            edgecolor='#ccc',
+            linewidth=1,
+            clip_on=False,
+        )
+    )
 
     # Get average NRE for comparison (use powermean if available)
     avg_nre = bench.powermean_nre if bench else None
@@ -332,43 +454,125 @@ def render_metrics_panel(ax: matplotlib.axes.Axes, item: BenchmarkItem, bench: '
 
     # NRE as primary metric if available, otherwise nRMSE
     if item.nre is not None and np.isfinite(item.nre):
-        ncolor = GOOD_COLOR if (avg_nre and item.nre < avg_nre) else (BAD_COLOR if avg_nre else '#333')
-        ax.text(0.5, 0.78, f"{item.nre:.2f}x", transform=ax.transAxes,
-                fontsize=18, va='center', ha='center', fontweight='bold', color=ncolor)
-        ax.text(0.5, 0.65, "NRE", transform=ax.transAxes,
-                fontsize=7, va='center', ha='center', color='gray')
+        ncolor = (
+            GOOD_COLOR if (avg_nre and item.nre < avg_nre) else (BAD_COLOR if avg_nre else '#333')
+        )
+        ax.text(
+            0.5,
+            0.78,
+            f"{item.nre:.2f}x",
+            transform=ax.transAxes,
+            fontsize=18,
+            va='center',
+            ha='center',
+            fontweight='bold',
+            color=ncolor,
+        )
+        ax.text(
+            0.5,
+            0.65,
+            "NRE",
+            transform=ax.transAxes,
+            fontsize=7,
+            va='center',
+            ha='center',
+            color='gray',
+        )
     elif item.nrmse is not None:
-        ncolor = GOOD_COLOR if (avg_nrmse and item.nrmse < avg_nrmse) else (BAD_COLOR if avg_nrmse else '#333')
-        ax.text(0.5, 0.78, f"{item.nrmse:.3f}", transform=ax.transAxes,
-                fontsize=18, va='center', ha='center', fontweight='bold', color=ncolor)
-        ax.text(0.5, 0.65, "nRMSE", transform=ax.transAxes,
-                fontsize=7, va='center', ha='center', color='gray')
+        ncolor = (
+            GOOD_COLOR
+            if (avg_nrmse and item.nrmse < avg_nrmse)
+            else (BAD_COLOR if avg_nrmse else '#333')
+        )
+        ax.text(
+            0.5,
+            0.78,
+            f"{item.nrmse:.3f}",
+            transform=ax.transAxes,
+            fontsize=18,
+            va='center',
+            ha='center',
+            fontweight='bold',
+            color=ncolor,
+        )
+        ax.text(
+            0.5,
+            0.65,
+            "nRMSE",
+            transform=ax.transAxes,
+            fontsize=7,
+            va='center',
+            ha='center',
+            color='gray',
+        )
 
     # Secondary metrics
     y_offset = 0.50
     if item.nrmse is not None:
-        ax.text(0.5, y_offset, f"nRMSE={item.nrmse:.3f}", transform=ax.transAxes,
-                fontsize=8, va='center', ha='center', family='monospace', color='#555')
+        ax.text(
+            0.5,
+            y_offset,
+            f"nRMSE={item.nrmse:.3f}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#555',
+        )
         y_offset -= 0.12
 
     if item.data_nrmse is not None and np.isfinite(item.data_nrmse):
-        ax.text(0.5, y_offset, f"floor={item.data_nrmse:.3f}", transform=ax.transAxes,
-                fontsize=8, va='center', ha='center', family='monospace', color='#888')
+        ax.text(
+            0.5,
+            y_offset,
+            f"floor={item.data_nrmse:.3f}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#888',
+        )
         y_offset -= 0.12
 
     if item.snr is not None:
-        ax.text(0.5, y_offset, f"SNR={item.snr:.1f}dB", transform=ax.transAxes,
-                fontsize=8, va='center', ha='center', family='monospace', color='#555')
+        ax.text(
+            0.5,
+            y_offset,
+            f"SNR={item.snr:.1f}dB",
+            transform=ax.transAxes,
+            fontsize=8,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#555',
+        )
         y_offset -= 0.12
 
     # Dimensionality
     ndim = item.gt_data.x.shape[1] if item.gt_data and item.gt_data.x is not None else None
     if ndim is not None:
-        ax.text(0.5, y_offset, f"{ndim}D", transform=ax.transAxes,
-                fontsize=8, va='center', ha='center', family='monospace', color='#555')
+        ax.text(
+            0.5,
+            y_offset,
+            f"{ndim}D",
+            transform=ax.transAxes,
+            fontsize=8,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#555',
+        )
 
     status = "In training" if item.in_training else "Not in training"
-    ax.text(0.5, 0.08, status, transform=ax.transAxes,
-            fontsize=8, va='center', ha='center', style='italic')
-
-
+    ax.text(
+        0.5,
+        0.08,
+        status,
+        transform=ax.transAxes,
+        fontsize=8,
+        va='center',
+        ha='center',
+        style='italic',
+    )

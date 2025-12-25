@@ -1,6 +1,6 @@
-"""Genetic circuit figure for biocomp networks"""
+"""Genetic circuit figure for biocomp networks using jeanplot."""
 
-from typing import Optional, Any, Tuple, Literal
+from typing import Optional, Any, Literal
 from pydantic import Field
 import matplotlib.pyplot as plt
 import matplotlib.axes
@@ -15,52 +15,43 @@ def render_circuit_to_ax(
     network: Any,
     ax: matplotlib.axes.Axes,
     hide_marker_tus: bool = True,
-    grid_gap: Tuple[float, float] = (40.0, 20.0),
+    grid_gap: tuple[float, float] = (40.0, 20.0),
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal",
     style_overrides: Optional[dict] = None,
     title: Optional[str] = None,
-    **_kwargs,  # absorb extra kwargs from PlotConfig
+    **_kwargs,
 ):
     """Render a genetic circuit schematic to an existing matplotlib axes."""
-    from jeanplot.network_schematic_v2 import NetworkGeneticSchematicV2
-    from jeanplot.container import Container
-    from jeanplot.models import LayoutConstraints
-    from jeanplot.matplotlib_renderer import MatplotlibRenderer
-    from jeanplot.style import jstyle
+    from jeanplot.gene import GeneticSchematic
+    from jeanplot import MatplotlibRenderer, jstyle
 
     if style_overrides:
         jstyle.update(style_overrides)
 
-    schematic = NetworkGeneticSchematicV2(
-        network=network,
-        hide_marker_tus=hide_marker_tus,
+    circuit_data = network.to_circuit_data(hide_markers=hide_marker_tus)
+    schematic = GeneticSchematic.from_circuit(
+        circuit_data,
         grid_gap=grid_gap,
         connection_style=connection_style,
     )
-
-    root = Container(
-        children=[schematic],
-        layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
-    )
-    jstyle.apply(root)
 
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_facecolor("none")
 
     renderer = MatplotlibRenderer()
-    renderer.render_component(ax, root, adjust_lims=True)
+    renderer.render_component(ax, schematic, adjust_lims=True)
 
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")
 
 
 class GeneticCircuitFigure(Figure):
-    """Figure that renders a genetic circuit schematic using jeanplot"""
+    """Figure that renders a genetic circuit schematic using jeanplot."""
 
     network: Any = Field(description="biocomp Network object")
     hide_marker_tus: bool = True
-    grid_gap: Tuple[float, float] = (40.0, 20.0)
+    grid_gap: tuple[float, float] = (40.0, 20.0)
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal"
     style_overrides: Optional[dict] = None
 
@@ -69,38 +60,18 @@ class GeneticCircuitFigure(Figure):
             logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
             return
 
-        from jeanplot.network_schematic_v2 import NetworkGeneticSchematicV2
-        from jeanplot.container import Container
-        from jeanplot.models import LayoutConstraints
-        from jeanplot.matplotlib_renderer import MatplotlibRenderer
-        from jeanplot.style import jstyle
-
-        if self.style_overrides:
-            jstyle.update(self.style_overrides)
-
-        schematic = NetworkGeneticSchematicV2(
-            network=self.network,
-            hide_marker_tus=self.hide_marker_tus,
-            grid_gap=self.grid_gap,
-            connection_style=self.connection_style,
-        )
-
-        root = Container(
-            children=[schematic],
-            layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
-        )
-        jstyle.apply(root)
-
         figsize = self.figure_spec.extra_args.get("figsize", (10, 8))
         dpi = self.figure_spec.extra_args.get("dpi", 150)
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.set_aspect("equal")
-        ax.axis("off")
-        ax.set_facecolor("none")
-
-        renderer = MatplotlibRenderer()
-        renderer.render_component(ax, root, adjust_lims=True)
+        render_circuit_to_ax(
+            network=self.network,
+            ax=ax,
+            hide_marker_tus=self.hide_marker_tus,
+            grid_gap=self.grid_gap,
+            connection_style=self.connection_style,
+            style_overrides=self.style_overrides,
+        )
 
         self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(self.figure_spec.output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1)

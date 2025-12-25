@@ -72,14 +72,14 @@ class PlotConfig(BaseModel):
         extra_args = list(args)
 
         for pval in plot_method.args + extra_args:
-            if hasattr(pval, 'metadata'):
+            if hasattr(pval, 'metadata') and pval.metadata:
                 for k, v in pval.metadata.items():
                     if can_dump(v):
                         metadata[k] = v
 
         extra_kwargs = list(kwargs.items())
         for _, pval in list(plot_method.kwargs.items()) + extra_kwargs:
-            if hasattr(pval, 'metadata'):
+            if hasattr(pval, 'metadata') and pval.metadata:
                 for k, v in pval.metadata.items():
                     if can_dump(v):
                         metadata[k] = v

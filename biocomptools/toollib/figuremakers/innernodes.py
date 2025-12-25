@@ -323,7 +323,10 @@ class InnerNodesFigure(Figure):
             result = []
             for i, net in enumerate(nets):
                 st, p, k = self._stack([net])
-                ly = next((lyr for lyr in st.layers if lyr.type_str() == "inv_source" and lyr.f_apply), None)
+                ly = next(
+                    (lyr for lyr in st.layers if lyr.type_str() == "inv_source" and lyr.f_apply),
+                    None,
+                )
                 if ly:
                     af = self._apply(ly.f_apply, p, k)
                     result.append(NodeInfo(f"pos {i}", "Inv Source", af, 0, "position", float(i)))
@@ -665,4 +668,5 @@ class InnerNodesFigure(Figure):
 
 class InnerNodesFigureSpec(FigureSpec):
     """Figure spec for inner nodes figure (subclass of FigureSpec for pickling compatibility)."""
+
     pass
