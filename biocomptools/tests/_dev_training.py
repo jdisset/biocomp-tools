@@ -19,7 +19,7 @@ from biocomp.library import load_lib
 import biocomptools.toollib.models as md
 from biocomptools.toollib.common import config
 from biocomptools.run_training import TrainingProgram
-from biocomptools.run_training import make_context_from_types, DEFAULT_TYPES
+from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES
 from sqlmodel import Session
 from biocomp.train import generate_batches, start
 from biocomp.train import TrainingConfig, init_stack

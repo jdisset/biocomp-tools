@@ -124,23 +124,33 @@ class TestDesignDiagnosticLogger:
         logger = DesignDiagnosticLogger(output_dir=str(tmp_output_dir))
         logger._total_steps = 100
 
+        # all_losses: 3D array (replicate, target, network) -> arr[0, target_id, network_id]
+        # per_network metrics: 4D arrays (replicate, batch, target, network) -> arr[0, 0, target_id, network_id]
         step_history = {
             "loss": 0.5,
-            "all_losses": np.array([[[0.4, 0.5, 0.6]]]),
-            "sublosses": {"sinkhorn": 0.1, "lncc": 0.2},
-            "tu_stats": {"enabled_count": 3, "total_count": 5},
-            "ratio_stats": {"min": 0.1, "max": 0.9},
-            "l0_penalty": 0.01,
+            "all_losses": np.array([[[0.4, 0.5, 0.6]]]),  # (1, 1, 3) -> network_loss = arr[0, 0, 0] = 0.4
+            "sublosses": {
+                "sinkhorn_per_network": np.array([[[[0.1, 0.2, 0.3]]]]),  # (1, 1, 1, 3)
+                "lncc_per_network": np.array([[[[0.15, 0.25, 0.35]]]]),
+            },
+            "tu_stats": {
+                "enabled_count_per_network": np.array([[[[3.0, 4.0, 5.0]]]]),
+                "mean_prob_per_network": np.array([[[[0.5, 0.6, 0.7]]]]),
+            },
+            "l0_penalty_per_network": np.array([[[[0.01, 0.02, 0.03]]]]),
+            "tucount_penalty": 0.05,
         }
 
-        metrics = logger._extract_metrics(50, step_history, 0, 0)
+        metrics = logger._extract_metrics(50, step_history, target_id=0, network_id=0)
 
         assert metrics["step"] == 50
         assert metrics["progress"] == 0.5
         assert metrics["loss"] == 0.5
-        assert metrics["sublosses.sinkhorn"] == 0.1
-        assert metrics["tu_stats.enabled_count"] == 3.0
-        assert metrics["l0_penalty"] == 0.01
+        assert metrics["network_loss"] == 0.4  # from all_losses[0, 0, 0]
+        assert metrics["sinkhorn"] == 0.1  # from sublosses.sinkhorn_per_network[0, 0, 0, 0]
+        assert metrics["tu_enabled_count"] == 3.0  # from tu_stats.enabled_count_per_network[0, 0, 0, 0]
+        assert metrics["l0_penalty"] == 0.01  # from l0_penalty_per_network[0, 0, 0, 0]
+        assert metrics["tucount_penalty"] == 0.05  # global penalty
 
     def test_append_to_history(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger

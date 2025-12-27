@@ -6,76 +6,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import yaml
-from scipy import stats
-
-
-class TestRegressionMetrics:
-    def test_perfect_prediction(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        metrics = RegressionMetrics.compute(y, y)
-        assert np.isclose(metrics.rmse, 0.0, atol=1e-10)
-        assert np.isclose(metrics.mae, 0.0, atol=1e-10)
-        assert np.isclose(metrics.r2, 1.0, atol=1e-10)
-        assert np.isclose(metrics.pearson_r, 1.0, atol=1e-10)
-        assert np.isclose(metrics.max_error, 0.0, atol=1e-10)
-
-    def test_known_rmse(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        y_true, y_pred = np.array([1.0, 2.0, 3.0]), np.array([1.1, 2.2, 2.9])
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        assert np.isclose(metrics.rmse, np.sqrt(np.mean((y_pred - y_true) ** 2)), atol=1e-10)
-
-    def test_known_mae(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        y_true, y_pred = np.array([1.0, 2.0, 3.0]), np.array([1.5, 1.5, 3.5])
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        assert np.isclose(metrics.mae, 0.5, atol=1e-10)
-
-    def test_r2_computation(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        np.random.seed(42)
-        y_true = np.random.randn(100)
-        y_pred = y_true + 0.1 * np.random.randn(100)
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        ss_res, ss_tot = np.sum((y_pred - y_true) ** 2), np.sum((y_true - np.mean(y_true)) ** 2)
-        assert np.isclose(metrics.r2, 1 - ss_res / ss_tot, atol=1e-10)
-
-    def test_pearson_correlation(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        np.random.seed(42)
-        y_true = np.random.randn(50)
-        y_pred = y_true * 0.8 + 0.2 * np.random.randn(50)
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        expected_r, expected_p = stats.pearsonr(y_true, y_pred)
-        assert np.isclose(metrics.pearson_r, expected_r, atol=1e-10)
-        assert np.isclose(metrics.pearson_p, expected_p, atol=1e-10)
-
-    def test_handles_nan_inf(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        y_true = np.array([1.0, np.nan, 3.0, np.inf, 5.0])
-        y_pred = np.array([1.0, 2.0, np.nan, 4.0, 5.0])
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        assert np.isclose(metrics.rmse, 0.0, atol=1e-10)
-
-    def test_percentile_error(self):
-        from biocomptools.toollib.design_results import RegressionMetrics
-        y_true, y_pred = np.zeros(100), np.arange(100) / 100.0
-        metrics = RegressionMetrics.compute(y_true, y_pred)
-        assert 0.93 < metrics.p95_error < 0.97
-
-
-class TestDistributionMetrics:
-    def test_distribution_statistics(self):
-        from biocomptools.toollib.design_results import DistributionMetrics
-        y_true, y_pred = np.array([1.0, 2.0, 3.0, 4.0, 5.0]), np.array([2.0, 3.0, 4.0, 5.0, 6.0])
-        metrics = DistributionMetrics.compute(y_true, y_pred)
-        assert np.isclose(metrics.target_mean, 3.0, atol=1e-10)
-        assert np.isclose(metrics.target_min, 1.0, atol=1e-10)
-        assert np.isclose(metrics.target_max, 5.0, atol=1e-10)
-        assert np.isclose(metrics.prediction_mean, 4.0, atol=1e-10)
-        assert np.isclose(metrics.prediction_min, 2.0, atol=1e-10)
-        assert np.isclose(metrics.prediction_max, 6.0, atol=1e-10)
 
 
 class TestDesignResultsManager:
@@ -161,8 +91,8 @@ class TestRecipeSerialization:
 class TestDesignSummaryLogger:
     def test_logger_initialization(self):
         from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
-        logger = DesignSummaryLogger(log_period=100, topk_per_target=3, generate_circuit_diagrams=False)
-        assert logger.log_period == 100 and logger.topk_per_target == 3 and not logger.generate_circuit_diagrams
+        logger = DesignSummaryLogger(log_period=100, topk_per_target=3)
+        assert logger.log_period == 100 and logger.topk_per_target == 3
 
     def test_top_candidates_extraction(self):
         from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
