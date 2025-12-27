@@ -568,7 +568,7 @@ class DesignDiagnosticLogger(Logger):
         ax.set_aspect("equal")
         plt.colorbar(scatter, ax=ax, fraction=0.046)
 
-    _SYMLOG_LINTHRESH = 1.0
+    _SYMLOG_LINTHRESH = 0.1
 
     def _render_particle_plot(
         self,
