@@ -160,14 +160,15 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
         MatplotlibRenderer,
         jstyle,
     )
-    from jeanplot._deprecated.network_diagram_v2 import NetworkDiagramV2
-    from jeanplot._deprecated.network_schematic_v2 import NetworkGeneticSchematicV2
+    from jeanplot.gene import GeneticSchematic
+    from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
 
     if config.style:
         jstyle.update(config.style)
 
-    diagram = NetworkDiagramV2(network=network, simplified=config.simplified)
-    schematic = NetworkGeneticSchematicV2(network=network, hide_marker_tus=config.hide_marker_tus)
+    diagram = NetworkDiagram(network=network, simplified=config.simplified)
+    circuit_data = network.to_circuit_data(hide_markers=config.hide_marker_tus)
+    schematic = GeneticSchematic.from_circuit(circuit_data)
 
     info_title = Container(
         children=[

@@ -15,6 +15,8 @@ def render_circuit_to_ax(
     network: Any,
     ax: matplotlib.axes.Axes,
     hide_marker_tus: bool = True,
+    hide_disabled_tus: bool = False,
+    disabled_tu_ids: Optional[set[str]] = None,
     grid_gap: tuple[float, float] = (40.0, 20.0),
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal",
     style_overrides: Optional[dict] = None,
@@ -24,11 +26,27 @@ def render_circuit_to_ax(
     """Render a genetic circuit schematic to an existing matplotlib axes."""
     from jeanplot.gene import GeneticSchematic
     from jeanplot import MatplotlibRenderer, jstyle
+    from jeanplot.core import Size, BoxStyle, LayoutConstraints, Offset, Shadow
+    from jeanplot.core.svg import LineEndFlat
+    from dracon import load, resolve_all_lazy
+    import importlib.resources
+
+    jeanplot_types = [Size, BoxStyle, LayoutConstraints, Offset, Shadow, LineEndFlat]
+    theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+        "genetic_schematic.yaml"
+    )
+    theme = load(str(theme_file), context={t.__name__: t for t in jeanplot_types}, raw_dict=True)
+    resolve_all_lazy(theme)
+    jstyle.update(theme)
 
     if style_overrides:
         jstyle.update(style_overrides)
 
-    circuit_data = network.to_circuit_data(hide_markers=hide_marker_tus)
+    circuit_data = network.to_circuit_data(
+        hide_markers=hide_marker_tus,
+        disabled_tu_ids=disabled_tu_ids,
+        hide_disabled=hide_disabled_tus,
+    )
     schematic = GeneticSchematic.from_circuit(
         circuit_data,
         grid_gap=grid_gap,
@@ -51,6 +69,8 @@ class GeneticCircuitFigure(Figure):
 
     network: Any = Field(description="biocomp Network object")
     hide_marker_tus: bool = True
+    hide_disabled_tus: bool = False
+    disabled_tu_ids: Optional[set[str]] = None
     grid_gap: tuple[float, float] = (40.0, 20.0)
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal"
     style_overrides: Optional[dict] = None
@@ -68,6 +88,8 @@ class GeneticCircuitFigure(Figure):
             network=self.network,
             ax=ax,
             hide_marker_tus=self.hide_marker_tus,
+            hide_disabled_tus=self.hide_disabled_tus,
+            disabled_tu_ids=self.disabled_tu_ids,
             grid_gap=self.grid_gap,
             connection_style=self.connection_style,
             style_overrides=self.style_overrides,

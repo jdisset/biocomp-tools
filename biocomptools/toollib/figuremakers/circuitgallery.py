@@ -22,7 +22,9 @@ def render_circuit_diagram(
     ax_left: matplotlib.axes.Axes,
     ax_right: matplotlib.axes.Axes,
     hide_marker_tus: bool = True,
+    hide_disabled_tus: bool = False,
     simplified: bool = True,
+    disabled_tu_ids: set[str] | None = None,
     **_kwargs,
 ):
     """Render network diagram (left) and genetic circuit (right) for a recipe."""
@@ -35,5 +37,11 @@ def render_circuit_diagram(
         return
 
     network = networks[0]
-    render_diagram_to_ax(network, ax_left, simplified=simplified, title="Network Diagram")
-    render_circuit_to_ax(network, ax_right, hide_marker_tus=hide_marker_tus, title="Genetic Circuit")
+    render_diagram_to_ax(
+        network, ax_left, simplified=simplified, hide_marker_tus=hide_marker_tus,
+        disabled_tu_ids=disabled_tu_ids, title="Network Diagram"
+    )
+    render_circuit_to_ax(
+        network, ax_right, hide_marker_tus=hide_marker_tus, hide_disabled_tus=hide_disabled_tus,
+        disabled_tu_ids=disabled_tu_ids, title="Genetic Circuit"
+    )
