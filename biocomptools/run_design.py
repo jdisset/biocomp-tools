@@ -229,6 +229,24 @@ class DesignProgram(BaseOptimizationProgram):
         )
         return context
 
+    def _save_design_networks(self):
+        """Save networks early for replay/diagnostic loggers to access."""
+        if self._dmanager is None:
+            return
+        networks_file = self._save_dir / 'design_networks.pickle'
+        try:
+            networks_data = {
+                'networks': self._dmanager.networks,
+                'network_names': [n.name for n in self._dmanager.networks],
+                'target_names': [_target_name(t) for t in self.targets],
+                'n_targets': self._dmanager.n_targets,
+            }
+            with open(networks_file, 'wb') as f:
+                pickle.dump(networks_data, f)
+            logger.debug(f"Saved {len(self._dmanager.networks)} networks to {networks_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save design networks: {e}")
+
     def enrich_metadata(self):
         if self._dmanager is None:
             return
@@ -271,6 +289,9 @@ class DesignProgram(BaseOptimizationProgram):
     async def execute_optimization(self, logger_callbacks, async_handler):
         logger.info("Starting design optimization...")
         assert self._dmanager is not None
+
+        # Save networks early for replay/diagnostic loggers
+        self._save_design_networks()
 
         # Set debug output directory for design module
         set_design_debug_output_dir(str(self._save_dir))
@@ -558,14 +579,11 @@ class DesignProgram(BaseOptimizationProgram):
             except Exception as e:
                 # Log error but don't crash - return empty network list
                 error_msg = f"{type(e).__name__}: {e}"
-                logger.warning(
-                    f"Commit failed for (rep={rep_id}, target={tid}): {error_msg}"
-                )
+                logger.warning(f"Commit failed for (rep={rep_id}, target={tid}): {error_msg}")
                 commit_failures.append((rep_id, tid, error_msg))
                 # Create empty network list so downstream code can handle gracefully
                 commit_cache[(rep_id, tid)] = [
-                    Network(compute_graph=GraphState(nodes={}, edges={}))
-                    for _ in range(n_networks)
+                    Network(compute_graph=GraphState(nodes={}, edges={})) for _ in range(n_networks)
                 ]
         if commit_failures:
             logger.warning(f"  -> {len(commit_failures)} commits failed (will be skipped)")
@@ -597,12 +615,10 @@ class DesignProgram(BaseOptimizationProgram):
                         break
 
                     assert 0 <= rep_id < n_replicates, (
-                        f"rep_id {rep_id} out of bounds [0, {n_replicates}) "
-                        f"for target {tid}"
+                        f"rep_id {rep_id} out of bounds [0, {n_replicates}) for target {tid}"
                     )
                     assert 0 <= net_id < n_networks, (
-                        f"net_id {net_id} out of bounds [0, {n_networks}) "
-                        f"for target {tid}"
+                        f"net_id {net_id} out of bounds [0, {n_networks}) for target {tid}"
                     )
 
                     bparams = tree_get(final_params, (rep_id, tid))

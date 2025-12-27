@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import numpy as np
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import ConfigDict, PrivateAttr
 
@@ -54,6 +54,12 @@ def unroll_params(
     network: int,
     tu_idx_to_id: dict[int, str] | None = None,
 ) -> dict[str, float]:
+    """Extract flattened param dict for a specific replicate/target/network.
+
+    Handles both:
+    - latest_params: shape (n_replicates, n_targets, ...)
+    - params from scan: shape (batches_per_step, n_replicates, n_targets, ...)
+    """
     result = {}
     if params is None:
         return result
@@ -89,6 +95,21 @@ def unroll_params(
         'number_of_random_variables',
     ]
 
+    def extract_replicate_target(arr, rep, tgt):
+        """Extract (rep, tgt) slice, handling both 3D and 4D (with batches dim) arrays."""
+        arr = np.asarray(arr)
+        # If 4D+: (batches, reps, targets, ...) - take last batch
+        if arr.ndim >= 4:
+            arr = arr[-1]  # last batch
+        # Now handle standard (reps, targets, ...) or (reps, ...) shape
+        if arr.ndim >= 3 and arr.shape[0] > rep:
+            if arr.shape[1] > tgt:
+                return arr[rep, tgt]
+            return arr[rep, 0]
+        elif arr.ndim >= 2 and arr.shape[0] > rep:
+            return arr[rep]
+        return arr
+
     # Build a map of namespace -> node_network_ids for filtering by network
     # Use all_leaves since node_network_ids are tagged as non_grad
     network_id_map = {}
@@ -96,12 +117,8 @@ def unroll_params(
         path_str = str(path)
         if 'node_network_ids' in path_str:
             try:
-                arr = np.asarray(value.get_array() if hasattr(value, 'get_array') else value)
-                # Handle replicate/target dimensions
-                if arr.ndim >= 3 and arr.shape[0] > replicate:
-                    arr = arr[replicate, target] if arr.shape[1] > target else arr[replicate, 0]
-                elif arr.ndim >= 2 and arr.shape[0] > replicate:
-                    arr = arr[replicate]
+                arr = value.get_array() if hasattr(value, 'get_array') else value
+                arr = extract_replicate_target(arr, replicate, target)
                 # Squeeze singleton dimensions
                 while arr.ndim > 1 and arr.shape[0] == 1:
                     arr = arr[0]
@@ -126,14 +143,8 @@ def unroll_params(
             if arr.ndim < 2 or arr.size == 0:
                 continue
 
-            # Handle replicate/target dimensions
-            if arr.ndim >= 3 and arr.shape[0] > replicate:
-                if arr.shape[1] > target:
-                    arr = arr[replicate, target]
-                else:
-                    arr = arr[replicate, 0]
-            elif arr.ndim >= 2 and arr.shape[0] > replicate:
-                arr = arr[replicate]
+            # Handle replicate/target/batch dimensions
+            arr = extract_replicate_target(arr, replicate, target)
 
             # Squeeze singleton dimensions
             while arr.ndim > 1 and arr.shape[0] == 1:
@@ -249,6 +260,11 @@ class DesignDiagnosticLogger(Logger):
     max_networks_to_plot: int = 4
     max_targets_to_plot: int = 2
 
+    # output structure: "step_first" (default) or "network_first"
+    # step_first:    step_XXXXXX/target_N_name/network_M.pdf
+    # network_first: network_M/target_name/design_diagnostic_step_XXXXXX.pdf
+    output_structure: Literal["step_first", "network_first"] = "step_first"
+
     # new pattern attributes
     frequency: int = 10
     history_window: int | None = 50
@@ -319,101 +335,136 @@ class DesignDiagnosticLogger(Logger):
         )
 
     def _load_networks_from_run_dir(self):
-        """Try to load networks from best_designs.pickle in the run directory."""
+        """Try to load networks from design_networks.pickle or best_designs.pickle."""
         import pickle
+
         if not self._save_dir:
             return
 
         # output_dir could be .../replay_output or .../replay_output/final/...
         # run_dir is parent of step_history_data, which is sibling of replay_output
-        run_dir = None
-        for candidate in [
+        candidates = [
             self._save_dir.parent,  # replay_output -> run_dir
-            self._save_dir.parent.parent,  # replay_output/final -> run_dir
+            self._save_dir.parent.parent,  # step_history_data/replay_output -> run_dir
             self._save_dir.parent.parent.parent,  # replay_output/final/target -> run_dir
             self._save_dir.parent.parent.parent.parent,  # replay_output/final/target/net -> run
-        ]:
+        ]
+
+        # First try design_networks.pickle (available early, created at start of design)
+        for candidate in candidates:
+            networks_file = candidate / 'design_networks.pickle'
+            if networks_file.exists():
+                try:
+                    with open(networks_file, 'rb') as f:
+                        data = pickle.load(f)
+                    self._networks = data.get('networks', [])
+                    self._network_names = data.get('network_names', [])
+                    logger.info(f"Loaded {len(self._networks)} networks from {networks_file}")
+                    return
+                except Exception as e:
+                    logger.debug(f"Could not load from {networks_file}: {e}")
+
+        # Fall back to best_designs.pickle (created after evaluation)
+        for candidate in candidates:
             designs_file = candidate / 'best_designs.pickle'
             if designs_file.exists():
-                run_dir = candidate
-                break
+                try:
+                    with open(designs_file, 'rb') as f:
+                        designs_data = pickle.load(f)
+                    for _target_name, target_data in designs_data.items():
+                        if isinstance(target_data, dict) and 'network' in target_data:
+                            self._networks.append(target_data['network'])
+                            self._network_names.append(
+                                target_data.get(
+                                    'network_name', f'network_{len(self._networks) - 1}'
+                                )
+                            )
+                    logger.info(f"Loaded {len(self._networks)} networks from {designs_file}")
+                    return
+                except Exception as e:
+                    logger.debug(f"Could not load from {designs_file}: {e}")
 
-        if not run_dir:
-            logger.debug("Could not locate run directory for network loading")
-            return
-
-        designs_file = run_dir / 'best_designs.pickle'
-        try:
-            with open(designs_file, 'rb') as f:
-                designs_data = pickle.load(f)
-            # Extract networks from the nested dict structure
-            for _target_name, target_data in designs_data.items():
-                if isinstance(target_data, dict) and 'network' in target_data:
-                    self._networks.append(target_data['network'])
-                    self._network_names.append(target_data.get('network_name', f'network_{len(self._networks)-1}'))
-            logger.info(f"Loaded {len(self._networks)} networks from {designs_file}")
-        except Exception as e:
-            logger.debug(f"Could not load networks from {designs_file}: {e}")
+        logger.debug("Could not locate any network files for replay")
 
     def _extract_metrics(
         self, step: int, step_history: dict, target_id: int, network_id: int
     ) -> dict:
+        """Extract per-target/network metrics from step_history.
+
+        Step history arrays have shape (n_replicates, batches_per_step, n_targets, n_networks)
+        after scan+vmap in the training loop. We extract for replicate 0, average over batches.
+        """
         metrics = {"step": step, "progress": step / max(self._total_steps, 1)}
         metrics["loss"] = _to_scalar(step_history.get("loss"))
 
+        # Helper to extract per-network metric with correct 4D indexing
+        # Shape: (n_replicates, batches_per_step, n_targets, n_networks)
+        def extract_4d(arr, tid, nid, use_mean=True):
+            arr = np.asarray(arr)
+            if arr.ndim == 4:
+                # (n_replicates, batches_per_step, n_targets, n_networks)
+                if use_mean:
+                    return float(np.nanmean(arr[0, :, tid, nid]))
+                return float(arr[0, -1, tid, nid])  # last batch
+            elif arr.ndim == 3:
+                # Fallback: (batches_per_step, n_targets, n_networks) or (n_reps, n_tgts, n_nets)
+                if use_mean:
+                    return float(np.nanmean(arr[:, tid, nid]))
+                return float(arr[-1, tid, nid])
+            elif arr.ndim == 2:
+                # (n_targets, n_networks)
+                return float(arr[tid, nid])
+            return float('nan')
+
         all_losses = step_history.get("all_losses")
         if all_losses is not None:
-            arr = np.asarray(all_losses)
-            if arr.ndim >= 3:
-                try:
-                    metrics["network_loss"] = _to_scalar(arr[0, target_id, network_id])
-                except IndexError:
-                    metrics["network_loss"] = float('nan')
+            try:
+                metrics["network_loss"] = extract_4d(all_losses, target_id, network_id)
+            except (IndexError, ValueError):
+                metrics["network_loss"] = float('nan')
 
         # Extract per-network metrics from sublosses
         sublosses = step_history.get("sublosses", {})
         for key in ["sinkhorn", "lncc", "mse", "spectral"]:
             pn_key = f"{key}_per_network"
             if pn_key in sublosses:
-                arr = np.asarray(sublosses[pn_key])
-                if arr.ndim >= 4:
-                    try:
-                        metrics[key] = float(arr[0, 0, target_id, network_id])
-                    except IndexError:
-                        pass
+                try:
+                    metrics[key] = extract_4d(sublosses[pn_key], target_id, network_id)
+                except (IndexError, ValueError):
+                    pass
 
         # Extract per-network metrics from tu_stats
         tu_stats = step_history.get("tu_stats", {})
-        for key in ["enabled_count", "mean_prob", "max_log_alpha", "min_log_alpha", "std_log_alpha"]:
+        for key in [
+            "enabled_count",
+            "mean_prob",
+            "max_log_alpha",
+            "min_log_alpha",
+            "std_log_alpha",
+        ]:
             pn_key = f"{key}_per_network"
             if pn_key in tu_stats:
-                arr = np.asarray(tu_stats[pn_key])
-                if arr.ndim >= 4:
-                    try:
-                        metrics[f"tu_{key}"] = float(arr[0, 0, target_id, network_id])
-                    except IndexError:
-                        pass
+                try:
+                    metrics[f"tu_{key}"] = extract_4d(tu_stats[pn_key], target_id, network_id)
+                except (IndexError, ValueError):
+                    pass
 
         # Extract per-network prediction stats
         pred_stats = step_history.get("pred_stats_per_network", {})
         for key in ["mean", "std", "min", "max"]:
             if key in pred_stats:
-                arr = np.asarray(pred_stats[key])
-                if arr.ndim >= 4:
-                    try:
-                        metrics[f"pred_{key}"] = float(arr[0, 0, target_id, network_id])
-                    except IndexError:
-                        pass
+                try:
+                    metrics[f"pred_{key}"] = extract_4d(pred_stats[key], target_id, network_id)
+                except (IndexError, ValueError):
+                    pass
 
         # Extract per-network l0_penalty
         l0_pn = step_history.get("l0_penalty_per_network")
         if l0_pn is not None:
-            arr = np.asarray(l0_pn)
-            if arr.ndim >= 4:
-                try:
-                    metrics["l0_penalty"] = float(arr[0, 0, target_id, network_id])
-                except IndexError:
-                    pass
+            try:
+                metrics["l0_penalty"] = extract_4d(l0_pn, target_id, network_id)
+            except (IndexError, ValueError):
+                pass
 
         # Global penalties (not per-network)
         for pname in ["tucount_penalty", "spread_penalty", "coupling_penalty", "ern_tying_penalty"]:
@@ -543,7 +594,9 @@ class DesignDiagnosticLogger(Logger):
                     # Get current transformed y-limits set by particle_plot
                     ylim_tr = ax.get_ylim()
                     # Convert back to original scale for tick calculation
-                    ylim_orig = inverse_log_poly_log(np.array(ylim_tr), threshold=100, compression=0.4)
+                    ylim_orig = inverse_log_poly_log(
+                        np.array(ylim_tr), threshold=100, compression=0.4
+                    )
                     # Get powers of 10 in original scale
                     yp10 = powers_of_ten(ylim_orig[0], ylim_orig[1])
                     # Set ticks at transformed positions
@@ -746,7 +799,12 @@ class DesignDiagnosticLogger(Logger):
             "tu_temperature",
         ]
         pred_keys = ["pred_mean", "pred_std", "pred_min", "pred_max"]
-        penalty_keys = ["spread_penalty", "coupling_penalty", "tucount_penalty", "ern_tying_penalty"]
+        penalty_keys = [
+            "spread_penalty",
+            "coupling_penalty",
+            "tucount_penalty",
+            "ern_tying_penalty",
+        ]
         combined_stats = tu_keys + pred_keys + penalty_keys
         available_stats = [k for k in combined_stats if any(k in h for h in history)]
         stats_display = {k: k.replace('tu_', '').replace('pred_', 'ŷ_') for k in available_stats}
@@ -773,7 +831,7 @@ class DesignDiagnosticLogger(Logger):
                     row_param_keys,
                     derivative_history=grad_history if grad_history else None,
                 )
-                title = f"Parameters [{start_idx}-{end_idx-1}]"
+                title = f"Parameters [{start_idx}-{end_idx - 1}]"
                 if derivatives is not None and np.any(np.abs(derivatives) > 1e-10):
                     title += " + Gradients"
                 self._render_particle_plot(
@@ -788,7 +846,7 @@ class DesignDiagnosticLogger(Logger):
                     va='center',
                     transform=ax_params.transAxes,
                 )
-                ax_params.set_title(f"Parameters [{start_idx}-{end_idx-1}]")
+                ax_params.set_title(f"Parameters [{start_idx}-{end_idx - 1}]")
 
         if history:
             steps = [h.get('step', 0) for h in history]
@@ -878,10 +936,6 @@ class DesignDiagnosticLogger(Logger):
                     target_name = (
                         getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
                     )
-                    target_dir = (
-                        step_dir / f"target_{tid}_{target_name.replace(' ', '_').replace('/', '_')}"
-                    )
-                    target_dir.mkdir(parents=True, exist_ok=True)
 
                     for nid in range(min(n_networks, self.max_networks_to_plot)):
                         history = self._history.get((tid, nid), [])
@@ -897,6 +951,10 @@ class DesignDiagnosticLogger(Logger):
                         if yhatdep is not None and yhatdep.ndim == 3:
                             Yhat = yhatdep[:, tid, nid]
 
+                        output_path = self._get_figure_output_path(
+                            step, tid, nid, target_name, step_dir
+                        )
+
                         try:
                             self._generate_network_figure(
                                 step,
@@ -909,7 +967,7 @@ class DesignDiagnosticLogger(Logger):
                                 Y,
                                 Yhat,
                                 target_name,
-                                target_dir / f"network_{nid}.png",
+                                output_path,
                                 network_name=self._get_network_name(nid),
                             )
                         except Exception as e:
@@ -947,11 +1005,6 @@ class DesignDiagnosticLogger(Logger):
                     target_name = (
                         getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
                     )
-                    target_dir = (
-                        final_dir
-                        / f"target_{tid}_{target_name.replace(' ', '_').replace('/', '_')}"
-                    )
-                    target_dir.mkdir(parents=True, exist_ok=True)
 
                     for nid in range(min(n_networks, self.max_networks_to_plot)):
                         history = self._history.get((tid, nid), [])
@@ -967,6 +1020,10 @@ class DesignDiagnosticLogger(Logger):
                         if yhatdep is not None and yhatdep.ndim == 3:
                             Yhat = yhatdep[:, tid, nid]
 
+                        output_path = self._get_figure_output_path(
+                            step, tid, nid, target_name, final_dir
+                        )
+
                         try:
                             self._generate_network_figure(
                                 step,
@@ -979,7 +1036,7 @@ class DesignDiagnosticLogger(Logger):
                                 Y,
                                 Yhat,
                                 target_name,
-                                target_dir / f"network_{nid}.png",
+                                output_path,
                                 network_name=self._get_network_name(nid),
                             )
                         except Exception as e:
@@ -1138,6 +1195,41 @@ class DesignDiagnosticLogger(Logger):
             if step_history:
                 self._save_summary_json(step, step_history, final_dir / "summary.json")
 
+    def _get_figure_output_path(
+        self,
+        step: int,
+        tid: int,
+        nid: int,
+        target_name: str,
+        step_output_dir: Path,
+    ) -> Path:
+        """Get output path for a figure based on output_structure setting.
+
+        Args:
+            step: Current step number
+            tid: Target index
+            nid: Network index
+            target_name: Name of the target
+            step_output_dir: Base output dir for this step (used in step_first mode)
+
+        Returns:
+            Path where the figure should be saved
+        """
+        safe_target = target_name.replace(' ', '_').replace('/', '_')
+        network_name = self._get_network_name(nid) or f"network_{nid}"
+        safe_network = network_name.replace(' ', '_').replace('/', '_')
+
+        if self.output_structure == "network_first":
+            # network_M/target_name/design_diagnostic_step_XXXXXX.pdf
+            output_dir = self._save_dir / safe_network / safe_target
+            output_dir.mkdir(parents=True, exist_ok=True)
+            return output_dir / f"design_diagnostic_step_{step:06d}.pdf"
+        else:
+            # step_first (default): step_dir/target_N_name/network_M.pdf
+            target_dir = step_output_dir / f"target_{tid}_{safe_target}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            return target_dir / f"network_{nid}.pdf"
+
     def _generate_figures_for_step(
         self,
         step: int,
@@ -1155,10 +1247,6 @@ class DesignDiagnosticLogger(Logger):
         for tid in range(min(n_targets, self.max_targets_to_plot)):
             target = targets[tid] if tid < len(targets) else None
             target_name = getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
-            target_dir = (
-                output_dir / f"target_{tid}_{target_name.replace(' ', '_').replace('/', '_')}"
-            )
-            target_dir.mkdir(parents=True, exist_ok=True)
 
             for nid in range(min(n_networks, self.max_networks_to_plot)):
                 history = self._history.get((tid, nid), [])
@@ -1174,6 +1262,8 @@ class DesignDiagnosticLogger(Logger):
                 if yhatdep is not None and yhatdep.ndim == 3:
                     Yhat = yhatdep[:, tid, nid]
 
+                output_path = self._get_figure_output_path(step, tid, nid, target_name, output_dir)
+
                 try:
                     self._generate_network_figure(
                         step,
@@ -1186,7 +1276,7 @@ class DesignDiagnosticLogger(Logger):
                         Y,
                         Yhat,
                         target_name,
-                        target_dir / f"network_{nid}.png",
+                        output_path,
                         network_name=self._get_network_name(nid),
                     )
                 except Exception as e:

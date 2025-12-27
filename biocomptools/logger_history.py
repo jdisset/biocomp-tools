@@ -12,6 +12,14 @@ from typing import Any, Literal
 import numpy as np
 import dill
 
+# numpy compatibility shim for older pickle files created with np.bool, np.int, etc.
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_  # type: ignore[attr-defined]
+if not hasattr(np, 'int'):
+    np.int = np.int_  # type: ignore[attr-defined]
+if not hasattr(np, 'float'):
+    np.float = np.float_  # type: ignore[attr-defined]
+
 
 @dataclass
 class BatchData:
