@@ -250,8 +250,8 @@ class DesignEvaluator:
             return None, None, None, None
 
         resolution = (48, 48)
-        x_ext = getattr(inp.target, 'lattice_x_extent', (0.0, 1.0))
-        y_ext = getattr(inp.target, 'lattice_y_extent', (0.0, 1.0))
+        x_ext = getattr(inp.target, 'latent_x', (0.0, 1.0))
+        y_ext = getattr(inp.target, 'latent_y', (0.0, 1.0))
 
         X_grid, Y_grid = inp.target.get_lattice(resolution, seed=0)
         lattice_extent = (x_ext[0], x_ext[1], y_ext[0], y_ext[1])

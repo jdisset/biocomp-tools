@@ -295,10 +295,9 @@ class DataTargetSource(BaseModel):
                     X=X,
                     Y=Y,
                     name=pdata.metadata.get("network_name", "data_target"),
-                    lattice_x_extent=self.lattice_x_extent,
-                    lattice_y_extent=self.lattice_y_extent,
+                    latent_x=self.lattice_x_extent,
+                    latent_y=self.lattice_y_extent,
                     original_network=built_network,
-                    input_names=input_names,
                 )
             )
             if built_network is not None:
