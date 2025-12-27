@@ -609,7 +609,8 @@ class AsyncLoggerHandler(BaseModel):
         # process batches
         last_callback_step: Dict[int, int] = {}
 
-        for batch in batches:
+        from tqdm import tqdm
+        for batch in tqdm(batches, desc="Processing steps", unit="step"):
             step = batch.step_index
             step_context = LoggerContext(
                 output_dir=history_dir.parent,

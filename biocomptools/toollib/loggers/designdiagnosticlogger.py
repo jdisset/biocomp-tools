@@ -143,19 +143,25 @@ def unroll_params(
             if arr.ndim < 2 or arr.size == 0:
                 continue
 
-            # Handle replicate/target/batch dimensions
-            arr = extract_replicate_target(arr, replicate, target)
-
-            # Squeeze singleton dimensions
-            while arr.ndim > 1 and arr.shape[0] == 1:
-                arr = arr[0]
-
-            # Check if this is tu_log_alpha (special case: indexed by network)
+            # Check if this is tu_log_alpha (special case: indexed by network, not rep/target)
             is_tu_log_alpha = 'tu_log_alpha' in path_str
             if is_tu_log_alpha:
-                # tu_log_alpha is (n_networks, n_tus), filter to selected network
-                if arr.ndim >= 2 and arr.shape[0] > network:
-                    arr = arr[network]  # Get only this network's TU params
+                # tu_log_alpha has shape (n_networks, n_tus) - no replicate/target dims
+                # May have batch dim: (batches, n_networks, n_tus)
+                if arr.ndim >= 3:
+                    arr = arr[-1]  # Take last batch
+                # Now shape is (n_networks, n_tus) - extract this network's TUs
+                if arr.ndim == 2 and arr.shape[0] > network:
+                    arr = arr[network]  # (n_tus,) for this network
+                else:
+                    continue  # Skip if can't extract for this network
+            else:
+                # Handle replicate/target/batch dimensions for other params
+                arr = extract_replicate_target(arr, replicate, target)
+
+                # Squeeze singleton dimensions
+                while arr.ndim > 1 and arr.shape[0] == 1:
+                    arr = arr[0]
 
             # For layer-local params, filter by node_network_ids
             namespace = None
@@ -265,6 +271,9 @@ class DesignDiagnosticLogger(Logger):
     # network_first: network_M/target_name/design_diagnostic_step_XXXXXX.pdf
     output_structure: Literal["step_first", "network_first"] = "step_first"
 
+    # parallel figure generation: defer figure generation and batch them
+    deferred_figures: bool = False  # if True, queue figures instead of generating
+
     # new pattern attributes
     frequency: int = 10
     history_window: int | None = 50
@@ -297,6 +306,7 @@ class DesignDiagnosticLogger(Logger):
     _tu_idx_to_id: dict[int, str] | None = PrivateAttr(default=None)
     _stack: Any = PrivateAttr(default=None)
     _networks: list = PrivateAttr(default_factory=list)  # Networks loaded from replay
+    _pending_figures: list = PrivateAttr(default_factory=list)  # Deferred figure tasks
 
     def initialize(self, training_program=None):
         if self.output_dir:
@@ -558,6 +568,8 @@ class DesignDiagnosticLogger(Logger):
         ax.set_aspect("equal")
         plt.colorbar(scatter, ax=ax, fraction=0.046)
 
+    _SYMLOG_LINTHRESH = 1.0
+
     def _render_particle_plot(
         self,
         ax,
@@ -570,12 +582,6 @@ class DesignDiagnosticLogger(Logger):
         try:
             from biocomp.plotting.plotting_particle import particle_plot
 
-            if use_symlog:
-                from biocomp.utils import log_poly_log
-
-                data = log_poly_log(data, threshold=100, compression=0.4)
-                if derivatives is not None:
-                    derivatives = log_poly_log(derivatives, threshold=100, compression=0.4)
             particle_plot(
                 ax,
                 data,
@@ -583,32 +589,16 @@ class DesignDiagnosticLogger(Logger):
                 derivative=derivatives,
                 value_spacing=50.0,
                 max_line_extend=min(data.shape[1], self.max_history_len),
+                vaxis_params={'symlog_linthresh': self._SYMLOG_LINTHRESH if use_symlog else None},
             )
 
-            # Set up proper y-axis tick labels for log-poly-log scale
             if use_symlog:
-                try:
-                    from biocomp.plotting.plotting_core import powers_of_ten, PowerFormatter
-                    from biocomp.utils import log_poly_log as lpl, inverse_log_poly_log
-
-                    # Get current transformed y-limits set by particle_plot
-                    ylim_tr = ax.get_ylim()
-                    # Convert back to original scale for tick calculation
-                    ylim_orig = inverse_log_poly_log(
-                        np.array(ylim_tr), threshold=100, compression=0.4
-                    )
-                    # Get powers of 10 in original scale
-                    yp10 = powers_of_ten(ylim_orig[0], ylim_orig[1])
-                    # Set ticks at transformed positions
-                    ax.set_yticks(lpl(yp10, threshold=100, compression=0.4))
-                    ax.yaxis.set_major_formatter(PowerFormatter(yp10))
-                except (ImportError, Exception):
-                    pass
+                ax.set_yscale('symlog', linthresh=self._SYMLOG_LINTHRESH)
 
             ax.set_title(title, fontsize=10)
         except ImportError:
             if use_symlog:
-                ax.set_yscale('symlog', linthresh=100)
+                ax.set_yscale('symlog', linthresh=self._SYMLOG_LINTHRESH)
             for i, name in enumerate(names):
                 ax.plot(data[i, :], label=name[:15], alpha=0.7)
             ax.legend(fontsize=7, ncol=3, loc='upper left')
@@ -727,13 +717,11 @@ class DesignDiagnosticLogger(Logger):
         param_keys = sorted(list(all_param_keys))
         n_params = len(param_keys)
         n_param_rows = max(1, (n_params + max_params_per_row - 1) // max_params_per_row)
-        # Distribute params evenly across rows
         params_per_row = (n_params + n_param_rows - 1) // n_param_rows if n_param_rows > 0 else 0
 
-        # Dynamic grid: 3 fixed rows + n_param_rows
         n_rows = 3 + n_param_rows
-        height_ratios = [0.6, 1.2, 1] + [1] * n_param_rows
-        fig_height = 28.8 + (n_param_rows - 1) * 7.2  # Add height for extra rows
+        height_ratios = [2.25, 1.2, 1] + [1] * n_param_rows
+        fig_height = 28.8 + (n_param_rows - 1) * 7.2
 
         fig = plt.figure(figsize=(38.4, fig_height))
         gs = GridSpec(n_rows, 4, figure=fig, height_ratios=height_ratios, hspace=0.35, wspace=0.25)
@@ -1160,12 +1148,10 @@ class DesignDiagnosticLogger(Logger):
             )
 
     def on_end(self, view: HistoryView, context: LoggerContext) -> None:
-        """Generate final figure(s) using accumulated history from view."""
         step = context.current_step
         step_history = self._process_view_data(view)
         n_targets, n_networks = self._get_dims(step_history) if step_history else (1, 1)
 
-        # rebuild history from view if we haven't been accumulating
         if not self._history and view.n_batches > 0:
             for tid in range(min(n_targets, self.max_targets_to_plot)):
                 for nid in range(min(n_networks, self.max_networks_to_plot)):
@@ -1220,12 +1206,10 @@ class DesignDiagnosticLogger(Logger):
         safe_network = network_name.replace(' ', '_').replace('/', '_')
 
         if self.output_structure == "network_first":
-            # network_M/target_name/design_diagnostic_step_XXXXXX.pdf
             output_dir = self._save_dir / safe_network / safe_target
             output_dir.mkdir(parents=True, exist_ok=True)
             return output_dir / f"design_diagnostic_step_{step:06d}.pdf"
         else:
-            # step_first (default): step_dir/target_N_name/network_M.pdf
             target_dir = step_output_dir / f"target_{tid}_{safe_target}"
             target_dir.mkdir(parents=True, exist_ok=True)
             return target_dir / f"network_{nid}.pdf"
@@ -1239,7 +1223,6 @@ class DesignDiagnosticLogger(Logger):
         n_networks: int,
         output_dir: Path,
     ):
-        """Generate diagnostic figures for a step (shared by on_batch and on_end)."""
         yhatdep = _squeeze_to_3d(step_history.get("yhatdep"))
         X_hist = _squeeze_to_3d(step_history.get("X"))
         Y_hist = _squeeze_to_3d(step_history.get("Y"))
