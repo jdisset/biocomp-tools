@@ -40,6 +40,7 @@ from biocomptools.logging_config import get_logger
 from biocomptools.optimtools import make_context_from_types
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.networkprediction import NetworkPrediction
+from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
 from dracon.commandline import Arg, dracon_program
 
 logger = get_logger(__name__)
@@ -108,17 +109,17 @@ class HyperoptProgram(BaseModel):
         Field(default_factory=NetworkSet)
     )
 
-    # Validation
+    # Validation - defaults from metric_utils.DEFAULT_GRIDSTATS_PARAMS
     use_validation_loss: bool = False
     validation_set: NetworkSet | None = None
     n_validation_evals: int = 32000
     validation_objective: str = "geomean_nre"
     validation_enable_gridstats: bool = True
-    validation_gridstats_res: int = 10
-    validation_gridstats_max: float = 0.8
-    validation_gridstats_k: int = 64  # must be >= gridstats_min_points
-    validation_gridstats_radius: float = 0.3
-    validation_gridstats_min_points: int = 20  # lower than default for faster hyperopt
+    validation_gridstats_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    validation_gridstats_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
+    validation_gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]  # must be >= min_points
+    validation_gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    validation_gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
     validation_softmax_alpha: float = 5.0
     validation_powermean_p: float = 2.0
 

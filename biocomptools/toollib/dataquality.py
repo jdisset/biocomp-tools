@@ -5,15 +5,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from biocomptools.toollib.networkprediction import _calculate_grid_stats
-
-DEFAULT_GRIDSTATS_PARAMS = {
-    'hypercube_res': 8,
-    'hypercube_min': 0.0,
-    'hypercube_max': 0.8,
-    'k': 1024,
-    'radius': 0.25,
-    'min_points': 40,
-}
+from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
 
 
 def compute_split_half_nrmse(

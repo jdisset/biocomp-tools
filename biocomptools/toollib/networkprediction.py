@@ -20,6 +20,9 @@ from biocomp.metric_utils import (
     grid_kl_divergence as compute_grid_kl,
     compute_nrmse,
     noise_relative_error as compute_nre,
+    SPLIT_HALF_SUBSET_SIZE,
+    SPLIT_HALF_N_BOOTSTRAPS,
+    DEFAULT_GRIDSTATS_PARAMS,
 )
 from pathlib import Path
 import time
@@ -53,14 +56,11 @@ def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) 
     return np.vstack([g.ravel() for g in grid]).T
 
 
-SPLIT_HALF_SUBSET_SIZE = 50000
-
-
 def _compute_split_half_nrmse(
     latent_x: NdArray,
     latent_gt: NdArray,
     params: Dict[str, Any],
-    n_bootstraps: int = 5,
+    n_bootstraps: int = SPLIT_HALF_N_BOOTSTRAPS,
     seed: int = 42,
 ) -> float:
     """
@@ -507,13 +507,13 @@ class NetworkPrediction(DataSource):
         False  # Set True if predict_at is in latent space (0-1). See class docstring.
     )
 
-    enable_gridstats: bool = True  # enable grid statistics calculation
-    gridstats_hypercube_res: int = 8  # resolution per dimension (8³=512 cells for 3D)
-    gridstats_hypercube_min: float = 0.0  # minimum value for hypercube grid
-    gridstats_hypercube_max: float = 0.8  # maximum value (avoid sparse edges)
-    gridstats_k: int = 1024  # neighbors for adaptive sigma (N_eff will be ~constant across dims)
-    gridstats_radius: float = 0.25  # max_radius safety cutoff for adaptive sigma
-    gridstats_min_points: int = 40
+    enable_gridstats: bool = True
+    gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    gridstats_hypercube_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
+    gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
+    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
+    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
 
     shuffle_inputs: bool = True  # shuffle inputs before prediction
 

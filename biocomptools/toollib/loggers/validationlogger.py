@@ -9,6 +9,7 @@ from sqlmodel import Session
 from biocomp.compute import ComputeConfig
 from biocomptools.run_training import TrainingProgram
 from biocomptools.toollib.common import config
+from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Callable, Optional, Dict, Any, Union, Literal
@@ -26,10 +27,11 @@ class ValidationLossLogger(Logger):
     validation_set: Optional[NetworkSet] = None
     n_evals: int = 2048
     enable_gridstats: bool = False
-    gridstats_hypercube_res: int = 8
-    gridstats_hypercube_max: float = 0.8
-    gridstats_k: int = 1024
-    gridstats_radius: float = 0.25
+    gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
+    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
+    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
     seed: int = 42
     predictor_n_stats_workers: int = 1
     plot_training_losses: bool = False

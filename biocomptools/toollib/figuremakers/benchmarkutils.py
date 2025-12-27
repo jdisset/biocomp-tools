@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from scipy.stats import gmean
 
 from biocomp.plotutils import PlotData
+from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
 
 IN_TRAINING_COLOR = "#EEEEEE"
 NOT_IN_TRAINING_COLOR = "#EEEEEE"
@@ -49,6 +50,14 @@ class BenchmarkData(BaseModel):
     dataset_file: Optional[str] = None
     max_items: Optional[int] = None
     device: str = 'gpu'
+    max_evals: int = 250000
+
+    # Use single source of truth for gridstats defaults
+    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
+    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
+    gridstats_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    gridstats_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
 
     _model: Any = PrivateAttr(default=None)
     _items: list[BenchmarkItem] = PrivateAttr(default_factory=list)
@@ -116,10 +125,15 @@ class BenchmarkData(BaseModel):
             predict_at=[d.x for d in items_to_plot],
             ground_truth=[d.y for d in items_to_plot],
             per_prediction_info=[d.metadata for d in items_to_plot],
-            max_evals=250000,
+            max_evals=self.max_evals,
             network_model=network_model,
             enable_gridstats=True,
             device=self.device,
+            gridstats_hypercube_res=self.gridstats_res,
+            gridstats_hypercube_max=self.gridstats_max,
+            gridstats_k=self.gridstats_k,
+            gridstats_radius=self.gridstats_radius,
+            gridstats_min_points=self.gridstats_min_points,
         )
 
         prediction_data = predictor.get_data()
