@@ -13,12 +13,13 @@ import numpy as np
 import dill
 
 # numpy compatibility shim for older pickle files created with np.bool, np.int, etc.
+# In NumPy 2.0, np.bool_, np.int_, np.float_ were removed - use Python/NumPy equivalents
 if not hasattr(np, 'bool'):
-    np.bool = np.bool_  # type: ignore[attr-defined]
+    np.bool = bool  # type: ignore[attr-defined]
 if not hasattr(np, 'int'):
-    np.int = np.int_  # type: ignore[attr-defined]
+    np.int = np.intp  # type: ignore[attr-defined]
 if not hasattr(np, 'float'):
-    np.float = np.float_  # type: ignore[attr-defined]
+    np.float = np.float64  # type: ignore[attr-defined]
 
 
 @dataclass
