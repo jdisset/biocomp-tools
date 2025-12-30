@@ -7,22 +7,22 @@ Usage:
 """
 
 from __future__ import annotations
-import json
+
 import time
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Annotated
+
 import numpy as np
 import optuna
-from optuna.samplers import BaseSampler
-from tqdm import tqdm
-from pydantic import Field, BaseModel
-
-from dracon.commandline import Arg, dracon_program
-from dracon.deferred import DeferredNode
+from pydantic import Field
 import jax
 import jax.numpy as jnp
 from jax import vmap
+
+from dracon.commandline import Arg, dracon_program
+from dracon.deferred import DeferredNode
 
 from biocomp.design import (
     DesignManager,
@@ -35,7 +35,6 @@ from biocomp.design import (
     normalize_ratios_prune,
     normalize_ratio_source_arrays,
     sample_for_evaluation,
-    evaluate_design,
 )
 from biocomp.designloss import HYPEROPT_SCHEDULE_NAMESPACE
 from biocomp.recipe import Recipe
@@ -48,7 +47,13 @@ from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.common import config
 from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.optimtools import DEFAULT_TYPES
-from biocomptools.optuna_hyperopt import HyperparamSpec
+from biocomptools.hyperopt.base import (
+    BaseHyperoptProgram,
+    HyperparamSpec,
+    expand_schedule_hyperparams,
+    get_schedule_param_names,
+    SCHEDULE_SUFFIXES,
+)
 
 logger = get_logger(__name__)
 
@@ -65,7 +70,7 @@ def _build_design_manager(
 
     networks = []
     for recipe in scaffolds:
-        nets = recipe_to_networks(recipe, model.library, unlock_ratios=True)
+        nets = recipe_to_networks(recipe, invert=True, inversion_mode="main")
         networks.extend(nets)
 
     return DesignManager(
@@ -82,25 +87,23 @@ def _build_design_manager(
     context_types=DEFAULT_TYPES + [HyperparamSpec],
     context={'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve()},
 )
-class DesignHyperoptProgram(BaseModel):
-    """Design hyperparameter optimization using CMA-ES with recompilation-free trials."""
+class DesignHyperoptProgram(BaseHyperoptProgram):
+    """Design hyperopt with JAX-native schedule injection for recompilation-free trials.
+
+    Extends BaseHyperoptProgram with:
+    - Design configuration and scaffold management
+    - JAX-native schedule parameter injection
+    - RMSE-based evaluation
+    """
 
     study_name: Annotated[str, Arg(help='Study name for persistence')] = "design_hyperopt"
     output_dir: Annotated[str, Arg(help='Output directory')] = "./design_hyperopt_output"
-    n_trials: Annotated[int, Arg(help='Number of trials')] = 100
-    seed: Annotated[int | None, Arg(help='Random seed')] = None
-
     sampler: Annotated[str, Arg(help='Sampler: tpe, cmaes')] = "cmaes"
     n_startup_trials: int = 5
-
-    cmaes_restart_strategy: str | None = "bipop"
     cmaes_popsize: int | None = 16
     cmaes_sigma0: float = 0.3
-    cmaes_warm_start: bool = True
-    cmaes_with_margin: bool = True
-    cmaes_warn_independent_sampling: bool = False
 
-    # Design config
+    # Design configuration
     design_conf: Annotated[DeferredNode[DesignConfig] | DesignConfig, Arg(help='Design config')] = (
         Field(default_factory=DesignConfig)
     )
@@ -119,35 +122,25 @@ class DesignHyperoptProgram(BaseModel):
 
     model_name: Annotated[str | None, Arg(help='Model path or name')] = None
     model_selector: Annotated[ModelSelector | None, Arg(help='Model selector')] = None
-
     disable_tu_masking: Annotated[bool, Arg(help='Disable TU masking')] = False
 
-    # Hyperparams
-    hyperparams: list[HyperparamSpec] = []
-
-    # Evaluation config
+    # Evaluation configuration
     eval_n_samples: Annotated[int, Arg(help='Samples for RMSE evaluation')] = 10000
     eval_top_k: Annotated[int, Arg(help='Best K networks to average')] = 3
     use_eval_loss: Annotated[bool, Arg(help='Use RMSE eval instead of training loss')] = True
-
-    # Modes
-    show_best: bool = False
-    dashboard: bool = False
-    dashboard_port: int = 8080
     n_top_models: int = 5
-    verbose: bool = True
 
     # Internal state
     _model: Any = None
     _dmanager: Any = None
     _cached_step: Any = None
     _cached_stack: Any = None
+    _cached_eval_fn: Any = None
     _initial_params: Any = None
     _static_params: Any = None
     _ratio_paths: list | None = None
     _total_steps: int | None = None
-
-    model_config = {'arbitrary_types_allowed': True}
+    _design_conf: Any = None
 
     def model_post_init(self, _):
         if isinstance(self.targets, TargetUnion):
@@ -155,10 +148,17 @@ class DesignHyperoptProgram(BaseModel):
         if isinstance(self.scaffolds, Recipe):
             self.scaffolds = [self.scaffolds]
 
-    @property
-    def _storage_path(self) -> str:
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{Path(self.output_dir) / (self.study_name + '.db')}"
+    def _prepare(self):
+        """Prepare design manager and compile design step."""
+        self._prepare_design_manager()
+
+        dconf = (
+            self.design_conf.construct(context={})
+            if isinstance(self.design_conf, DeferredNode)
+            else self.design_conf
+        )
+        self._design_conf = dconf
+        self._compile_design_step(dconf)
 
     def _load_model(self):
         """Load the BiocompModel."""
@@ -205,6 +205,59 @@ class DesignHyperoptProgram(BaseModel):
             f"{self._dmanager.n_targets} targets"
         )
 
+    def _prepopulate_hyperopt_schedules(
+        self,
+        params: ParameterTree,
+        n_replicates: int,
+        n_targets: int,
+        loss_fn_defaults: dict[str, Any] | None = None,
+    ) -> None:
+        """Pre-populate params tree with hyperopt schedule paths before JIT compilation.
+
+        JAX pytree structure is fixed at compile time - paths must exist before compilation.
+        Values have shape (n_replicates, n_targets) to match other non_grad params.
+
+        Handles three schedule specification modes:
+        1. Constant: Just base name (e.g., 'w_sinkhorn') → prepopulates all 3 phase values
+        2. Linear: phase1_value + phase3_end_value → prepopulates all 3 (phase2 computed at injection)
+        3. Full 3-phase: All three phase values explicitly provided
+
+        Also prepopulates non-optimized params from loss_fn_defaults as constants.
+        """
+        assert self.hyperparams, "hyperparams must be set before calling _prepopulate_hyperopt_schedules"
+        ns = HYPEROPT_SCHEDULE_NAMESPACE
+        shape = (n_replicates, n_targets)
+
+        schedule_info = get_schedule_param_names(self.hyperparams)
+        optimized_names = set(schedule_info.keys())
+
+        for sched_name, _suffixes in schedule_info.items():
+            # Always prepopulate all 3 phase values for every schedule
+            # This ensures the params tree structure is complete before JIT
+            for suffix in SCHEDULE_SUFFIXES:
+                path = f"{ns}/{sched_name}{suffix}"
+                params.at(path, jnp.zeros(shape, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+
+            # Also prepopulate phase fractions
+            params.at(f"{ns}/{sched_name}_phase1_frac", jnp.full(shape, 0.4, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+            params.at(f"{ns}/{sched_name}_phase2_frac", jnp.full(shape, 0.75, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+
+        # Also prepopulate non-optimized params from loss function defaults as constants
+        # This prevents "schedule not found" warnings for params we intentionally don't optimize
+        if loss_fn_defaults:
+            for name, default_val in loss_fn_defaults.items():
+                if name in optimized_names or not isinstance(default_val, (int, float)):
+                    continue
+                val = float(default_val)
+                for suffix in SCHEDULE_SUFFIXES:
+                    path = f"{ns}/{name}{suffix}"
+                    params.at(path, jnp.full(shape, val, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+                params.at(f"{ns}/{name}_phase1_frac", jnp.full(shape, 0.4, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+                params.at(f"{ns}/{name}_phase2_frac", jnp.full(shape, 0.75, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+            logger.debug(f"Pre-populated {len(loss_fn_defaults) - len(optimized_names)} non-optimized schedule defaults")
+
+        logger.debug(f"Pre-populated {len(schedule_info)} hyperopt schedules in params tree (shape={shape})")
+
     def _compile_design_step(self, dconf: DesignConfig):
         """Compile the design step function once, to be reused across trials."""
         if self._cached_step is not None:
@@ -231,6 +284,11 @@ class DesignHyperoptProgram(BaseModel):
             n_networks=n_networks,
             tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
             tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+        )
+
+        loss_fn_defaults = getattr(dconf.loss_function, 'kwargs', None) or {}
+        self._prepopulate_hyperopt_schedules(
+            initial_params, dconf.n_replicates, self._dmanager.n_targets, loss_fn_defaults
         )
 
         static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
@@ -317,91 +375,147 @@ class DesignHyperoptProgram(BaseModel):
         )
         self._cached_step = compile_step(step, sample_args)
 
+        # Pre-compile evaluation function to avoid recompilation per trial
+        if self.use_eval_loss:
+            self._compile_eval_fn(dconf)
+
         logger.info(f"Design step compiled in {time.time() - t0:.1f}s")
 
-    def _inject_hyperparams(self, params: ParameterTree, hp: dict) -> ParameterTree:
-        """Inject hyperparameters into the params tree as schedule parameters.
+    def _inject_hyperparams(self, params: ParameterTree, hp: dict) -> None:
+        """Inject hyperparams into params tree in-place. Paths must already exist (pre-populated).
 
-        Hyperparams named like 'lambda_l0_phase1_value' are injected as:
-          hyperopt_schedules/lambda_l0_phase1_value
-
-        Global phase fracs are applied to all schedules.
+        Uses expand_schedule_hyperparams to handle:
+        1. Constant schedules: base name → all 3 phases get same value
+        2. Linear schedules: phase1 + phase3 → phase2 computed via interpolation
+        3. Full 3-phase: all values used as-is
         """
         ns = HYPEROPT_SCHEDULE_NAMESPACE
         phase1_frac = hp.get('phase1_frac', 0.4)
         phase2_frac = hp.get('phase2_frac', 0.75)
+        if phase1_frac >= phase2_frac:
+            phase2_frac = min(phase1_frac + 0.1, 0.95)
+            logger.warning(
+                f"phase1_frac >= phase2_frac ({hp.get('phase1_frac')} >= {hp.get('phase2_frac')}), "
+                f"adjusted phase2_frac to {phase2_frac}"
+            )
 
-        schedule_names = set()
-        for name, value in hp.items():
+        # Expand linear schedules to full 3-phase
+        expanded_hp = expand_schedule_hyperparams(hp, phase1_frac, phase2_frac)
+
+        def set_param(path: str, val: float) -> None:
+            assert path in params, f"Path {path} not in params - was _prepopulate_hyperopt_schedules called?"
+            shape = params[path].shape
+            params.at(path, jnp.full(shape, val, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+
+        schedule_names: set[str] = set()
+        for name, value in expanded_hp.items():
             if name in ('phase1_frac', 'phase2_frac', 'seed'):
                 continue
-            for suffix in (
-                '_phase1_value',
-                '_phase2_end_value',
-                '_phase3_end_value',
-                '_phase1_frac',
-                '_phase2_frac',
-            ):
+            for suffix in SCHEDULE_SUFFIXES:
                 if name.endswith(suffix):
-                    sched_name = name[: -len(suffix)]
-                    schedule_names.add(sched_name)
-                    path = f"{ns}/{name}"
-                    params = params.at(
-                        path,
-                        jnp.array(value, dtype=jnp.float32),
-                        tags=["non_grad", "hyperopt"],
-                        overwrite=True,
-                    )
+                    schedule_names.add(name[: -len(suffix)])
+                    set_param(f"{ns}/{name}", value)
                     break
-            else:
-                path = f"{ns}/{name}_phase1_value"
-                params = params.at(
-                    path,
-                    jnp.array(value, dtype=jnp.float32),
-                    tags=["non_grad", "hyperopt"],
-                    overwrite=True,
-                )
-                params = params.at(
-                    f"{ns}/{name}_phase2_end_value",
-                    jnp.array(value, dtype=jnp.float32),
-                    tags=["non_grad", "hyperopt"],
-                    overwrite=True,
-                )
-                params = params.at(
-                    f"{ns}/{name}_phase3_end_value",
-                    jnp.array(value, dtype=jnp.float32),
-                    tags=["non_grad", "hyperopt"],
-                    overwrite=True,
-                )
-                schedule_names.add(name)
 
         for sched_name in schedule_names:
-            params = params.at(
-                f"{ns}/{sched_name}_phase1_frac",
-                jnp.array(phase1_frac, dtype=jnp.float32),
-                tags=["non_grad", "hyperopt"],
-                overwrite=True,
-            )
-            params = params.at(
-                f"{ns}/{sched_name}_phase2_frac",
-                jnp.array(phase2_frac, dtype=jnp.float32),
-                tags=["non_grad", "hyperopt"],
-                overwrite=True,
-            )
+            set_param(f"{ns}/{sched_name}_phase1_frac", phase1_frac)
+            set_param(f"{ns}/{sched_name}_phase2_frac", phase2_frac)
 
-        return params
+    def _compile_eval_fn(self, dconf: DesignConfig) -> None:
+        """Pre-compile evaluation function to avoid recompilation per trial."""
+        if self._cached_eval_fn is not None:
+            return
 
-    def _run_single_trial(self, trial: optuna.Trial, dconf: DesignConfig) -> float:
+        stack = self._cached_stack
+
+        def apply_with_tu_mask(params, x_batch, z_batch, keys, tu_mask):
+            def apply_single(x, z, k):
+                return stack.apply(params, x, z, k, tu_enabled_random_vars=tu_mask)
+            return vmap(apply_single)(x_batch, z_batch, keys)
+
+        self._cached_eval_fn = jax.jit(apply_with_tu_mask)
+        self._eval_dep_mask = stack.get_dependent_output_mask()
+        self._eval_num_z = int(self._static_params["global/number_of_random_variables"][0, 0].squeeze())
+        logger.debug("Evaluation function pre-compiled")
+
+    def _evaluate_cached(
+        self,
+        final_params: ParameterTree,
+        xraw: jnp.ndarray,
+        yraw: jnp.ndarray,
+        key: jax.Array,
+        max_eval_size: int = 64,
+    ) -> jnp.ndarray:
+        """Evaluate design using pre-compiled function. Returns MSE losses per network."""
+        dconf = self._design_conf
+        n_networks = len(self._dmanager.networks)
+        n_replicates = dconf.n_replicates
+        n_targets = self._dmanager.n_targets
+        n_samples = xraw.shape[2]
+
+        x_combined = xraw.transpose(1, 2, 3, 0, 4).reshape(n_replicates, n_samples, n_targets, -1)
+        y_combined = yraw[0]
+
+        has_tu_masking = TU_LOG_ALPHA_PATH in final_params
+        all_losses = []
+
+        for rep_idx in range(n_replicates):
+            rep_losses = []
+            for tid in range(n_targets):
+                rep_params = jax.tree.map(lambda x, r=rep_idx, t=tid: x[r, t], final_params)
+                x_slice = x_combined[rep_idx, :, tid, :]
+                y_slice = y_combined[rep_idx, :, tid, :]
+
+                if has_tu_masking:
+                    tu_log_alpha = rep_params[TU_LOG_ALPHA_PATH]
+                    tu_mask = jax.nn.sigmoid(tu_log_alpha)
+                else:
+                    tu_mask = None
+
+                yhats = []
+                for start in range(0, n_samples, max_eval_size):
+                    end = min(start + max_eval_size, n_samples)
+                    z_batch = jax.random.uniform(key, (end - start, self._eval_num_z))
+                    yhat, _ = self._cached_eval_fn(
+                        rep_params,
+                        x_slice[start:end],
+                        z_batch,
+                        jax.random.split(key, end - start),
+                        tu_mask,
+                    )
+                    yhats.append(yhat)
+
+                yhat_dep = jnp.compress(self._eval_dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
+                rep_losses.append(
+                    jnp.mean((yhat_dep - jnp.tile(y_slice, (1, n_networks))) ** 2, axis=0).tolist()
+                )
+            all_losses.append(rep_losses)
+
+        return jnp.array(all_losses)
+
+    def _run_single_trial(self, trial: optuna.Trial) -> float:
         """Run a single design trial."""
-        hp = {spec.name: spec.suggest(trial) for spec in self.hyperparams}
-        hp['seed'] = self.seed if self.seed else trial.number
+        hp = self._suggest_hyperparams(trial)
+        dconf = self._design_conf
+        assert dconf is not None, "_prepare() must be called before _run_single_trial()"
 
         try:
-            pkey, bkey, loop_key, eval_key = jax.random.split(
-                jax.random.PRNGKey(hp['seed']), 4
+            pkey, bkey, loop_key, eval_key, tu_key = jax.random.split(
+                jax.random.PRNGKey(hp['seed']), 5
             )
 
-            params = self._inject_hyperparams(self._initial_params, hp)
+            params = deepcopy(self._initial_params)
+            self._inject_hyperparams(params, hp)
+
+            if TU_LOG_ALPHA_PATH in params and (
+                'tu_log_alpha_init_mean' in hp or 'tu_log_alpha_init_std' in hp
+            ):
+                mean = hp.get('tu_log_alpha_init_mean', dconf.tu_log_alpha_init_mean)
+                std = hp.get('tu_log_alpha_init_std', dconf.tu_log_alpha_init_std)
+                old_shape = params[TU_LOG_ALPHA_PATH].shape
+                new_log_alpha = mean + std * jax.random.normal(tu_key, shape=old_shape)
+                new_log_alpha = jnp.clip(new_log_alpha, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+                params.at(TU_LOG_ALPHA_PATH, new_log_alpha, overwrite=True)
 
             static, dynamic = params.filter_by_tag(["non_grad", "shared"])
             opt_state = vmap(vmap(dconf.optimizer.init))(dynamic)
@@ -422,7 +536,7 @@ class DesignHyperoptProgram(BaseModel):
             ybatches = ybatches_list[0]
 
             t0 = time.time()
-            final_params, history = optimize(
+            final_params, loss_history, step_history = optimize(
                 self._cached_step,
                 params,
                 opt_state,
@@ -435,6 +549,7 @@ class DesignHyperoptProgram(BaseModel):
                 stack=self._cached_stack,
                 loggers=None,
                 verbose=False,
+                precompiled=True,
             )
             train_time = time.time() - t0
 
@@ -442,22 +557,12 @@ class DesignHyperoptProgram(BaseModel):
                 xraw, yraw = sample_for_evaluation(
                     self._dmanager, dconf, final_params, self.eval_n_samples, eval_key
                 )
-                _, mse_losses = evaluate_design(
-                    self._dmanager,
-                    dconf,
-                    self._model,
-                    final_params,
-                    xraw,
-                    yraw,
-                    eval_key,
-                    store_predictions=False,
-                )
+                mse_losses = self._evaluate_cached(final_params, xraw, yraw, eval_key)
                 rmse_per_network = np.sqrt(np.mean(np.array(mse_losses), axis=(0, 1)))
                 top_k_indices = np.argsort(rmse_per_network)[: self.eval_top_k]
                 loss = float(np.mean(rmse_per_network[top_k_indices]))
             else:
-                losses = np.array(history[-1]['all_losses'])
-                loss = float(np.mean(losses))
+                loss = float(np.mean(loss_history[-1])) if loss_history else float('inf')
 
             if self.verbose:
                 logger.info(f"Trial {trial.number}: loss={loss:.6f} ({train_time:.1f}s)")
@@ -467,101 +572,6 @@ class DesignHyperoptProgram(BaseModel):
         except Exception as e:
             logger.exception(f"Trial {trial.number} failed: {e}")
             return float('inf')
-
-    def _create_sampler(self, n_complete: int = 0, source_trials=None) -> BaseSampler:
-        """Create Optuna sampler."""
-        from biocomptools.hyperopt.samplers import create_sampler
-
-        return create_sampler(
-            sampler_type=self.sampler,
-            seed=self.seed,
-            n_startup_trials=self.n_startup_trials,
-            cmaes_restart_strategy=self.cmaes_restart_strategy,
-            cmaes_with_margin=self.cmaes_with_margin,
-            cmaes_popsize=self.cmaes_popsize,
-            cmaes_sigma0=self.cmaes_sigma0,
-            cmaes_source_trials=source_trials,
-            cmaes_warn_independent_sampling=self.cmaes_warn_independent_sampling,
-        )
-
-    def _load_existing(self) -> optuna.Study | None:
-        try:
-            return optuna.load_study(study_name=self.study_name, storage=self._storage_path)
-        except KeyError:
-            return None
-
-    def _get_completed_trials(self, study: optuna.Study | None) -> list:
-        if not study:
-            return []
-        return [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-
-    def _save_results(self, study: optuna.Study):
-        out = Path(self.output_dir) / self.study_name
-        out.mkdir(parents=True, exist_ok=True)
-        with open(out / "best_hyperparams.json", "w") as f:
-            json.dump(study.best_params, f, indent=2)
-        study.trials_dataframe().to_csv(out / "trials.csv", index=False)
-        logger.info(f"Results saved to {out}")
-
-    async def run(self):
-        if self.dashboard:
-            import optuna_dashboard
-
-            logger.info(f"Launching dashboard at http://localhost:{self.dashboard_port}")
-            optuna_dashboard.run_server(self._storage_path, port=self.dashboard_port)
-            return
-
-        if self.show_best:
-            study = self._load_existing()
-            if study:
-                completed = self._get_completed_trials(study)
-                logger.info(f"Study: {self.study_name} ({len(completed)} complete)")
-                if completed:
-                    logger.info(f"Best: #{study.best_trial.number} loss={study.best_value:.6f}")
-                    logger.info(f"Best params: {study.best_params}")
-            return
-
-        self._prepare_design_manager()
-
-        dconf = (
-            self.design_conf.construct(context={})
-            if isinstance(self.design_conf, DeferredNode)
-            else self.design_conf
-        )
-
-        self._compile_design_step(dconf)
-
-        completed = self._get_completed_trials(self._load_existing())
-        sampler = self._create_sampler(len(completed), completed if self.cmaes_warm_start else None)
-
-        study = optuna.create_study(
-            study_name=self.study_name,
-            storage=self._storage_path,
-            load_if_exists=True,
-            direction="minimize",
-            sampler=sampler,
-            pruner=optuna.pruners.NopPruner(),
-        )
-
-        pbar = tqdm(total=self.n_trials, desc="Design Hyperopt")
-
-        def callback(study, trial):
-            if trial.state == optuna.trial.TrialState.COMPLETE:
-                pbar.update()
-                pbar.set_postfix(best=f"{study.best_value:.4f}")
-
-        study.optimize(
-            lambda trial: self._run_single_trial(trial, dconf),
-            n_trials=self.n_trials,
-            callbacks=[callback],
-        )
-        pbar.close()
-
-        self._save_results(study)
-
-        logger.info(f"\nBest trial: #{study.best_trial.number}")
-        logger.info(f"Best loss: {study.best_value:.6f}")
-        logger.info(f"Best params: {json.dumps(study.best_params, indent=2)}")
 
 
 async def _main_async():

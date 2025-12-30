@@ -11,21 +11,20 @@ Usage:
 """
 
 from __future__ import annotations
-import json
+
 import pickle
-import sys
 import time
 import asyncio
 import threading
 from pathlib import Path
-from typing import Any, Annotated, Literal
+from typing import Any, Annotated
+
 import numpy as np
 import optuna
-from optuna.samplers import BaseSampler
 from tqdm import tqdm
-from pydantic import Field, BaseModel
+from pydantic import Field
 
-from dracon.commandline import Arg
+from dracon.commandline import Arg, dracon_program
 from dracon.deferred import DeferredNode
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
@@ -36,37 +35,12 @@ from biocomptools.toollib.common import config
 from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.toollib.networkselector import build_data_manager, NetworkSet
 from biocomptools.optimtools import DEFAULT_TYPES, make_context_from_types
-from biocomptools.logging_config import get_logger
-from biocomptools.optimtools import make_context_from_types
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.networkprediction import NetworkPrediction
 from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
-from dracon.commandline import Arg, dracon_program
+from biocomptools.hyperopt.base import BaseHyperoptProgram, HyperparamSpec
 
 logger = get_logger(__name__)
-
-
-class HyperparamSpec(BaseModel):
-    """Hyperparameter specification for Optuna."""
-
-    name: str
-    type: Literal['float', 'log_float', 'int', 'categorical']
-    low: float | int | None = None
-    high: float | int | None = None
-    choices: list | None = None
-    step: float | None = None
-    target_path: str | None = None
-
-    def suggest(self, trial: optuna.Trial) -> Any:
-        if self.type == 'float':
-            return trial.suggest_float(self.name, self.low, self.high, step=self.step)
-        if self.type == 'log_float':
-            return trial.suggest_float(self.name, self.low, self.high, log=True)
-        if self.type == 'int':
-            return trial.suggest_int(self.name, int(self.low), int(self.high))
-        if self.type == 'categorical':
-            return trial.suggest_categorical(self.name, self.choices)
-        raise ValueError(f"Unknown type: {self.type}")
 
 
 @dracon_program(
@@ -75,31 +49,22 @@ class HyperparamSpec(BaseModel):
     context_types=DEFAULT_TYPES + [HyperparamSpec],
     context={'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve()},
 )
-class HyperoptProgram(BaseModel):
-    """Hyperopt program with drastically reduced complexity."""
+class HyperoptProgram(BaseHyperoptProgram):
+    """Training hyperopt with validation loss and vmap trials support.
 
-    study_name: Annotated[str, Arg(help='Study name for persistence')] = "hyperopt"
-    output_dir: Annotated[str, Arg(help='Output directory')] = "./hyperopt_output"
-    n_trials: Annotated[int, Arg(help='Number of trials')] = 100
-    seed: Annotated[int | None, Arg(help='Random seed')] = None
+    Extends BaseHyperoptProgram with:
+    - Training configuration
+    - Validation with NRE/nRMSE metrics
+    - vmap-batched trials for parallelism
+    - Dataset weight optimization
+    """
 
-    sampler: Annotated[str, Arg(help='Sampler: tpe, cmaes, hybrid')] = "tpe"
-    pruning: Annotated[bool, Arg(help='Enable pruning')] = False
-    n_startup_trials: int = 10
-
-    # CMA-ES options
-    cmaes_restart_strategy: str | None = "bipop"
-    cmaes_popsize: int | None = 32
-    cmaes_sigma0: float = 0.5
-    cmaes_warm_start: bool = True
-    cmaes_with_margin: bool = True
+    # Additional CMA-ES options not in base
     cmaes_x0: str | None = None
-    cmaes_warn_independent_sampling: bool = False  # suppress noisy warnings from restart strategies
-    hybrid_switch_trial: int = 50
     sparse_sampling: bool = False
     sparse_alpha: float = 0.1
 
-    # Training
+    # Training configuration
     training_conf: Annotated[
         DeferredNode[TrainingConfig] | TrainingConfig, Arg(help='Training config')
     ]
@@ -117,7 +82,7 @@ class HyperoptProgram(BaseModel):
     validation_enable_gridstats: bool = True
     validation_gridstats_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
     validation_gridstats_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
-    validation_gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]  # must be >= min_points
+    validation_gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
     validation_gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
     validation_gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
     validation_softmax_alpha: float = 5.0
@@ -125,15 +90,11 @@ class HyperoptProgram(BaseModel):
 
     # Dataset weight optimization
     rebuild_dman_per_trial: bool = False
-    hyperparams: list[HyperparamSpec] = []
 
     # Model saving
     n_top_models: int = 10
 
-    # Modes
-    show_best: bool = False
-    dashboard: bool = False
-    dashboard_port: int = 8080
+    # Additional modes not in base
     export_only: bool = False
     n_jobs: int = 1
     vmap_trials: bool = False
@@ -145,30 +106,25 @@ class HyperoptProgram(BaseModel):
     _training_dman: Any = None
     _cached_step: Any = None
     _vmap_cached_step: Any = None
-    _cached_batches: Any = None  # (xbatches, ybatches) for reuse across trial batches
-    _compile_lock: Any = None  # threading.Lock for thread-safe compilation
+    _cached_batches: Any = None
+    _compile_lock: Any = None
     _validation_predictor: Any = None
     _validation_runner: Any = None
     _network_weight_mapping: list | None = None
-    _network_to_dataset: dict | None = None  # network_name -> dataset_name (for hyperparam lookup)
+    _network_to_dataset: dict | None = None
     _weight_name_to_ndp: dict | None = None
-    _best_loss: float = float('inf')
     _best_stats: list[dict] | None = None
-    _best_trial_number: int | None = None
     db_session: Any = None
     path_prefix: Path | None = None
-
-    model_config = {'arbitrary_types_allowed': True}
 
     def model_post_init(self, _):
         self._lib = load_lib()
         self.path_prefix = Path(config.paths.root).expanduser().resolve()
         self._compile_lock = threading.Lock()
 
-    @property
-    def _storage_path(self) -> str:
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{Path(self.output_dir) / (self.study_name + '.db')}"
+    def _prepare(self):
+        """Prepare data manager for training hyperopt."""
+        self._prepare_data_manager()
 
     def _prepare_data_manager(self, hyperparams: dict | None = None):
         """Build or update DataManager. Fast path for weight-only changes.
@@ -351,26 +307,6 @@ class HyperoptProgram(BaseModel):
             )
             logger.info(f"Validation ready ({len(networks)} networks)")
 
-    def _create_sampler(self, n_complete: int = 0, source_trials=None) -> BaseSampler:
-        """Create Optuna sampler based on configuration."""
-        from biocomptools.hyperopt.samplers import create_sampler
-
-        sampler_type = self.sampler
-        if sampler_type == "hybrid":
-            sampler_type = "tpe" if n_complete < self.hybrid_switch_trial else "cmaes"
-
-        return create_sampler(
-            sampler_type=sampler_type,
-            seed=self.seed,
-            n_startup_trials=self.n_startup_trials,
-            cmaes_restart_strategy=self.cmaes_restart_strategy,
-            cmaes_with_margin=self.cmaes_with_margin,
-            cmaes_popsize=self.cmaes_popsize,
-            cmaes_sigma0=self.cmaes_sigma0,
-            cmaes_source_trials=source_trials,
-            cmaes_warn_independent_sampling=self.cmaes_warn_independent_sampling,
-        )
-
     def _run_single_trial(self, trial: optuna.Trial) -> float:
         """Run single training trial."""
         hp = {spec.name: spec.suggest(trial) for spec in self.hyperparams}
@@ -508,7 +444,7 @@ class HyperoptProgram(BaseModel):
         n_batches_needed = batch_conf.n_batches
         batch_size = batch_conf.batch_size
         if self._cached_batches is None:
-            print(f"[vmap] Generating batches (caching on CPU for reuse)...")
+            print("[vmap] Generating batches (caching on CPU for reuse)...")
             t0 = time.time()
             # Generate enough for max_replicates (first batch size) - subsequent can slice
             flat_n = n_trials * n_batches_needed
@@ -719,25 +655,6 @@ class HyperoptProgram(BaseModel):
         print(f"{'═' * 70}\n")
 
         self._save_results(study)
-
-    def _load_existing(self) -> optuna.Study | None:
-        try:
-            return optuna.load_study(study_name=self.study_name, storage=self._storage_path)
-        except KeyError:
-            return None
-
-    def _get_completed_trials(self, study: optuna.Study | None) -> list:
-        if not study:
-            return []
-        return [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-
-    def _save_results(self, study: optuna.Study):
-        out = Path(self.output_dir) / self.study_name
-        out.mkdir(parents=True, exist_ok=True)
-        with open(out / "best_hyperparams.json", "w") as f:
-            json.dump(study.best_params, f, indent=2)
-        study.trials_dataframe().to_csv(out / "trials.csv", index=False)
-        logger.info(f"Results saved to {out}")
 
     def _save_model_if_top(self, trial_num: int, loss: float, params, compute_conf, hp: dict):
         if self.n_top_models <= 0 or loss == float('inf'):
