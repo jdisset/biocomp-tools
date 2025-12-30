@@ -586,11 +586,8 @@ class AsyncLoggerHandler(BaseModel):
 
         logger.info(f"Replaying {len(batches)} batches through {len(loggers)} loggers")
 
-        # build history manager with loaded batches
+        # history manager will be built incrementally during replay
         history_manager = HistoryManager()
-        for batch in batches:
-            history_manager.append_batch(batch)
-
         last_batch = batches[-1]
 
         # initialize loggers
@@ -606,11 +603,14 @@ class AsyncLoggerHandler(BaseModel):
             except Exception as e:
                 logger.error(f"Failed to initialize logger {logger_obj}: {e}")
 
-        # process batches
+        # process batches - add each batch incrementally to simulate real-time replay
         last_callback_step: Dict[int, int] = {}
 
         from tqdm import tqdm
         for batch in tqdm(batches, desc="Processing steps", unit="step"):
+            # add batch to history BEFORE processing (simulates real-time behavior)
+            history_manager.append_batch(batch)
+
             step = batch.step_index
             step_context = LoggerContext(
                 output_dir=history_dir.parent,

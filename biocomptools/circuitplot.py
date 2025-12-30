@@ -92,14 +92,17 @@ def ensure_library():
 
 
 def run_circuitplot(config: CircuitPlotConfig):
-    recipe = load_recipe(config)
     ensure_library()
 
-    networks = recipe_to_networks(recipe, invert=config.invert)
-    if not networks:
-        raise ValueError("No networks generated from recipe")
-
-    network = networks[0]
+    if hasattr(config, "_network") and config._network is not None:
+        network = config._network
+        recipe = None
+    else:
+        recipe = load_recipe(config)
+        networks = recipe_to_networks(recipe, invert=config.invert)
+        if not networks:
+            raise ValueError("No networks generated from recipe")
+        network = networks[0]
     output = Path(config.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -142,6 +145,8 @@ def run_circuitplot(config: CircuitPlotConfig):
         logger.info(f"Saved plot to {output}")
 
     elif config.plot_type == "card":
+        if recipe is None:
+            raise ValueError("Card plot requires a recipe - pass recipe or recipe_file")
         _render_card(network, recipe, output, config)
 
     else:

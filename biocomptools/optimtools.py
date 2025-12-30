@@ -241,14 +241,18 @@ class BaseOptimizationProgram(BaseModel, ABC):
         logger_callbacks = sync_callbacks.copy()
 
         async_handler = None
-        if self.async_logging and async_callbacks:
+        needs_async_handler = async_callbacks or self.save_all_steps or self.keep_history_on_disk
+        if self.async_logging and needs_async_handler:
             async_handler = self._setup_async_handler(async_callbacks, async_loggers)
             logger_callbacks.append((1, async_handler.create_callback()))
 
             save_info = ", saving all steps" if self.save_all_steps else ""
-            logger.info(
-                f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool{save_info})"
-            )
+            if async_callbacks:
+                logger.info(
+                    f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool{save_info})"
+                )
+            else:
+                logger.info(f"Step history recording enabled{save_info}")
         elif self.async_logging:
             logger.info("Async logging enabled but no async-capable loggers found")
         else:

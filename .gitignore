@@ -14,3 +14,6 @@ repo*
 .repo*
 
 .envrc
+biocomptools/tuner-ui/node_modules
+biocomptools/tuner-ui/package-lock.json
+biocomptools/tuner_app_react

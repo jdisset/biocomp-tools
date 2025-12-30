@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>biocomp-tuner</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>biocomp-tuner</h1>
+        <div id="session-info">
+            <span id="network-name">Not initialized</span>
+            <span id="grid-info"></span>
+        </div>
+    </header>
+
+    <main>
+        <section id="visualization-section" class="panel hidden">
+            <div class="viz-grid">
+                <div class="heatmap-container">
+                    <h3>Target</h3>
+                    <div id="target-heatmap"></div>
+                </div>
+                <div class="heatmap-container">
+                    <h3>Prediction</h3>
+                    <div id="prediction-heatmap"></div>
+                </div>
+                <div class="loss-panel">
+                    <h3>Losses</h3>
+                    <div id="losses-display">
+                        <div class="loss-row">
+                            <span class="loss-label">Sinkhorn:</span>
+                            <span id="loss-sinkhorn" class="loss-value">-</span>
+                        </div>
+                        <div class="loss-row">
+                            <span class="loss-label">LNCC:</span>
+                            <span id="loss-lncc" class="loss-value">-</span>
+                        </div>
+                        <div class="loss-row">
+                            <span class="loss-label">MSE:</span>
+                            <span id="loss-mse" class="loss-value">-</span>
+                        </div>
+                        <div class="loss-row total">
+                            <span class="loss-label">TOTAL:</span>
+                            <span id="loss-total" class="loss-value">-</span>
+                        </div>
+                        <hr>
+                        <div class="loss-row">
+                            <span class="loss-label">TU Count Penalty:</span>
+                            <span id="penalty-tucount" class="loss-value">-</span>
+                        </div>
+                        <div class="loss-row">
+                            <span class="loss-label">Spread Penalty:</span>
+                            <span id="penalty-spread" class="loss-value">-</span>
+                        </div>
+                    </div>
+                    <button id="compute-btn" class="primary-btn">Compute</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="params-section" class="panel hidden">
+            <div class="params-header">
+                <h2>Parameters</h2>
+                <div class="params-actions">
+                    <button id="reset-btn" class="action-btn">Reset Random</button>
+                    <button id="zero-btn" class="action-btn">Zero All</button>
+                    <button id="export-btn" class="action-btn">Export</button>
+                    <button id="import-btn" class="action-btn">Import</button>
+                    <input type="file" id="import-file" accept=".json" style="display:none">
+                </div>
+            </div>
+
+            <div id="params-container">
+                <!-- Dynamically populated -->
+            </div>
+        </section>
+
+        <section id="init-section" class="panel collapsible collapsed">
+            <div class="collapsible-header" onclick="toggleCollapsible(this.parentElement)">
+                <span class="collapse-icon">▶</span>
+                <h2>Session Configuration</h2>
+            </div>
+            <div class="collapsible-content">
+                <div class="form-grid">
+                    <label for="model-path">Model:</label>
+                    <input type="text" id="model-path" readonly placeholder="(loading...)">
+
+                    <label for="scaffold-path">Scaffold:</label>
+                    <input type="text" id="scaffold-path" readonly placeholder="(loading...)">
+
+                    <label for="target-path">Target:</label>
+                    <input type="text" id="target-path" readonly placeholder="(loading...)">
+
+                    <label for="grid-res">Grid Resolution:</label>
+                    <input type="number" id="grid-res" readonly value="32" min="8" max="128">
+                </div>
+                <button id="init-btn" class="primary-btn" style="display:none;">Initialize</button>
+                <div id="init-status" class="status"></div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>biocomp-tuner - Interactive design parameter explorer</p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

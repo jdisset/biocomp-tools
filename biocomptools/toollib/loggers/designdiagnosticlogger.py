@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING
 
@@ -11,8 +12,84 @@ from biocomptools.logging_config import get_logger
 
 if TYPE_CHECKING:
     from biocomptools.logger_history import HistoryView, LoggerContext
+    from biocomp.compute import ComputeStack
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class RatioInfo:
+    """Metadata for ratio parameters in an aggregation layer."""
+
+    cotx_name: str
+    tu_names: list[str]
+
+
+def _build_ratio_metadata(stack: ComputeStack) -> dict[str, list[RatioInfo]]:
+    """Build mapping from namespace to ratio metadata (cotx names, TU names).
+
+    This enables descriptive labeling of ratio parameters in the particle plot,
+    e.g., "CoTx1:TU_A" instead of "ratios.0".
+
+    Similar to biocomp-tuner's param_schema._build_ratio_metadata.
+    """
+    metadata: dict[str, list[RatioInfo]] = {}
+    if stack.layers is None:
+        return metadata
+
+    for i, layer in enumerate(stack.layers):
+        type_name = layer.type_str()
+        if "aggregation" not in type_name.lower() or "inv" in type_name.lower():
+            continue
+
+        ns = stack.get_layer_namespace(i)
+        ratio_infos = []
+        for node in layer.nodes:
+            full_node = node.get(stack)
+            extra = full_node.extra
+            cotx_name = extra.get("cotx_group", "unknown")
+            tu_names = extra.get("members", [])
+            ratio_infos.append(RatioInfo(cotx_name=cotx_name, tu_names=tu_names))
+        metadata[ns] = ratio_infos
+
+    return metadata
+
+
+def _build_transform_metadata(stack: ComputeStack) -> dict[str, list[list[str]]]:
+    """Build mapping from namespace to input TU names for transform layers.
+
+    Transform layers (translation, transcription) have multiple inputs, each associated
+    with a source TU. This enables labeling like "tc_rate:TU_A" instead of "tc_rate.0".
+    """
+    metadata: dict[str, list[list[str]]] = {}
+    if stack.layers is None:
+        return metadata
+
+    for i, layer in enumerate(stack.layers):
+        type_name = layer.type_str()
+        if "translation" not in type_name.lower() and "transcription" not in type_name.lower():
+            continue
+        if "inv" in type_name.lower():
+            continue
+
+        ns = stack.get_layer_namespace(i)
+        node_tu_names = []
+        for node in layer.nodes:
+            incoming_edges = node.get_incoming_edges(stack)
+            tu_names = []
+            for edge in incoming_edges:
+                if edge.extra:
+                    tu_id_list = edge.extra.get("tu_id", [])
+                    if tu_id_list:
+                        tu_names.append(tu_id_list[0].split("_")[0] if tu_id_list else "?")
+                    else:
+                        tu_names.append("?")
+                else:
+                    tu_names.append("?")
+            node_tu_names.append(tu_names)
+        metadata[ns] = node_tu_names
+
+    return metadata
 
 
 def _to_scalar(val) -> float:
@@ -47,18 +124,33 @@ def unroll_dict(d: dict, prefix: str = "") -> dict[str, float]:
     return result
 
 
+@dataclass
+class ParamMetadata:
+    """Metadata for descriptive parameter labeling."""
+
+    ratio_metadata: dict[str, list[RatioInfo]]
+    transform_metadata: dict[str, list[list[str]]]
+    tu_idx_to_id: dict[int, str] | None = None
+
+
 def unroll_params(
     params,
     replicate: int,
     target: int,
     network: int,
     tu_idx_to_id: dict[int, str] | None = None,
+    param_metadata: ParamMetadata | None = None,
 ) -> dict[str, float]:
     """Extract flattened param dict for a specific replicate/target/network.
 
     Handles both:
     - latest_params: shape (n_replicates, n_targets, ...)
     - params from scan: shape (batches_per_step, n_replicates, n_targets, ...)
+
+    When param_metadata is provided, creates descriptive labels for:
+    - Ratios: "CoTx1:TU_A" instead of "ratios.0"
+    - Transform rates: "tl_rate:TU_A" instead of "tl_rate.0"
+    - TU log alpha: "TU:name" instead of "tu_log_alpha.0"
     """
     result = {}
     if params is None:
@@ -112,20 +204,32 @@ def unroll_params(
 
     # Build a map of namespace -> node_network_ids for filtering by network
     # Use all_leaves since node_network_ids are tagged as non_grad
-    network_id_map = {}
+    network_id_map: dict[str, np.ndarray] = {}
+    # Track which local indices map to which original node positions per namespace
+    network_node_indices: dict[str, list[int]] = {}
+
     for path, value in all_leaves:
         path_str = str(path)
         if 'node_network_ids' in path_str:
             try:
                 arr = value.get_array() if hasattr(value, 'get_array') else value
                 arr = extract_replicate_target(arr, replicate, target)
-                # Squeeze singleton dimensions
                 while arr.ndim > 1 and arr.shape[0] == 1:
                     arr = arr[0]
                 namespace = path_str.rsplit('/node_network_ids', 1)[0]
-                network_id_map[namespace] = np.asarray(arr).ravel()
+                net_ids = np.asarray(arr).ravel()
+                network_id_map[namespace] = net_ids
+                # Track original indices for nodes belonging to this network
+                network_node_indices[namespace] = [
+                    i for i, nid in enumerate(net_ids) if nid == network
+                ]
             except (IndexError, KeyError, TypeError, ValueError):
                 pass
+
+    # Extract ratio and transform metadata for labeling
+    ratio_meta = param_metadata.ratio_metadata if param_metadata else {}
+    transform_meta = param_metadata.transform_metadata if param_metadata else {}
+    tu_map = param_metadata.tu_idx_to_id if param_metadata else tu_idx_to_id
 
     for path, value in leaves:
         path_str = str(path)
@@ -163,11 +267,13 @@ def unroll_params(
                 while arr.ndim > 1 and arr.shape[0] == 1:
                     arr = arr[0]
 
-            # For layer-local params, filter by node_network_ids
+            # Determine namespace and check for descriptive metadata
             namespace = None
+            original_node_indices = None
             for ns in network_id_map:
                 if path_str.startswith(ns + '/'):
                     namespace = ns
+                    original_node_indices = network_node_indices.get(ns)
                     break
 
             if namespace and namespace in network_id_map:
@@ -180,10 +286,16 @@ def unroll_params(
                     arr = arr[mask]
 
             param_flat = np.asarray(arr).ravel()
-            max_per_param = 100  # Increased since we're filtering by network
+            max_per_param = 100
             if param_flat.size > max_per_param:
                 param_flat = param_flat[:max_per_param]
 
+            # Determine param type for labeling
+            is_ratio = '/ratios' in path_str and namespace in ratio_meta
+            is_rate = '_rate' in path_str or 'tl_rate' in path_str or 'tc_rate' in path_str
+            is_transform_rate = is_rate and namespace in transform_meta
+
+            # Build short path for fallback
             short_path = (
                 path_str.replace('design/', 'd/')
                 .replace('local/', 'l/')
@@ -196,13 +308,67 @@ def unroll_params(
             )
 
             for i, v in enumerate(param_flat):
-                if is_tu_log_alpha and tu_idx_to_id and i in tu_idx_to_id:
-                    tu_name = tu_idx_to_id[i][:20]
+                key = None
+
+                if is_tu_log_alpha and tu_map and i in tu_map:
+                    tu_name = tu_map[i][:20]
                     key = f"TU:{tu_name}"
-                elif param_flat.size > 1:
-                    key = f"{short_path}.{i}"
-                else:
-                    key = short_path
+
+                elif is_ratio and original_node_indices and namespace:
+                    # Use ratio metadata for descriptive label
+                    ratio_infos = ratio_meta[namespace]
+                    # Map local index to original node index
+                    if len(original_node_indices) == 1:
+                        # Single node for this network
+                        orig_node_idx = original_node_indices[0]
+                        if orig_node_idx < len(ratio_infos):
+                            ri = ratio_infos[orig_node_idx]
+                            # i indexes into TU names within this node's ratios
+                            if i < len(ri.tu_names):
+                                cotx_short = ri.cotx_name[:8] if ri.cotx_name else "?"
+                                tu_short = ri.tu_names[i][:12] if ri.tu_names[i] else f"TU{i}"
+                                key = f"{cotx_short}:{tu_short}"
+                    else:
+                        # Multiple nodes: i might span across nodes
+                        # Each node has n_ratios values
+                        # Figure out which node and which ratio within that node
+                        cumulative = 0
+                        for _local_idx, orig_idx in enumerate(original_node_indices):
+                            if orig_idx < len(ratio_infos):
+                                ri = ratio_infos[orig_idx]
+                                n_ratios = len(ri.tu_names) if ri.tu_names else 1
+                                if i < cumulative + n_ratios:
+                                    ratio_idx = i - cumulative
+                                    cotx_short = ri.cotx_name[:8] if ri.cotx_name else "?"
+                                    tu_short = (
+                                        ri.tu_names[ratio_idx][:12]
+                                        if ratio_idx < len(ri.tu_names) and ri.tu_names[ratio_idx]
+                                        else f"TU{ratio_idx}"
+                                    )
+                                    key = f"{cotx_short}:{tu_short}"
+                                    break
+                                cumulative += n_ratios
+
+                elif is_transform_rate and original_node_indices and namespace:
+                    # Use transform metadata for descriptive label
+                    node_tu_lists = transform_meta[namespace]
+                    rate_type = (
+                        "tl" if "tl_rate" in path_str or "/translation" in path_str else "tc"
+                    )
+                    if len(original_node_indices) == 1:
+                        orig_node_idx = original_node_indices[0]
+                        if orig_node_idx < len(node_tu_lists):
+                            tu_names = node_tu_lists[orig_node_idx]
+                            if i < len(tu_names):
+                                key = f"{rate_type}:{tu_names[i][:12]}"
+
+                # Fallback to generic label
+                if key is None:
+                    if param_flat.size > 1:
+                        key = f"{short_path}.{i}"
+                    else:
+                        key = short_path
+
                 result[key] = float(v)
 
         except (IndexError, KeyError, TypeError, ValueError):
@@ -216,8 +382,9 @@ def unroll_grads(
     target: int,
     network: int,
     tu_idx_to_id: dict[int, str] | None = None,
+    param_metadata: ParamMetadata | None = None,
 ) -> dict[str, float]:
-    return unroll_params(grads, replicate, target, network, tu_idx_to_id)
+    return unroll_params(grads, replicate, target, network, tu_idx_to_id, param_metadata)
 
 
 def prepare_particle_data(
@@ -239,11 +406,16 @@ def prepare_particle_data(
 
 
 def _squeeze_to_3d(arr: np.ndarray | None) -> np.ndarray | None:
+    """Squeeze array to 3D by taking the last element of leading dimensions.
+
+    Takes arr[-1] (not arr[0]) to get the latest batch when arrays have
+    extra dimensions from scan/replicates: (n_reps, batches_per_step, batch_size, ...)
+    """
     if arr is None:
         return None
     arr = np.asarray(arr)
     while arr.ndim > 3:
-        arr = arr[0]
+        arr = arr[-1]
     return arr
 
 
@@ -259,17 +431,26 @@ class DesignDiagnosticLogger(Logger):
     # configuration
     output_dir: str | None = None
     periods: int = 10
-    max_history_len: int = 200
+    max_history_len: int = 100
     generate_plots: bool = True
     final_figure_only: bool = False
     save_history: bool = True
     max_networks_to_plot: int = 4
     max_targets_to_plot: int = 2
+    particle_plot_spacing: int = 55
+    file_format: Literal["pdf", "png"] = "png"
 
     # output structure: "step_first" (default) or "network_first"
     # step_first:    step_XXXXXX/target_N_name/network_M.pdf
     # network_first: network_M/target_name/design_diagnostic_step_XXXXXX.pdf
     output_structure: Literal["step_first", "network_first"] = "step_first"
+
+    # network selection strategy - CRITICAL for stable tracking across steps
+    # "fixed": use network indices 0, 1, ... max_networks_to_plot (default, original behavior)
+    # "best_at_start": pick the best networks at first step, track those same networks throughout
+    # "by_name": track specific networks by name (use network_names_to_plot)
+    network_selection: Literal["fixed", "best_at_start", "by_name"] = "fixed"
+    network_names_to_plot: list[str] | None = None  # for "by_name" selection
 
     # parallel figure generation: defer figure generation and batch them
     deferred_figures: bool = False  # if True, queue figures instead of generating
@@ -307,6 +488,12 @@ class DesignDiagnosticLogger(Logger):
     _stack: Any = PrivateAttr(default=None)
     _networks: list = PrivateAttr(default_factory=list)  # Networks loaded from replay
     _pending_figures: list = PrivateAttr(default_factory=list)  # Deferred figure tasks
+    _selected_network_indices: dict[int, list[int]] = PrivateAttr(
+        default_factory=dict
+    )  # tid -> [nid, ...]
+    _param_metadata: ParamMetadata | None = PrivateAttr(
+        default=None
+    )  # For descriptive param labels
 
     def initialize(self, training_program=None):
         if self.output_dir:
@@ -395,6 +582,71 @@ class DesignDiagnosticLogger(Logger):
                     logger.debug(f"Could not load from {designs_file}: {e}")
 
         logger.debug("Could not locate any network files for replay")
+
+    def _select_networks_for_target(
+        self, tid: int, n_networks: int, step_history: dict | None = None
+    ) -> list[int]:
+        """Select which network indices to track for this target.
+
+        Selection strategies:
+        - "fixed": use indices 0, 1, ... max_networks_to_plot
+        - "best_at_start": pick best networks by loss at first step, track those forever
+        - "by_name": find indices matching network_names_to_plot
+        """
+        max_nets = min(n_networks, self.max_networks_to_plot)
+
+        if self.network_selection == "fixed":
+            return list(range(max_nets))
+
+        if self.network_selection == "by_name":
+            if not self.network_names_to_plot:
+                logger.warning("network_selection='by_name' but no network_names_to_plot specified")
+                return list(range(max_nets))
+            indices = []
+            for name in self.network_names_to_plot:
+                if name in self._network_names:
+                    indices.append(self._network_names.index(name))
+                else:
+                    logger.warning(f"Network '{name}' not found in available networks")
+            return indices[:max_nets] if indices else list(range(max_nets))
+
+        if self.network_selection == "best_at_start":
+            if step_history is None:
+                return list(range(max_nets))
+            all_losses = step_history.get("all_losses")
+            if all_losses is None:
+                return list(range(max_nets))
+            arr = np.asarray(all_losses)
+            # Extract losses for this target across all networks
+            # Shape: (n_replicates, batches_per_step, n_targets, n_networks) or (n_targets, n_networks)
+            if arr.ndim == 4:
+                net_losses = np.nanmean(arr[0, :, tid, :], axis=0)  # avg over batches, rep 0
+            elif arr.ndim == 3:
+                net_losses = np.nanmean(arr[:, tid, :], axis=0)
+            elif arr.ndim == 2:
+                net_losses = arr[tid, :]
+            else:
+                return list(range(max_nets))
+            # Sort by loss (ascending = best first)
+            sorted_indices = np.argsort(net_losses).tolist()
+            return sorted_indices[:max_nets]
+
+        return list(range(max_nets))
+
+    def _get_selected_networks(
+        self, tid: int, n_networks: int, step_history: dict | None = None
+    ) -> list[int]:
+        """Get or create stable network selection for a target."""
+        if tid not in self._selected_network_indices:
+            self._selected_network_indices[tid] = self._select_networks_for_target(
+                tid, n_networks, step_history
+            )
+            net_names = [self._get_network_name(nid) for nid in self._selected_network_indices[tid]]
+            logger.info(
+                f"Target {tid}: selected networks {self._selected_network_indices[tid]} "
+                f"({net_names}) using '{self.network_selection}' strategy"
+            )
+        return self._selected_network_indices[tid]
 
     def _extract_metrics(
         self, step: int, step_history: dict, target_id: int, network_id: int
@@ -517,6 +769,25 @@ class DesignDiagnosticLogger(Logger):
     def _get_network_name(self, nid: int) -> str | None:
         return self._network_names[nid] if nid < len(self._network_names) else None
 
+    def _build_param_metadata(self, stack) -> None:
+        """Build metadata for descriptive parameter labeling from the stack."""
+        try:
+            ratio_meta = _build_ratio_metadata(stack)
+            transform_meta = _build_transform_metadata(stack)
+            self._param_metadata = ParamMetadata(
+                ratio_metadata=ratio_meta,
+                transform_metadata=transform_meta,
+                tu_idx_to_id=self._tu_idx_to_id,
+            )
+            n_ratio_layers = len(ratio_meta)
+            n_transform_layers = len(transform_meta)
+            logger.debug(
+                f"Built param metadata: {n_ratio_layers} ratio layers, {n_transform_layers} transform layers"
+            )
+        except Exception as e:
+            logger.warning(f"Could not build param metadata: {e}")
+            self._param_metadata = None
+
     def _render_scatter_plot(
         self,
         ax,
@@ -587,7 +858,7 @@ class DesignDiagnosticLogger(Logger):
                 data,
                 names,
                 derivative=derivatives,
-                value_spacing=50.0,
+                value_spacing=self.particle_plot_spacing,
                 max_line_extend=min(data.shape[1], self.max_history_len),
                 vaxis_params={'symlog_linthresh': self._SYMLOG_LINTHRESH if use_symlog else None},
             )
@@ -851,10 +1122,13 @@ class DesignDiagnosticLogger(Logger):
         fig.suptitle(title, fontsize=12, fontweight='bold', y=0.995)
         fig.text(0.5, 0.975, subtitle, ha='center', fontsize=10, style='italic')
 
-        pdf_path = output_path.with_suffix('.pdf')
-        plt.savefig(pdf_path, dpi=100, bbox_inches='tight')
+        if self.file_format == 'pdf':
+            diagfig_path = output_path.with_suffix('.pdf')
+        else:
+            diagfig_path = output_path.with_suffix('.png')
+        plt.savefig(diagfig_path, dpi=200, bbox_inches='tight')
         plt.close(fig)
-        logger.debug(f"Saved diagnostic figure to {pdf_path}")
+        logger.debug(f"Saved diagnostic figure to {diagfig_path}")
 
     def _save_summary_json(self, step: int, step_history: dict, output_path: Path):
         summary = {
@@ -880,6 +1154,8 @@ class DesignDiagnosticLogger(Logger):
 
             if stack and not self._network_names:
                 self._network_names = self._extract_network_names(stack)
+            if stack and self._param_metadata is None:
+                self._build_param_metadata(stack)
 
             yhatdep = _squeeze_to_3d(step_history.get("yhatdep"))
             all_losses = step_history.get("all_losses")
@@ -898,16 +1174,25 @@ class DesignDiagnosticLogger(Logger):
             grad = step_history.get("grad")
 
             for tid in range(min(n_targets, self.max_targets_to_plot)):
-                for nid in range(min(n_networks, self.max_networks_to_plot)):
+                selected_nets = self._get_selected_networks(tid, n_networks, step_history)
+                for nid in selected_nets:
                     metrics = self._extract_metrics(step, step_history, tid, nid)
                     self._append_to_history(tid, nid, metrics)
                     if params is not None:
                         self._append_param_history(
-                            tid, nid, unroll_params(params, 0, tid, nid, self._tu_idx_to_id)
+                            tid,
+                            nid,
+                            unroll_params(
+                                params, 0, tid, nid, self._tu_idx_to_id, self._param_metadata
+                            ),
                         )
                     if grad is not None:
                         self._append_grad_history(
-                            tid, nid, unroll_grads(grad, 0, tid, nid, self._tu_idx_to_id)
+                            tid,
+                            nid,
+                            unroll_grads(
+                                grad, 0, tid, nid, self._tu_idx_to_id, self._param_metadata
+                            ),
                         )
 
             # Skip figure generation if final_figure_only mode (figures generated in final_callback)
@@ -924,8 +1209,9 @@ class DesignDiagnosticLogger(Logger):
                     target_name = (
                         getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
                     )
+                    selected_nets = self._get_selected_networks(tid, n_networks, step_history)
 
-                    for nid in range(min(n_networks, self.max_networks_to_plot)):
+                    for nid in selected_nets:
                         history = self._history.get((tid, nid), [])
                         param_history = self._param_history.get((tid, nid), [])
                         grad_history = self._grad_history.get((tid, nid), [])
@@ -993,8 +1279,9 @@ class DesignDiagnosticLogger(Logger):
                     target_name = (
                         getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
                     )
+                    selected_nets = self._get_selected_networks(tid, n_networks, step_history)
 
-                    for nid in range(min(n_networks, self.max_networks_to_plot)):
+                    for nid in selected_nets:
                         history = self._history.get((tid, nid), [])
                         param_history = self._param_history.get((tid, nid), [])
                         grad_history = self._grad_history.get((tid, nid), [])
@@ -1098,13 +1385,24 @@ class DesignDiagnosticLogger(Logger):
         params = step_history.get("latest_params") or step_history.get("params")
         grad = step_history.get("grad")
         for tid in range(min(n_targets, self.max_targets_to_plot)):
-            for nid in range(min(n_networks, self.max_networks_to_plot)):
+            selected_nets = self._get_selected_networks(tid, n_networks, step_history)
+            for nid in selected_nets:
                 metrics = self._extract_metrics(step, step_history, tid, nid)
                 self._append_to_history(tid, nid, metrics)
                 if params is not None:
-                    self._append_param_history(tid, nid, unroll_params(params, 0, tid, nid))
+                    self._append_param_history(
+                        tid,
+                        nid,
+                        unroll_params(
+                            params, 0, tid, nid, self._tu_idx_to_id, self._param_metadata
+                        ),
+                    )
                 if grad is not None:
-                    self._append_grad_history(tid, nid, unroll_grads(grad, 0, tid, nid))
+                    self._append_grad_history(
+                        tid,
+                        nid,
+                        unroll_grads(grad, 0, tid, nid, self._tu_idx_to_id, self._param_metadata),
+                    )
 
     def _build_history_from_view(self, view: HistoryView, target_id: int, network_id: int):
         """Build per-target/network history from HistoryView."""
@@ -1121,11 +1419,19 @@ class DesignDiagnosticLogger(Logger):
             grad = step_history.get("grad")
             if params is not None:
                 self._append_param_history(
-                    target_id, network_id, unroll_params(params, 0, target_id, network_id)
+                    target_id,
+                    network_id,
+                    unroll_params(
+                        params, 0, target_id, network_id, self._tu_idx_to_id, self._param_metadata
+                    ),
                 )
             if grad is not None:
                 self._append_grad_history(
-                    target_id, network_id, unroll_grads(grad, 0, target_id, network_id)
+                    target_id,
+                    network_id,
+                    unroll_grads(
+                        grad, 0, target_id, network_id, self._tu_idx_to_id, self._param_metadata
+                    ),
                 )
 
     def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
@@ -1154,7 +1460,8 @@ class DesignDiagnosticLogger(Logger):
 
         if not self._history and view.n_batches > 0:
             for tid in range(min(n_targets, self.max_targets_to_plot)):
-                for nid in range(min(n_networks, self.max_networks_to_plot)):
+                selected_nets = self._get_selected_networks(tid, n_networks, step_history)
+                for nid in selected_nets:
                     self._build_history_from_view(view, tid, nid)
 
         final_dir = self._save_dir / "final"
@@ -1230,8 +1537,9 @@ class DesignDiagnosticLogger(Logger):
         for tid in range(min(n_targets, self.max_targets_to_plot)):
             target = targets[tid] if tid < len(targets) else None
             target_name = getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
+            selected_nets = self._get_selected_networks(tid, n_networks, step_history)
 
-            for nid in range(min(n_networks, self.max_networks_to_plot)):
+            for nid in selected_nets:
                 history = self._history.get((tid, nid), [])
                 param_history = self._param_history.get((tid, nid), [])
                 grad_history = self._grad_history.get((tid, nid), [])
