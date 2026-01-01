@@ -25,6 +25,20 @@ logger = get_logger(__name__)
 
 
 @dataclass
+class TunerConfig:
+    """Configuration for TunerSession loss weights and grid settings."""
+
+    grid_resolution: tuple[int, int] = (32, 32)
+    w_sinkhorn: float = 1.0
+    w_lncc: float = 0.5
+    w_mse: float = 1.0
+    w_simse: float = 1.0
+    eps_sinkhorn: float = 0.1
+    n_sinkhorn_iters: int = 50
+    lncc_kernel: int = 7
+
+
+@dataclass
 class TunerResult:
     """Enhanced result with design-mode compatible fields."""
 

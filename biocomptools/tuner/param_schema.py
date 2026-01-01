@@ -89,6 +89,18 @@ class ParamGroup:
         }
 
 
+def get_mask_options_count(mask: np.ndarray) -> int:
+    """Count options in a mask.
+
+    For 1D masks: returns count of True values.
+    For 2D masks: returns max count of True values per row.
+    """
+    mask = np.asarray(mask)
+    if mask.ndim == 1:
+        return int(np.sum(mask))
+    return int(np.max(np.sum(mask, axis=1)))
+
+
 def is_ratio_param(path: str) -> bool:
     return "ratio" in path.lower() and "quantization" not in path.lower()
 
