@@ -176,20 +176,42 @@ def resolve(obj):
     return obj
 
 
+TXT_PLOT_FUNC_MAP = {
+    'biocomp.plotutils.smooth': 'biocomp.plotutils.smooth_txt',
+    'biocomp.plotting.plotting_smooth.smooth_1d': 'biocomp.plotting.plotting_txt.smooth_1d_txt',
+    'biocomp.plotting.plotting_smooth.smooth_2d': 'biocomp.plotting.plotting_txt.smooth_2d_txt',
+    'biocomp.plotting.plotting_3d.smooth_3d': 'biocomp.plotting.plotting_txt.smooth_3d_txt',
+}
+
+
 class Figure(BaseModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_tasks: List[DeferredNode[PlotTask]] = []
 
+    text_mode: bool = False
+    stdout_txt_plot: bool = True
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _ptasks: Optional[List[PlotTask]] = None
+    _txt_output: Optional[str] = None
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         self.plot_tasks = [task.copy(reroot=True) for task in self.plot_tasks]
 
+    @property
+    def is_txt_output(self) -> bool:
+        return self.text_mode or str(self.figure_spec.output_file).endswith('.txt')
+
     def prepare(self):
+        if self.is_txt_output:
+            self._prepare_txt()
+        else:
+            self._prepare_mpl()
+
+    def _prepare_mpl(self):
         with mpl.rc_context(rc=self.plot_config.rc_context):
             try:
                 self._figax = self.figure_spec.make_figure()
@@ -206,13 +228,33 @@ class Figure(BaseModel):
                         pt = PlotTask(**pt)  # type: ignore
                     pt.plot_config.inherit_from(self.plot_config)
 
-                    # default ax, can be overridden in the plot_method:
                     pt._ax = self._figax.flat_ax[i]
                     self._ptasks.append(pt)
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
                     logger.exception(e)
                     continue
+
+    def _prepare_txt(self):
+        class DummyFigAx:
+            flat_ax = [None] * 100
+            axes = [[None] * 10 for _ in range(10)]
+            figure = None
+
+        self._figax = DummyFigAx()
+        self._ptasks = []
+        for i, tc in enumerate(self.plot_tasks):
+            try:
+                pt = tc.construct(context={"FIG": self._figax})
+                if dict_like(pt):
+                    pt = PlotTask(**pt)
+                pt.plot_config.inherit_from(self.plot_config)
+                pt._ax = None
+                self._ptasks.append(pt)
+            except Exception as e:
+                logger.error(f"Error constructing txt plot task {i}: {e}")
+                logger.exception(e)
+                continue
 
     def run(self, overwrite: bool = True, finalize: bool = True):
         if not overwrite and self.figure_spec.output_path.exists():
@@ -223,6 +265,12 @@ class Figure(BaseModel):
             self.prepare()
         assert isinstance(self._ptasks, list)
 
+        if self.is_txt_output:
+            self._run_txt(overwrite=overwrite, finalize=finalize)
+        else:
+            self._run_mpl(overwrite=overwrite, finalize=finalize)
+
+    def _run_mpl(self, overwrite: bool = True, finalize: bool = True):
         with mpl.rc_context(rc=self.plot_config.rc_context):
             metadata = {}
             metadata['plot_tasks'] = []
@@ -236,13 +284,91 @@ class Figure(BaseModel):
                     logger.exception(e)
                     continue
 
-            # Debug save: capture figure state after all tasks complete
             if is_plot_debug_enabled():
                 self._save_plot_debug_state(metadata)
 
             if finalize:
                 self.figure_spec.metadata = metadata
-                self.figure_spec.finalize(self._figax)  # type: ignore
+                self.figure_spec.finalize(self._figax)
+
+    def _run_txt(self, overwrite: bool = True, finalize: bool = True):
+        from biocomp.plotting.plotting_txt import TextPlotResult
+
+        txt_parts = []
+        metadata = {'plot_tasks': []}
+
+        for i, pt in enumerate(self._ptasks):
+            try:
+                resolve_all_lazy(pt)
+                if pt.plot_method is None:
+                    continue
+
+                func_name = pt.plot_method.get_name()
+                txt_func_name = TXT_PLOT_FUNC_MAP.get(func_name)
+
+                if txt_func_name is None:
+                    for key, val in TXT_PLOT_FUNC_MAP.items():
+                        if func_name.endswith(key.split('.')[-1]):
+                            txt_func_name = val
+                            break
+
+                if txt_func_name is None:
+                    logger.warning(f"No txt plot function for {func_name}, skipping")
+                    continue
+
+                module_path, func_name_only = txt_func_name.rsplit('.', 1)
+                import importlib
+
+                module = importlib.import_module(module_path)
+                txt_func = getattr(module, func_name_only)
+
+                kwargs = dict(pt.plot_method.kwargs)
+                kwargs['ax'] = None
+                if pt.plot_config.rescaler:
+                    kwargs['rescaler'] = pt.plot_config.rescaler
+
+                cs = ut.generate_full_nested_config(
+                    pt.plot_config.callstack_params, namespace='biocomp.plotting'
+                ).get(f'{func_name_only}_params', {})
+                kwargs.update(cs)
+
+                result = txt_func(**kwargs)
+                if isinstance(result, TextPlotResult):
+                    txt_parts.append(result.text)
+                    metadata['plot_tasks'].append({'txt_result': True})
+                elif isinstance(result, str):
+                    txt_parts.append(result)
+                    metadata['plot_tasks'].append({'txt_result': True})
+
+            except Exception as e:
+                logger.error(f"Error running txt plot task {i}: {e}")
+                logger.exception(e)
+                continue
+
+        self._txt_output = '\n\n'.join(txt_parts)
+
+        if self.stdout_txt_plot and self._txt_output:
+            print(self._txt_output)
+
+        if finalize:
+            self.figure_spec.metadata = metadata
+            self._finalize_txt()
+
+    def _finalize_txt(self):
+        from pathlib import Path as PathLib
+
+        output_path = self.figure_spec.output_path
+        if not str(output_path).endswith('.txt'):
+            output_path = PathLib(str(output_path).rsplit('.', 1)[0] + '.txt')
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self._txt_output:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(self._txt_output)
+            logger.debug(f"Text plot saved to {output_path}")
+
+        self.figure_spec._output_path_override = str(output_path)
 
     def _save_plot_debug_state(self, metadata: dict):
         """Save comprehensive plot debug state after all tasks complete."""

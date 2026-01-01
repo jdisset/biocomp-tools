@@ -155,7 +155,12 @@ def urlencoded(s: str) -> str:
     return urllib.parse.quote(s, safe='')
 
 
-def construct_figure(figure_node, output_path_override: str | None = None):
+def construct_figure(
+    figure_node,
+    output_path_override: str | None = None,
+    text_mode: bool = False,
+    stdout_txt_plot: bool = True,
+):
     try:
         figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
         if dict_like(figure):
@@ -164,8 +169,9 @@ def construct_figure(figure_node, output_path_override: str | None = None):
         if output_path_override:
             figure.figure_spec.output_dir = str(Path(output_path_override).parent)
             figure.figure_spec.output_file = Path(output_path_override).name
+        figure.text_mode = text_mode
+        figure.stdout_txt_plot = stdout_txt_plot
     except DraconError:
-        # let DraconErrors propagate - they'll be formatted nicely at the top level
         raise
     except Exception as e:
         logger.error(f"Error constructing figure: {e}")
@@ -178,14 +184,16 @@ def run_figure(f, **kw) -> FigureResult:
     try:
         t0 = time.time()
         f.run(**kw)
-        plt.close('all')
+        if not f.is_txt_output:
+            plt.close('all')
         t1 = time.time()
-        opath = f.figure_spec.output_path
+        opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path
         logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
     except Exception as e:
         logger.error(f"Error running figure: {e}")
         logger.exception(e)
         raise
+    opath = getattr(f.figure_spec, '_output_path_override', None) or str(f.figure_spec.output_path)
     return FigureResult(
         path=str(opath),
         figure_spec=f.figure_spec,
@@ -194,7 +202,6 @@ def run_figure(f, **kw) -> FigureResult:
 
 
 def _run_figure_worker(fig, overwrite) -> FigureResult:
-    """Worker function for ProcessPoolExecutor - must be at module level for pickling."""
     return run_figure(fig, overwrite=overwrite)
 
 
@@ -300,6 +307,16 @@ class PlotJob(BaseModel):
         None
     )
 
+    use_txt_plotting: Annotated[
+        bool,
+        Arg(help='Use ASCII text plotting instead of image plots'),
+    ] = False
+
+    no_stdout_txt_plot: Annotated[
+        bool,
+        Arg(help='Disable stdout output when using text plotting'),
+    ] = False
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_temp_paths_for_merge(self, n: int) -> list[str | None]:
@@ -332,13 +349,21 @@ class PlotJob(BaseModel):
         else:
             order = list(np.random.permutation(total_figures))
 
+        txt_mode = self.use_txt_plotting
+        stdout_txt = not self.no_stdout_txt_plot
+
         if self.nworkers <= 1 or self.parallel_mode == 'none' or total_figures <= 1:
             fig_copies = [
                 self.figures[i].copy(reroot=True)
                 for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
             ]
             constructed_figures = [
-                construct_figure(fig, output_path_override=temp_paths[order[j]])
+                construct_figure(
+                    fig,
+                    output_path_override=temp_paths[order[j]],
+                    text_mode=txt_mode,
+                    stdout_txt_plot=stdout_txt,
+                )
                 for j, fig in enumerate(
                     maybetqdm(fig_copies, min_len=5, desc='Constructing figures')
                 )
@@ -376,9 +401,13 @@ class PlotJob(BaseModel):
 
                 batch_start += batch_len
 
-                # construct figures in main process (handles JAX arrays)
                 constructed_figures = [
-                    construct_figure(fig, output_path_override=temp_paths[batch_order_indices[j]])
+                    construct_figure(
+                        fig,
+                        output_path_override=temp_paths[batch_order_indices[j]],
+                        text_mode=txt_mode,
+                        stdout_txt_plot=stdout_txt,
+                    )
                     for j, fig in enumerate(
                         maybetqdm(
                             fig_copies,

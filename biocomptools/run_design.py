@@ -735,9 +735,110 @@ class DesignProgram(BaseOptimizationProgram):
         if self.plot_results and all_design_results:
             self._generate_design_diagnostic_plots(save_dir, all_design_results)
 
+        if all_design_results:
+            self._print_rich_design_summary(all_design_results)
+
         logger.info(f"Saved best designs summary to {summary_file}")
         if design_results_dir.exists() and any(design_results_dir.iterdir()):
             logger.info(f"Saved design results to {design_results_dir}")
+
+    def _print_rich_design_summary(self, all_design_results: list[dict], top_n: int = 3):
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+        from rich import box
+        from biocomp.plotting.ascii_heatmap import heatmap
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+        from biocomptools.modelmodel import NetworkModel
+        from collections import defaultdict
+
+        console = Console()
+
+        by_target = defaultdict(list)
+        for d in all_design_results:
+            by_target[d['target_name']].append(d)
+
+        for target_name in by_target:
+            by_target[target_name].sort(key=lambda x: x['loss'])
+
+        console.print()
+        console.rule("[bold cyan]DESIGN RESULTS SUMMARY[/bold cyan]", style="cyan")
+
+        for target_name, designs in by_target.items():
+            target = designs[0].get('target') if designs else None
+            res = self._dmanager.grid_resolution if self._dmanager else (32, 32)
+            xres, yres = res
+
+            console.print()
+            console.print(Panel(f"[bold white]{target_name}[/bold white]", style="blue", expand=False))
+
+            if target and self._model:
+                try:
+                    X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
+                    Y_target_grid = np.flipud(np.asarray(Y_target).reshape(yres, xres))
+                    vmin_t, vmax_t = float(Y_target_grid.min()), float(Y_target_grid.max())
+                    target_hm = heatmap(Y_target_grid, vmin=vmin_t, vmax=vmax_t, xres=36, yres=12, show_colorbar=False)
+                    console.print("[dim]TARGET:[/dim]")
+                    console.print(target_hm)
+                    console.print(f"[dim]{vmin_t:.2f} ░▒▓█ {vmax_t:.2f}[/dim]")
+                except Exception as e:
+                    console.print(f"[red]Failed to render target: {e}[/red]")
+
+            table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+            table.add_column("Rank", style="dim", width=4)
+            table.add_column("Network", style="cyan", width=30)
+            table.add_column("Loss", justify="right", width=10)
+            table.add_column("Corr", justify="right", width=8)
+            table.add_column("MSE", justify="right", width=10)
+            table.add_column("Recipe", style="dim", width=20)
+
+            for i, design in enumerate(designs[:top_n]):
+                network = design.get('network')
+                loss = design.get('loss', float('nan'))
+                recipe_hash = design.get('recipe_hash', 'unknown')[:18]
+
+                if network is None or target is None or self._model is None:
+                    table.add_row(str(i + 1), design.get('network_name', '?'), f"{loss:.6f}", "N/A", "N/A", recipe_hash)
+                    continue
+
+                try:
+                    nm = NetworkModel(model=self._model, network=network)
+                    X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
+                    pred = NetworkPrediction(predict_at=[X_lat], network_model=nm, already_latent=True)
+                    data = pred.get_data(rescale_latent=False)[0]
+                    Y_pred = np.flipud(np.asarray(data.y).reshape(yres, xres))
+                    Y_target_grid = np.flipud(np.asarray(Y_target).reshape(yres, xres))
+
+                    corr = np.corrcoef(Y_target_grid.ravel(), Y_pred.ravel())[0, 1]
+                    mse = np.mean((Y_pred - Y_target_grid) ** 2)
+
+                    table.add_row(
+                        str(i + 1),
+                        design.get('network_name', '?')[:28],
+                        f"{loss:.6f}",
+                        f"{corr:.4f}",
+                        f"{mse:.6f}",
+                        recipe_hash,
+                    )
+
+                    if i == 0:
+                        vmin = min(Y_pred.min(), Y_target_grid.min())
+                        vmax = max(Y_pred.max(), Y_target_grid.max())
+                        pred_hm = heatmap(Y_pred, vmin=vmin, vmax=vmax, xres=36, yres=12, show_colorbar=False)
+                        console.print()
+                        console.print("[green]BEST PREDICTION:[/green]")
+                        console.print(pred_hm)
+                        console.print(f"[dim]{vmin:.2f} ░▒▓█ {vmax:.2f}[/dim]")
+
+                except Exception as e:
+                    table.add_row(str(i + 1), design.get('network_name', '?'), f"{loss:.6f}", "err", "err", recipe_hash)
+                    logger.debug(f"Failed prediction for {design.get('network_name')}: {e}")
+
+            console.print()
+            console.print(table)
+
+        console.rule(style="cyan")
 
     def _generate_design_diagnostic_plots(self, save_dir, design_results: list[dict]):
         """Generate diagnostic plots using batched evaluation."""
