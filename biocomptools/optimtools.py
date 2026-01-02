@@ -9,6 +9,7 @@ from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
 from biocomptools.toollib.loggers.checkpointlogger import CheckpointLogger
 from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
+from biocomptools.toollib.loggers.nsga2logger import NSGA2DesignLogger
 from biocomptools.modelmodel import BiocompModel
 from biocomptools.toollib.datasources import DataSource, DBSource
 from biocomptools.toollib.modelselector import ModelSelector

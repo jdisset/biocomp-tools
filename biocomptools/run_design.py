@@ -110,8 +110,8 @@ class DesignProgram(BaseOptimizationProgram):
     ] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
     disable_tu_masking: Annotated[
-        bool, Arg(help='Disable Hard Concrete TU masking for architecture search')
-    ] = False
+        bool, Arg(help='Disable Hard Concrete TU masking (use binary mask system instead)')
+    ] = True
 
     def model_post_init(self, __context):
         self._model = None
@@ -463,6 +463,30 @@ class DesignProgram(BaseOptimizationProgram):
     def save_outputs(self, final_params, loss_history, step_history=None):
         save_dir = self._save_dir / self.get_output_subdir()
         logger.info(f"Saving outputs to {save_dir}")
+
+        if step_history and len(step_history) > 0:
+            final_step = step_history[-1] if isinstance(step_history, list) else step_history
+            if "pareto_front" in final_step and "pareto_fitness" in final_step:
+                pareto_front = np.asarray(final_step["pareto_front"])
+                pareto_fitness = np.asarray(final_step["pareto_fitness"])
+                np.savez_compressed(
+                    save_dir / "pareto_front.npz",
+                    population=pareto_front,
+                    fitness=pareto_fitness,
+                )
+                import json
+                pareto_summary = {
+                    "n_solutions": int(len(pareto_fitness)),
+                    "min_loss": float(np.min(pareto_fitness[:, 0])),
+                    "max_loss": float(np.max(pareto_fitness[:, 0])),
+                    "min_tu_count": float(np.min(pareto_fitness[:, 1])),
+                    "max_tu_count": float(np.max(pareto_fitness[:, 1])),
+                }
+                (save_dir / "pareto_summary.json").write_text(json.dumps(pareto_summary, indent=2))
+                logger.info(
+                    f"Saved pareto front: {len(pareto_fitness)} solutions, "
+                    f"loss range [{pareto_summary['min_loss']:.4f}, {pareto_summary['max_loss']:.4f}]"
+                )
 
         if hasattr(self, '_evaluation_results'):
             final_params, loss_history, topk, losses, xraw, yraw, yhatdep = self._evaluation_results

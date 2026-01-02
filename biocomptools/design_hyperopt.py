@@ -122,7 +122,7 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
 
     model_name: Annotated[str | None, Arg(help='Model path or name')] = None
     model_selector: Annotated[ModelSelector | None, Arg(help='Model selector')] = None
-    disable_tu_masking: Annotated[bool, Arg(help='Disable TU masking')] = False
+    disable_tu_masking: Annotated[bool, Arg(help='Disable TU masking')] = True
 
     # Evaluation configuration
     eval_n_samples: Annotated[int, Arg(help='Samples for RMSE evaluation')] = 10000
