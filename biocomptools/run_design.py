@@ -31,7 +31,9 @@ from biocomp.graphengine import GraphState
 from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
 
-from dracon.commandline import Arg
+from dracon.commandline import Arg, dracon_program
+from biocomptools.optimtools import DEFAULT_TYPES, make_context_from_types
+from biocomptools.toollib.common import config
 import dracon
 import asyncio
 
@@ -65,6 +67,12 @@ def _safe_get_input_proteins(network) -> list | None:
         return None
 
 
+@dracon_program(
+    name='biocomp-design',
+    description='Run design optimization for biocomp models.',
+    context_types=DEFAULT_TYPES,
+    context={'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve()},
+)
 class DesignProgram(BaseOptimizationProgram):
     design_conf: Annotated[DesignConfig, Arg(help='Design optimization config')] = Field(
         default_factory=lambda: DesignConfig()
