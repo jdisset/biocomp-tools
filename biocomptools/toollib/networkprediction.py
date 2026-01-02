@@ -515,7 +515,7 @@ class NetworkPrediction(DataSource):
     gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
     gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
 
-    shuffle_inputs: bool = True  # shuffle inputs before prediction
+    shuffle_inputs: bool = False  # shuffle inputs before prediction (False preserves spatial structure)
 
     skip_input_reorder: bool = False  # skip input column reordering (for design visualization)
 
