@@ -361,6 +361,20 @@ def unroll_params(
                             tu_names = node_tu_lists[orig_node_idx]
                             if i < len(tu_names):
                                 key = f"{rate_type}:{tu_names[i][:12]}"
+                    else:
+                        # Multiple nodes: i spans across nodes
+                        # Each node has n_inputs rate values (one per input edge)
+                        cumulative = 0
+                        for _local_idx, orig_idx in enumerate(original_node_indices):
+                            if orig_idx < len(node_tu_lists):
+                                tu_names = node_tu_lists[orig_idx]
+                                n_inputs = len(tu_names) if tu_names else 1
+                                if i < cumulative + n_inputs:
+                                    input_idx = i - cumulative
+                                    if input_idx < len(tu_names):
+                                        key = f"{rate_type}:{tu_names[input_idx][:12]}"
+                                    break
+                                cumulative += n_inputs
 
                 # Fallback to generic label
                 if key is None:
@@ -430,6 +444,7 @@ class DesignDiagnosticLogger(Logger):
 
     # configuration
     output_dir: str | None = None
+    history_dir: str | None = None  # For replay: directory containing step_*.pkl files
     periods: int = 10
     max_history_len: int = 100
     generate_plots: bool = True
@@ -494,6 +509,7 @@ class DesignDiagnosticLogger(Logger):
     _param_metadata: ParamMetadata | None = PrivateAttr(
         default=None
     )  # For descriptive param labels
+    _history_dir: Path | None = PrivateAttr(default=None)  # For replay mode stack loading
 
     def initialize(self, training_program=None):
         if self.output_dir:
@@ -503,6 +519,9 @@ class DesignDiagnosticLogger(Logger):
         else:
             self._save_dir = Path('diagnostics')
         self._save_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.history_dir:
+            self._history_dir = Path(self.history_dir)
 
         has_dmanager = False
         if training_program:
@@ -787,6 +806,48 @@ class DesignDiagnosticLogger(Logger):
         except Exception as e:
             logger.warning(f"Could not build param metadata: {e}")
             self._param_metadata = None
+
+    def _try_load_stack_from_step_files(self) -> None:
+        """Try to load stack from step history files (for replay mode)."""
+        if self._param_metadata is not None:
+            return
+
+        import dill
+
+        # Build candidate directories to search for step files
+        candidates = []
+        if self._history_dir is not None:
+            candidates.append(self._history_dir)
+        if self._save_dir is not None:
+            candidates.extend(
+                [
+                    self._save_dir.parent,
+                    self._save_dir.parent.parent,
+                    self._save_dir.parent.parent.parent,
+                ]
+            )
+
+        if not candidates:
+            return
+
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            step_files = sorted(candidate.glob("step_*.pkl"))[:5]
+            for step_file in step_files:
+                if "_start" in step_file.name or "_end" in step_file.name:
+                    continue
+                try:
+                    with open(step_file, 'rb') as f:
+                        data = dill.load(f)
+                    stack = data.get('stack')
+                    if stack is not None:
+                        logger.info(f"Loaded stack from {step_file} for param metadata")
+                        self._build_param_metadata(stack)
+                        return
+                except Exception as e:
+                    logger.debug(f"Could not load stack from {step_file}: {e}")
+                    continue
 
     def _render_scatter_plot(
         self,
@@ -1382,6 +1443,9 @@ class DesignDiagnosticLogger(Logger):
 
     def _accumulate_history(self, step: int, step_history: dict, n_targets: int, n_networks: int):
         """Accumulate metrics/params/grads into internal history."""
+        if self._param_metadata is None:
+            self._try_load_stack_from_step_files()
+
         params = step_history.get("latest_params") or step_history.get("params")
         grad = step_history.get("grad")
         for tid in range(min(n_targets, self.max_targets_to_plot)):
@@ -1406,6 +1470,9 @@ class DesignDiagnosticLogger(Logger):
 
     def _build_history_from_view(self, view: HistoryView, target_id: int, network_id: int):
         """Build per-target/network history from HistoryView."""
+        if self._param_metadata is None:
+            self._try_load_stack_from_step_files()
+
         for batch in view.iter_batches():
             step = batch.step_index
             step_history = {'loss': batch.loss}
