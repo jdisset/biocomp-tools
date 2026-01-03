@@ -120,6 +120,9 @@ class DesignProgram(BaseOptimizationProgram):
     disable_tu_masking: Annotated[
         bool, Arg(help='Disable Hard Concrete TU masking (use binary mask system instead)')
     ] = True
+    lock_ratios: Annotated[
+        bool, Arg(help='Lock ratios to recipe-specified values (for zero-freedom baseline tests)')
+    ] = False
 
     def model_post_init(self, __context):
         self._model = None
@@ -336,6 +339,7 @@ class DesignProgram(BaseOptimizationProgram):
             model=self._model,
             loggers=logger_callbacks,
             async_handler=async_handler,
+            lock_ratios=self.lock_ratios,
         )
 
         logger.info(
