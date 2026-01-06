@@ -487,6 +487,7 @@ class DesignProgram(BaseOptimizationProgram):
                     fitness=pareto_fitness,
                 )
                 import json
+
                 pareto_summary = {
                     "n_solutions": int(len(pareto_fitness)),
                     "min_loss": float(np.min(pareto_fitness[:, 0])),
@@ -779,12 +780,10 @@ class DesignProgram(BaseOptimizationProgram):
             logger.info(f"Saved design results to {design_results_dir}")
 
     def _print_rich_design_summary(self, all_design_results: list[dict], top_n: int = 3):
+        """Print design summary using same format as DesignHeatmapLogger."""
         from rich.console import Console
         from rich.panel import Panel
-        from rich.table import Table
-        from rich.text import Text
-        from rich import box
-        from biocomp.plotting.ascii_heatmap import heatmap
+        from biocomp.designutils import side_by_side_txt_plot
         from biocomptools.toollib.networkprediction import NetworkPrediction
         from biocomptools.modelmodel import NetworkModel
         from collections import defaultdict
@@ -798,81 +797,84 @@ class DesignProgram(BaseOptimizationProgram):
         for target_name in by_target:
             by_target[target_name].sort(key=lambda x: x['loss'])
 
+        loss_weights = {}
+        if self.design_conf and hasattr(self.design_conf, 'loss_function'):
+            lf = self.design_conf.loss_function
+            if hasattr(lf, 'kwargs') and lf.kwargs:
+                for k, v in lf.kwargs.items():
+                    if k.startswith('w_'):
+                        loss_weights[k] = v
+
+        res = self._dmanager.grid_resolution if self._dmanager else (32, 32)
+        xres, yres = res
+        display_width, display_height = 40, 20
+
         console.print()
-        console.rule("[bold cyan]DESIGN RESULTS SUMMARY[/bold cyan]", style="cyan")
+        console.rule(
+            "[bold cyan]DESIGN RESULTS SUMMARY (recomputed from committed networks)[/bold cyan]",
+            style="cyan",
+        )
 
         for target_name, designs in by_target.items():
             target = designs[0].get('target') if designs else None
-            res = self._dmanager.grid_resolution if self._dmanager else (32, 32)
-            xres, yres = res
 
             console.print()
-            console.print(Panel(f"[bold white]{target_name}[/bold white]", style="blue", expand=False))
-
-            if target and self._model:
-                try:
-                    X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
-                    Y_target_grid = np.flipud(np.asarray(Y_target).reshape(yres, xres))
-                    vmin_t, vmax_t = float(Y_target_grid.min()), float(Y_target_grid.max())
-                    target_hm = heatmap(Y_target_grid, vmin=vmin_t, vmax=vmax_t, xres=36, yres=12, show_colorbar=False)
-                    console.print("[dim]TARGET:[/dim]")
-                    console.print(target_hm)
-                    console.print(f"[dim]{vmin_t:.2f} ░▒▓█ {vmax_t:.2f}[/dim]")
-                except Exception as e:
-                    console.print(f"[red]Failed to render target: {e}[/red]")
-
-            table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
-            table.add_column("Rank", style="dim", width=4)
-            table.add_column("Network", style="cyan", width=30)
-            table.add_column("Loss", justify="right", width=10)
-            table.add_column("Corr", justify="right", width=8)
-            table.add_column("MSE", justify="right", width=10)
-            table.add_column("Recipe", style="dim", width=20)
+            console.print(
+                Panel(f"[bold white]{target_name}[/bold white]", style="blue", expand=False)
+            )
 
             for i, design in enumerate(designs[:top_n]):
                 network = design.get('network')
+                network_name = design.get('network_name', f"Net {i}")
                 loss = design.get('loss', float('nan'))
-                recipe_hash = design.get('recipe_hash', 'unknown')[:18]
+                rep_id = design.get('replicate', 0)
 
                 if network is None or target is None or self._model is None:
-                    table.add_row(str(i + 1), design.get('network_name', '?'), f"{loss:.6f}", "N/A", "N/A", recipe_hash)
+                    console.print(
+                        f"[red]Rank {i + 1}: {network_name} - No network/target/model[/red]"
+                    )
                     continue
 
                 try:
                     nm = NetworkModel(model=self._model, network=network)
                     X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
-                    pred = NetworkPrediction(predict_at=[X_lat], network_model=nm, already_latent=True)
-                    data = pred.get_data(rescale_latent=False)[0]
-                    Y_pred = np.flipud(np.asarray(data.y).reshape(yres, xres))
-                    Y_target_grid = np.flipud(np.asarray(Y_target).reshape(yres, xres))
-
-                    corr = np.corrcoef(Y_target_grid.ravel(), Y_pred.ravel())[0, 1]
-                    mse = np.mean((Y_pred - Y_target_grid) ** 2)
-
-                    table.add_row(
-                        str(i + 1),
-                        design.get('network_name', '?')[:28],
-                        f"{loss:.6f}",
-                        f"{corr:.4f}",
-                        f"{mse:.6f}",
-                        recipe_hash,
+                    pred = NetworkPrediction(
+                        predict_at=[X_lat], network_model=nm, already_latent=True
                     )
+                    data = pred.get_data(rescale_latent=False)[0]
+                    Y_pred_grid = np.asarray(data.y).reshape(yres, xres)
+                    Y_target_grid = np.asarray(Y_target).reshape(yres, xres)
 
-                    if i == 0:
-                        vmin = min(Y_pred.min(), Y_target_grid.min())
-                        vmax = max(Y_pred.max(), Y_target_grid.max())
-                        pred_hm = heatmap(Y_pred, vmin=vmin, vmax=vmax, xres=36, yres=12, show_colorbar=False)
-                        console.print()
-                        console.print("[green]BEST PREDICTION:[/green]")
-                        console.print(pred_hm)
-                        console.print(f"[dim]{vmin:.2f} ░▒▓█ {vmax:.2f}[/dim]")
+                    width = display_width * 2 + 13
+                    header = f" Rep {rep_id} {network_name} (rank {i + 1}/{len(designs[:top_n])}, loss={loss:.4f})"
+                    console.print(f"{'─' * width}")
+                    console.print(header)
+                    console.print(f"{'─' * width}")
+
+                    txt_output, metrics = side_by_side_txt_plot(
+                        Y_target_grid,
+                        Y_pred_grid,
+                        height=display_height,
+                        width=display_width,
+                        loss_weights=loss_weights,
+                        title_target="TARGET",
+                        title_prediction="PREDICTION",
+                        shared_colorbar=False,
+                        show_axes=True,
+                        compute_metrics=True,
+                    )
+                    console.print(txt_output)
+
+                    pred_range = metrics.get('pred_range', (0, 0))
+                    corr = metrics.get('correlation', 0.0)
+                    console.print(
+                        f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}"
+                    )
+                    console.print()
 
                 except Exception as e:
-                    table.add_row(str(i + 1), design.get('network_name', '?'), f"{loss:.6f}", "err", "err", recipe_hash)
-                    logger.debug(f"Failed prediction for {design.get('network_name')}: {e}")
-
-            console.print()
-            console.print(table)
+                    console.print(f"[red]Rank {i + 1}: {network_name} - Error: {e}[/red]")
+                    logger.debug(f"Failed prediction for {network_name}: {e}")
 
         console.rule(style="cyan")
 

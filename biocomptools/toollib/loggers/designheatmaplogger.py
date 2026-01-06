@@ -8,20 +8,10 @@ from pydantic import ConfigDict, Field
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
+from biocomp.designutils import side_by_side_txt_plot, LOSS_ORDER
 
 logger = get_logger(__name__)
 
-LOSS_ORDER = [
-    "sinkhorn",
-    "lncc",
-    "rmse",
-    "mse",
-    "simse",
-    "spectral",
-    "gradient",
-    "contrast",
-    "zncc",
-]
 PENALTY_ORDER = [
     "l0_penalty",
     "spread_penalty",
@@ -71,20 +61,6 @@ def _extract_at_indices(arr: Any, rid: int, tid: int, nid: int) -> float:
             ]
         )
     return float(np.mean(arr))
-
-
-def _side_by_side(left: str, right: str, gap: int = 4) -> str:
-    """Join two multi-line strings side by side."""
-    left_lines = left.split('\n')
-    right_lines = right.split('\n')
-    max_left = max(len(line) for line in left_lines) if left_lines else 0
-    max_lines = max(len(left_lines), len(right_lines))
-    left_lines += [''] * (max_lines - len(left_lines))
-    right_lines += [''] * (max_lines - len(right_lines))
-    return '\n'.join(
-        f"{left_line:<{max_left}}{' ' * gap}{right_line}"
-        for left_line, right_line in zip(left_lines, right_lines, strict=True)
-    )
 
 
 def _format_loss_table_comparison(
@@ -339,6 +315,7 @@ class DesignHeatmapLogger(Logger):
     _total_steps: int = 0
     _loss_weights: dict = {}
     _n_targets: int = 1
+    _network_names: list[str] = []
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -348,6 +325,7 @@ class DesignHeatmapLogger(Logger):
         self._total_steps = 0
         self._loss_weights = {}
         self._n_targets = 1
+        self._network_names = []
 
     def initialize(self, training_program=None):
         if training_program:
@@ -361,12 +339,23 @@ class DesignHeatmapLogger(Logger):
                         self._grid_resolution = self._dmanager.grid_resolution
                     if hasattr(self._dmanager, 'n_targets'):
                         self._n_targets = self._dmanager.n_targets
+                    if hasattr(self._dmanager, 'networks'):
+                        self._network_names = [n.name for n in self._dmanager.networks]
 
             if hasattr(training_program, 'design_conf'):
                 dc = training_program.design_conf
                 if hasattr(dc, 'n_epochs') and hasattr(dc, 'n_batches_per_epoch'):
                     self._total_steps = dc.n_epochs * dc.n_batches_per_epoch
 
+                # Extract loss weights from loss_function.kwargs (primary source)
+                if hasattr(dc, 'loss_function'):
+                    lf = dc.loss_function
+                    if hasattr(lf, 'kwargs') and lf.kwargs:
+                        for k, v in lf.kwargs.items():
+                            if k.startswith('w_'):
+                                self._loss_weights[k] = v
+
+                # Also check direct attributes as fallback
                 for attr in [
                     'w_sinkhorn',
                     'w_lncc',
@@ -378,7 +367,7 @@ class DesignHeatmapLogger(Logger):
                     'w_contrast',
                     'w_zncc',
                 ]:
-                    if hasattr(dc, attr):
+                    if attr not in self._loss_weights and hasattr(dc, attr):
                         self._loss_weights[attr] = getattr(dc, attr)
 
         if self._dmanager and self._grid_resolution:
@@ -390,29 +379,6 @@ class DesignHeatmapLogger(Logger):
                     self._cached_target_grid = Y_grid
                 except Exception as e:
                     logger.warning(f"Failed to cache target grid: {e}")
-
-    def _compute_eval_losses(self, Y_target_grid: np.ndarray, Y_pred_grid: np.ndarray) -> dict:
-        """Compute eval-mode grid losses via compute_grid_losses()."""
-        try:
-            import jax.numpy as jnp
-            from biocomp.designloss import compute_grid_losses
-
-            result = compute_grid_losses(
-                jnp.array(Y_pred_grid),
-                jnp.array(Y_target_grid),
-                w_sinkhorn=1.0,
-                w_lncc=1.0,
-                w_mse=1.0,
-                w_rmse=1.0,
-                w_simse=1.0,
-                w_spectral=1.0,
-                w_gradient=1.0,
-                w_contrast=1.0,
-            )
-            return result.to_dict()
-        except Exception as e:
-            logger.warning(f"Failed to compute eval losses: {e}")
-            return {}
 
     def _get_top_k_designs(
         self, step_history: dict, tid: int, n_replicates: int, n_networks: int
@@ -477,41 +443,8 @@ class DesignHeatmapLogger(Logger):
     ) -> list[str]:
         """Render heatmap and loss table for a single (replicate, network) design."""
         xres, yres = self._grid_resolution  # type: ignore
-
-        # yhatdep shape: (n_replicates, batch_size, n_targets, n_networks)
-        Y_pred_grid = np.flipud(yhatdep[rid, :, tid, nid].reshape(yres, xres))
-
-        vmin = min(
-            Y_pred_grid.min(),
-            Y_target_grid.min() if Y_target_grid is not None else Y_pred_grid.min(),
-        )
-        vmax = max(
-            Y_pred_grid.max(),
-            Y_target_grid.max() if Y_target_grid is not None else Y_pred_grid.max(),
-        )
-
-        pred_heatmap = heatmap(
-            Y_pred_grid, vmin=vmin, vmax=vmax, xres=self.xres, yres=self.yres, show_colorbar=False
-        )
-        if Y_target_grid is not None:
-            target_heatmap = heatmap(
-                Y_target_grid,
-                vmin=vmin,
-                vmax=vmax,
-                xres=self.xres,
-                yres=self.yres,
-                show_colorbar=False,
-            )
-            combined = _side_by_side(target_heatmap, pred_heatmap, gap=4)
-        else:
-            combined = pred_heatmap
-
-        width = self.xres * 2 + 8
-
-        is_nsga2 = (
-            step_history.get("gen_best_loss") is not None
-            or step_history.get("pareto_fitness") is not None
-        )
+        net_name = self._network_names[nid] if nid < len(self._network_names) else f"Net {nid}"
+        Y_pred_grid = yhatdep[rid, :, tid, nid].reshape(yres, xres)
 
         tu_stats = step_history.get("tu_stats", {})
         tu_str = ""
@@ -529,25 +462,10 @@ class DesignHeatmapLogger(Logger):
             tu_pct = 100 * float(enabled) / max(float(total), 1)
             tu_str = f" │ TUs: {int(enabled)}/{int(total)} ({tu_pct:.0f}%)"
 
-        if is_nsga2:
-            header = (
-                f" Rep {rid} Net {nid} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}"
-            )
-        else:
-            header = (
-                f" Rep {rid} Net {nid} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}"
-            )
+        header = (
+            f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}"
+        )
 
-        lines = [
-            f"{'─' * width}",
-            header,
-            f"{'─' * width}",
-            f"{'TARGET':^{self.xres}}    {'PREDICTION':^{self.xres}}",
-            combined,
-            f"{vmin:.2f} {'░▒▓█' * (self.xres // 4)} {vmax:.2f}".center(width),
-        ]
-
-        sublosses = step_history.get("sublosses", {})
         penalties = {
             "l0_penalty": step_history.get("l0_penalty", 0.0),
             "spread_penalty": step_history.get("spread_penalty", 0.0),
@@ -556,28 +474,41 @@ class DesignHeatmapLogger(Logger):
             "ern_tying_penalty": step_history.get("ern_tying_penalty", 0.0),
         }
 
-        lines.append("")
-        if sublosses:
-            table_lines = _format_loss_table_per_design(
-                sublosses, penalties, self._loss_weights, rid, tid, nid, self.show_penalties
-            )
-            lines.extend(table_lines)
-        elif Y_target_grid is not None:
-            Y_pred_unflipped = np.flipud(Y_pred_grid)
-            Y_target_unflipped = np.flipud(Y_target_grid)
-            eval_losses = self._compute_eval_losses(Y_target_unflipped, Y_pred_unflipped)
-            if eval_losses:
-                table_lines = _format_loss_table_eval_only(
-                    eval_losses, penalties, self._loss_weights, self.show_penalties
-                )
-                lines.extend(table_lines)
+        width = self.xres * 2 + 13
 
-        if self.show_stats:
-            footer_parts = [f"Pred: [{Y_pred_grid.min():.2f}, {Y_pred_grid.max():.2f}]"]
-            if Y_target_grid is not None:
-                corr = np.corrcoef(Y_target_grid.ravel(), Y_pred_grid.ravel())[0, 1]
-                footer_parts.append(f"Corr: {corr:.4f}")
-            lines.append(" │ ".join(footer_parts))
+        lines = [f"{'─' * width}", header, f"{'─' * width}"]
+
+        if Y_target_grid is not None:
+            Y_target_unflipped = np.flipud(Y_target_grid)
+            txt_output, metrics = side_by_side_txt_plot(
+                Y_target_unflipped,
+                Y_pred_grid,
+                height=self.yres,
+                width=self.xres,
+                loss_weights=self._loss_weights,
+                training_penalties=penalties if self.show_penalties else None,
+                shared_colorbar=False,
+                show_axes=True,
+                compute_metrics=True,
+            )
+            lines.append(txt_output)
+
+            if self.show_stats:
+                pred_range = metrics.get("pred_range", (0, 0))
+                corr = metrics.get("correlation", 0.0)
+                lines.append(f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}")
+        else:
+            Y_pred_flipped = np.flipud(Y_pred_grid)
+            pred_heatmap = heatmap(
+                Y_pred_flipped,
+                xres=self.xres,
+                yres=self.yres,
+                show_colorbar=True,
+            )
+            lines.append(pred_heatmap)
+
+            if self.show_stats:
+                lines.append(f"Pred: [{Y_pred_grid.min():.2f}, {Y_pred_grid.max():.2f}]")
 
         return lines
 

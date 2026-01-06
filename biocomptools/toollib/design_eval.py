@@ -145,6 +145,7 @@ class DesignEvaluator:
             device='gpu',
             verbose=False,
             skip_input_reorder=True,  # design: X was passed positionally during optimization
+            shuffle_inputs=True,  # shuffle before truncation to avoid biased subsampling
         )
 
         preds = predictor.get_data(rescale_latent=True)
