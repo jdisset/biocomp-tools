@@ -466,12 +466,26 @@ class DesignHeatmapLogger(Logger):
             f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}"
         )
 
+        def _extract_scalar(val, rid, nid):
+            """Extract scalar from potentially multi-dim array using (rid, nid) indices."""
+            if val is None or (isinstance(val, (int, float)) and val == 0.0):
+                return 0.0
+            arr = np.asarray(val)
+            if arr.ndim == 0:
+                return float(arr)
+            elif arr.ndim == 1:
+                return float(arr[min(nid, len(arr) - 1)])
+            elif arr.ndim == 2:
+                return float(arr[min(rid, arr.shape[0] - 1), min(nid, arr.shape[1] - 1)])
+            else:
+                return float(np.mean(arr))
+
         penalties = {
-            "l0_penalty": step_history.get("l0_penalty", 0.0),
-            "spread_penalty": step_history.get("spread_penalty", 0.0),
-            "coupling_penalty": step_history.get("coupling_penalty", 0.0),
-            "tucount_penalty": step_history.get("tucount_penalty", 0.0),
-            "ern_tying_penalty": step_history.get("ern_tying_penalty", 0.0),
+            "l0_penalty": _extract_scalar(step_history.get("l0_penalty", 0.0), rid, nid),
+            "spread_penalty": _extract_scalar(step_history.get("spread_penalty", 0.0), rid, nid),
+            "coupling_penalty": _extract_scalar(step_history.get("coupling_penalty", 0.0), rid, nid),
+            "tucount_penalty": _extract_scalar(step_history.get("tucount_penalty", 0.0), rid, nid),
+            "ern_tying_penalty": _extract_scalar(step_history.get("ern_tying_penalty", 0.0), rid, nid),
         }
 
         width = self.xres * 2 + 13
