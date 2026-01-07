@@ -122,7 +122,6 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
 
     model_name: Annotated[str | None, Arg(help='Model path or name')] = None
     model_selector: Annotated[ModelSelector | None, Arg(help='Model selector')] = None
-    disable_tu_masking: Annotated[bool, Arg(help='Disable TU masking')] = True
 
     # Evaluation configuration
     eval_n_samples: Annotated[int, Arg(help='Samples for RMSE evaluation')] = 10000
@@ -150,14 +149,14 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
 
     def _prepare(self):
         """Prepare design manager and compile design step."""
-        self._prepare_design_manager()
-
         dconf = (
             self.design_conf.construct(context={})
             if isinstance(self.design_conf, DeferredNode)
             else self.design_conf
         )
         self._design_conf = dconf
+
+        self._prepare_design_manager()
         self._compile_design_step(dconf)
 
     def _load_model(self):
@@ -198,7 +197,7 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
             scaffolds=self.scaffolds,
             sampling=self.sampling,
             model=self._model,
-            enable_tu_masking=not self.disable_tu_masking,
+            enable_tu_masking=self._design_conf.enable_tu_masking,
         )
         logger.info(
             f"DesignManager ready: {len(self._dmanager.networks)} networks, "

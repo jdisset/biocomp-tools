@@ -82,7 +82,12 @@ class DesignEvaluator:
         if not valid_inputs:
             return [self._make_invalid_result(inp) for inp in inputs]
 
-        precomputed, baseline_cache = self._batch_compute(valid_inputs)
+        try:
+            precomputed, baseline_cache = self._batch_compute(valid_inputs)
+        except Exception as e:
+            logger.warning(f"Batch compute failed ({e}), falling back to one-by-one evaluation")
+            precomputed, baseline_cache, failed_indices = self._batch_compute_safe(valid_inputs)
+            invalid_indices.update(failed_indices)
 
         results = []
         for i, inp in enumerate(inputs):
@@ -90,6 +95,9 @@ class DesignEvaluator:
                 results.append(self._make_invalid_result(inp))
             else:
                 key = (inp.target_name, id(inp.network))
+                if key not in precomputed:
+                    results.append(self._make_invalid_result(inp))
+                    continue
                 pred_data = precomputed[key]['pred_data']
                 design_nre = precomputed[key]['design_nre']
                 baseline_nre = self._get_baseline_nre(inp.target, baseline_cache)
@@ -168,6 +176,59 @@ class DesignEvaluator:
 
         baseline_cache = self._batch_compute_baselines(valid_inputs)
         return precomputed, baseline_cache
+
+    def _batch_compute_safe(
+        self, valid_inputs: list[tuple[int, DesignInput]]
+    ) -> tuple[dict[tuple, dict], dict[int, float | None], set[int]]:
+        """Fallback: compute predictions one by one, catching errors per network."""
+        from biocomptools.modelmodel import NetworkModel
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+
+        precomputed = {}
+        failed_indices = set()
+
+        for i, inp in valid_inputs:
+            key = (inp.target_name, id(inp.network))
+            try:
+                td = prepare_target_data(inp.target, max_samples=self.max_evals, seed=42)
+                network_model = NetworkModel(model=self.model, network=inp.network)
+                has_gt = td.reshape_Y_for_prediction() is not None
+
+                predictor = NetworkPrediction(
+                    predict_at=[td.X],
+                    ground_truth=[td.reshape_Y_for_prediction()] if has_gt else None,
+                    max_evals=self.max_evals,
+                    network_model=network_model,
+                    already_latent=True,
+                    enable_gridstats=has_gt,
+                    device='gpu',
+                    verbose=False,
+                    skip_input_reorder=True,
+                    shuffle_inputs=True,
+                )
+                preds = predictor.get_data(rescale_latent=True)
+                stats = predictor.get_network_stats() if has_gt else None
+
+                pred = preds[0]
+                pred_data = PlotData(
+                    xval=pred.x,
+                    yval=pred.y,
+                    input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
+                    output_name='Y',
+                )
+                nre = stats[0].get('noise_relative_error') if stats else None
+                precomputed[key] = {'pred_data': pred_data, 'design_nre': nre}
+            except Exception as e:
+                logger.warning(f"Failed to evaluate design {i}: {e}")
+                failed_indices.add(i)
+
+        baseline_cache = {}
+        try:
+            baseline_cache = self._batch_compute_baselines(valid_inputs)
+        except Exception as e:
+            logger.warning(f"Failed to compute baselines: {e}")
+
+        return precomputed, baseline_cache, failed_indices
 
     def _batch_compute_baselines(
         self, valid_inputs: list[tuple[int, DesignInput]]

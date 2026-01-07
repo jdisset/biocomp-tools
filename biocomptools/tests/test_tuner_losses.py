@@ -39,8 +39,12 @@ def test_compute_grid_losses_weights(sample_grids):
     """Test that weights affect loss computation correctly."""
     Y_pred, Y_target = sample_grids
 
-    result_sinkhorn = compute_grid_losses(Y_pred, Y_target, w_sinkhorn=1.0, w_lncc=0.0, w_mse=0.0)
-    result_lncc = compute_grid_losses(Y_pred, Y_target, w_sinkhorn=0.0, w_lncc=1.0, w_mse=0.0)
+    result_sinkhorn = compute_grid_losses(
+        Y_pred, Y_target, w_sinkhorn=1.0, w_lncc=0.0, w_mse=0.0, w_rmse=0.0
+    )
+    result_lncc = compute_grid_losses(
+        Y_pred, Y_target, w_sinkhorn=0.0, w_lncc=1.0, w_mse=0.0, w_rmse=0.0
+    )
 
     assert abs(result_sinkhorn.total - result_sinkhorn.sinkhorn) < 1e-5
     assert abs(result_lncc.total - result_lncc.lncc) < 1e-5
@@ -53,12 +57,13 @@ def test_compute_grid_losses_zero_weight_returns_zero():
     Y_target = jax.random.uniform(jax.random.split(key)[0], (16, 16))
 
     result = compute_grid_losses(
-        Y_pred, Y_target, w_sinkhorn=0.0, w_lncc=0.0, w_mse=0.0, w_spectral=0.0
+        Y_pred, Y_target, w_sinkhorn=0.0, w_lncc=0.0, w_mse=0.0, w_rmse=0.0, w_spectral=0.0
     )
 
     assert result.sinkhorn == 0.0
     assert result.lncc == 0.0
     assert result.mse == 0.0
+    assert result.rmse == 0.0
     assert result.spectral == 0.0
     assert result.total == 0.0
 

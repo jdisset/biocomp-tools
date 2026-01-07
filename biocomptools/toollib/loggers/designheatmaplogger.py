@@ -449,17 +449,37 @@ class DesignHeatmapLogger(Logger):
         tu_stats = step_history.get("tu_stats", {})
         tu_str = ""
         if tu_stats:
-            enabled = tu_stats.get("enabled_count", 0)
-            total = tu_stats.get("total_count", 1)
-            if hasattr(enabled, 'shape') and enabled.shape:
-                enabled = float(
-                    enabled[min(nid, len(enabled) - 1)] if enabled.ndim == 1 else np.mean(enabled)
-                )
-            if hasattr(total, 'shape') and total.shape:
-                total = float(
-                    total[min(nid, len(total) - 1)] if total.ndim == 1 else np.mean(total)
-                )
-            tu_pct = 100 * float(enabled) / max(float(total), 1)
+            # Use per-network counts for accurate display
+            enabled_per_net = tu_stats.get("enabled_count_per_network")
+            n_tus = tu_stats.get("n_tus", tu_stats.get("total_count", 1))
+            if enabled_per_net is not None:
+                arr = np.asarray(enabled_per_net)
+                if arr.ndim == 4:  # (n_replicates, n_batches, n_targets, n_networks)
+                    rid_safe = min(rid, arr.shape[0] - 1)
+                    tid_safe = min(tid, arr.shape[2] - 1)
+                    nid_safe = min(nid, arr.shape[3] - 1)
+                    enabled = float(arr[rid_safe, -1, tid_safe, nid_safe])
+                elif arr.ndim == 3:  # (n_replicates, n_targets, n_networks)
+                    rid_safe = min(rid, arr.shape[0] - 1)
+                    tid_safe = min(tid, arr.shape[1] - 1)
+                    nid_safe = min(nid, arr.shape[2] - 1)
+                    enabled = float(arr[rid_safe, tid_safe, nid_safe])
+                elif arr.ndim == 2:  # (n_targets, n_networks)
+                    enabled = float(arr[min(tid, arr.shape[0] - 1), min(nid, arr.shape[1] - 1)])
+                elif arr.ndim == 1:  # (n_networks,)
+                    enabled = float(arr[min(nid, len(arr) - 1)])
+                else:  # scalar (ndim == 0)
+                    enabled = float(arr)
+            else:
+                enabled = float(np.asarray(tu_stats.get("enabled_count", 0)))
+            n_tus_arr = np.asarray(n_tus)
+            if n_tus_arr.ndim == 0:
+                total = float(n_tus_arr)
+            elif n_tus_arr.ndim == 1:
+                total = float(n_tus_arr[min(nid, len(n_tus_arr) - 1)])
+            else:
+                total = float(n_tus_arr.flat[0])
+            tu_pct = 100 * enabled / max(total, 1)
             tu_str = f" │ TUs: {int(enabled)}/{int(total)} ({tu_pct:.0f}%)"
 
         header = (
@@ -481,7 +501,7 @@ class DesignHeatmapLogger(Logger):
                 return float(np.mean(arr))
 
         penalties = {
-            "l0_penalty": _extract_scalar(step_history.get("l0_penalty", 0.0), rid, nid),
+            "l0_penalty": _extract_at_indices(step_history.get("l0_penalty_per_network"), rid, tid, nid),
             "spread_penalty": _extract_scalar(step_history.get("spread_penalty", 0.0), rid, nid),
             "coupling_penalty": _extract_scalar(step_history.get("coupling_penalty", 0.0), rid, nid),
             "tucount_penalty": _extract_scalar(step_history.get("tucount_penalty", 0.0), rid, nid),

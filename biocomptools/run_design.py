@@ -117,9 +117,6 @@ class DesignProgram(BaseOptimizationProgram):
         bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')
     ] = False
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
-    disable_tu_masking: Annotated[
-        bool, Arg(help='Disable Hard Concrete TU masking (use binary mask system instead)')
-    ] = True
     lock_ratios: Annotated[
         bool, Arg(help='Lock ratios to recipe-specified values (for zero-freedom baseline tests)')
     ] = False
@@ -214,15 +211,15 @@ class DesignProgram(BaseOptimizationProgram):
             self.targets = [self.targets]
         logger.info(
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
-            f"{self.sampling.strategy} sampling, TU masking={not self.disable_tu_masking}"
+            f"{self.sampling.strategy} sampling, TU masking={self.design_conf.enable_tu_masking}"
         )
         self._dmanager = DesignManager(
             targets=self.targets,
             networks=networks,
             sampling=self.sampling,
-            enable_tu_masking=not self.disable_tu_masking,
+            enable_tu_masking=self.design_conf.enable_tu_masking,
         )
-        if not self.disable_tu_masking:
+        if self.design_conf.enable_tu_masking:
             n_networks = len(self._dmanager.networks)
             logger.info(f"TU masking enabled: {self._dmanager.n_tus} TUs × {n_networks} networks")
 
