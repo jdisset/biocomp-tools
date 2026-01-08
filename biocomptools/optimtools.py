@@ -130,7 +130,9 @@ class BaseOptimizationProgram(BaseModel, ABC):
         pass
 
     @abstractmethod
-    async def execute_optimization(self, logger_callbacks, async_handler) -> Any:
+    async def execute_optimization(
+        self, logger_callbacks, async_handler, logger_objects=None
+    ) -> Any:
         pass
 
     @abstractmethod
@@ -204,6 +206,12 @@ class BaseOptimizationProgram(BaseModel, ABC):
         # At this point all loggers should be constructed (not deferred)
         sync_loggers = [lg for lg in self.loggers if isinstance(lg, Logger) and not lg.async_ok]
         async_loggers = [lg for lg in self.loggers if isinstance(lg, Logger) and lg.async_ok]
+        # new pattern loggers need to go through async_handler regardless of async_ok
+        new_pattern_loggers = [
+            lg
+            for lg in self.loggers
+            if isinstance(lg, Logger) and getattr(lg, '_uses_new_pattern', False)
+        ]
 
         for logger_obj in sync_loggers:
             logger_obj.initialize(self)
@@ -233,6 +241,9 @@ class BaseOptimizationProgram(BaseModel, ABC):
             for period, callback, logger_obj in all_callbacks
             if not logger_obj.async_ok
         ]
+        sync_logger_objects = [
+            logger_obj for period, callback, logger_obj in all_callbacks if not logger_obj.async_ok
+        ]
         async_callbacks = [
             (period, callback, logger_obj)
             for period, callback, logger_obj in all_callbacks
@@ -242,9 +253,19 @@ class BaseOptimizationProgram(BaseModel, ABC):
         logger_callbacks = sync_callbacks.copy()
 
         async_handler = None
-        needs_async_handler = async_callbacks or self.save_all_steps or self.keep_history_on_disk
+        # include new_pattern_loggers in the check - they need the handler for dispatch
+        needs_async_handler = (
+            async_callbacks
+            or self.save_all_steps
+            or self.keep_history_on_disk
+            or new_pattern_loggers
+        )
         if self.async_logging and needs_async_handler:
-            async_handler = self._setup_async_handler(async_callbacks, async_loggers)
+            # merge async_loggers with new_pattern_loggers (dedupe)
+            all_handler_loggers = list(
+                {id(lg): lg for lg in async_loggers + new_pattern_loggers}.values()
+            )
+            async_handler = self._setup_async_handler(async_callbacks, all_handler_loggers)
             logger_callbacks.append((1, async_handler.create_callback()))
 
             save_info = ", saving all steps" if self.save_all_steps else ""
@@ -258,11 +279,14 @@ class BaseOptimizationProgram(BaseModel, ABC):
             logger.info("Async logging enabled but no async-capable loggers found")
         else:
             logger_callbacks = [(period, callback) for period, callback, _ in all_callbacks]
+            sync_logger_objects = [logger_obj for _, _, logger_obj in all_callbacks]
 
-        result = await self.execute_optimization(logger_callbacks, async_handler)
+        result = await self.execute_optimization(
+            logger_callbacks, async_handler, sync_logger_objects
+        )
 
         if self.async_logging and async_handler:
-            self._shutdown_async_handler(async_handler, result)
+            self._shutdown_async_handler(async_handler, result, sync_callbacks)
 
         self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -290,16 +314,28 @@ class BaseOptimizationProgram(BaseModel, ABC):
 
         return async_handler
 
-    def _shutdown_async_handler(self, async_handler, result):
+    def _shutdown_async_handler(self, async_handler, result, sync_callbacks=None):
         step_history = result[-1] if isinstance(result, tuple) and len(result) > 2 else None
         losses = result[1] if isinstance(result, tuple) and len(result) > 1 else []
+        final_step = len(losses) if losses else 0
+        training_config = getattr(self, 'training_conf', getattr(self, 'design_conf', None))
 
         async_handler.process_end_loggers(
-            step=len(losses) if losses else 0,
-            training_config=getattr(self, 'training_conf', getattr(self, 'design_conf', None)),
+            step=final_step,
+            training_config=training_config,
             step_history=step_history,
             stack=None,
         )
+
+        if sync_callbacks:
+            for period, callback in sync_callbacks:
+                if period is None or period == -1:
+                    try:
+                        callback(final_step, training_config, step_history=step_history, stack=None)
+                    except Exception as e:
+                        logger.error(f"Sync logger final callback failed: {e}")
+                        logger.exception(e)
+
         async_handler.shutdown()
 
     def save_metadata(self, save_dir: Path):

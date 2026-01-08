@@ -192,6 +192,20 @@ class AsyncLoggerHandler(BaseModel):
 
     def create_callback(self):
         def async_callback(step, training_config, step_history=None, stack=None):
+            # always capture loss to history manager (cheap - just loss values)
+            if step_history is not None:
+                loss = step_history.get('loss')
+                if loss is not None:
+                    self._history_manager.append_loss_only(
+                        step=step,
+                        loss=loss,
+                        timestamp=time.time(),
+                        all_losses=step_history.get('all_losses'),
+                    )
+
+            # dispatch new pattern loggers (they read from HistoryManager)
+            self._dispatch_new_pattern_loggers(step, training_config, stack, 'regular')
+
             triggering_loggers = []
             if not self.save_all_steps:
                 for p, _, logger_obj in self.logger_callbacks:
@@ -484,10 +498,11 @@ class AsyncLoggerHandler(BaseModel):
                         view = self._get_view_for_logger(logger_obj)
                         logger_obj.on_end(view, context)
                 else:
-                    freq = getattr(logger_obj, 'frequency', 1)
-                    periods = getattr(logger_obj, 'periods', freq)
-                    if isinstance(periods, int):
-                        freq = periods
+                    # new pattern uses frequency; fall back to periods for compat
+                    freq = getattr(logger_obj, 'frequency', None)
+                    if freq is None or freq == 1:
+                        periods = getattr(logger_obj, 'periods', 1)
+                        freq = periods if isinstance(periods, int) else 1
                     if step > 0 and step % freq == 0:
                         view = self._get_view_for_logger(logger_obj)
                         logger_obj.on_batch(view, context)
@@ -607,6 +622,7 @@ class AsyncLoggerHandler(BaseModel):
         last_callback_step: Dict[int, int] = {}
 
         from tqdm import tqdm
+
         for batch in tqdm(batches, desc="Processing steps", unit="step"):
             # add batch to history BEFORE processing (simulates real-time behavior)
             history_manager.append_batch(batch)

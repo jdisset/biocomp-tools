@@ -49,6 +49,8 @@ class DesignResult:
     lattice_resolution: tuple[int, int] | None  # (xres, yres)
     design_nre: float | None
     baseline_nre: float | None
+    exp_x_data: PlotData | None = None
+    fingerprint: str | None = None
 
     @property
     def has_original_network(self) -> bool:
@@ -76,6 +78,7 @@ class DesignResult:
             lattice_resolution=ev.lattice_resolution,
             design_nre=ev.design_nre,
             baseline_nre=ev.baseline_nre,
+            exp_x_data=ev.exp_x_data,
         )
 
 
@@ -211,6 +214,18 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
         family='monospace',
         color='#888',
     )
+    if result.fingerprint:
+        ax.text(
+            0.5,
+            info_y - 0.32,
+            f"FP: {result.fingerprint}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va='center',
+            ha='center',
+            family='monospace',
+            color='#888',
+        )
 
 
 def render_empty_panel(ax: matplotlib.axes.Axes, text: str = "", **_kwargs):
@@ -280,7 +295,7 @@ def render_smooth_with_extent(
     plot_data: PlotData,
     extent: tuple[float, float, float, float] | None,
     title: str = "",
-    draw_colorbar: bool = False,
+    draw_colorbar: bool = True,
     **kwargs,
 ):
     """Render smooth KNN plot with explicit axis limits from target extent."""
@@ -300,5 +315,7 @@ def render_smooth_with_extent(
         ylims=ylims,
         title=title,
         draw_colorbar=draw_colorbar,
+        smooth_2d_params={'vlims': (None, None)},
+        vlims=(None, None),
         **kwargs,
     )

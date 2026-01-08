@@ -217,6 +217,20 @@ class DesignSummaryLogger(Logger):
         y_true = td.Y if td.Y is not None else np.zeros(td.n_samples)
         y_pred = ev.pred_data.yval if len(ev.pred_data.yval) > 0 else np.zeros_like(y_true)
 
+        # compute fingerprint for committed network
+        fingerprint = None
+        try:
+            from biocomp.fingerprint import compute_fingerprint
+            from biocomptools.modelmodel import NetworkModel
+
+            network_model = NetworkModel(model=self.model, network=network)
+            fingerprint = compute_fingerprint(network_model)
+            logger.debug(f"  [{inp.target_name} rank {inp.rank}] Fingerprint: {fingerprint}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to compute fingerprint for {inp.target_name} rank {inp.rank}: {e}"
+            )
+
         # create NRE metrics
         nre_metrics = (
             NREMetrics(
@@ -245,6 +259,7 @@ class DesignSummaryLogger(Logger):
             inp.rank,
             info['step'],
             nre_metrics=nre_metrics,
+            fingerprint=fingerprint,
         )
         metrics.to_json(rank_dir / 'metrics.json')
         self._all_metrics.append(metrics.to_dict())
@@ -277,6 +292,8 @@ class DesignSummaryLogger(Logger):
             lattice_resolution=ev.lattice_resolution,
             design_nre=ev.design_nre,
             baseline_nre=ev.baseline_nre,
+            exp_x_data=ev.exp_x_data,
+            fingerprint=fingerprint,
         )
         try:
             PlotJob.invoke(

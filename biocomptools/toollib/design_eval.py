@@ -57,6 +57,7 @@ class EvaluatedDesign:
     lattice_resolution: tuple[int, int] | None  # (xres, yres)
     design_nre: float | None
     baseline_nre: float | None
+    exp_x_data: PlotData | None = None
     is_valid: bool = True
 
 
@@ -100,6 +101,19 @@ class DesignEvaluator:
                     continue
                 pred_data = precomputed[key]['pred_data']
                 design_nre = precomputed[key]['design_nre']
+                exp_x_data = precomputed[key].get('exp_x_data')
+                if exp_x_data is None:
+                    logger.warning(
+                        f"exp_x_data missing for {inp.target_name} "
+                        + f"(key in precomputed: {list(precomputed[key].keys())}), using empty fallback"
+                    )
+                    n_in = getattr(inp.network, 'nb_inputs', 2)
+                    exp_x_data = PlotData(
+                        xval=np.zeros((0, n_in)),
+                        yval=np.zeros(0),
+                        input_names=[f'X{j + 1}' for j in range(n_in)],
+                        output_name='Y',
+                    )
                 baseline_nre = self._get_baseline_nre(inp.target, baseline_cache)
                 gt_data = self._compute_gt_data(inp)
                 lattice_data, lattice_grid, lattice_extent, lattice_resolution = (
@@ -117,6 +131,7 @@ class DesignEvaluator:
                         lattice_resolution=lattice_resolution,
                         design_nre=design_nre,
                         baseline_nre=baseline_nre,
+                        exp_x_data=exp_x_data,
                     )
                 )
         return results
@@ -172,7 +187,38 @@ class DesignEvaluator:
             nre = stats[i].get('noise_relative_error') if stats else None
             precomputed[keys[i]] = {'pred_data': pred_data, 'design_nre': nre}
 
-        logger.info(f"Batched {n} predictions in {time.time() - start:.2f}s")
+        from biocomptools.toollib.typical_experimental_distribution import sample_latent
+
+        n_inputs = networks[0].nb_inputs
+        assert n_inputs > 0, f"network has no inputs: {networks[0]}"
+        logger.debug(f"Computing exp_x predictions for {n} networks, n_inputs={n_inputs}")
+        try:
+            exp_x_samples = sample_latent(150000, n_inputs, seed=42)
+            logger.debug(f"exp_x_samples shape: {exp_x_samples.shape}")
+            exp_predictor = NetworkPrediction(
+                predict_at=[exp_x_samples] * n,
+                network_model=network_model,
+                already_latent=True,
+                device='gpu',
+                verbose=False,
+                skip_input_reorder=True,
+            )
+            exp_preds = exp_predictor.get_data(rescale_latent=True)
+            assert len(exp_preds) == n, f"exp_x prediction count {len(exp_preds)} != {n}"
+            for i, exp_pred in enumerate(exp_preds):
+                exp_x_data = PlotData(
+                    xval=exp_pred.x,
+                    yval=exp_pred.y,
+                    input_names=[f'X{j + 1}' for j in range(exp_pred.x.shape[1])],
+                    output_name='Y',
+                )
+                precomputed[keys[i]]['exp_x_data'] = exp_x_data
+            logger.debug(f"Added exp_x_data for {len(exp_preds)} networks")
+        except Exception as e:
+            logger.error(f"exp_x computation failed in _batch_compute: {e}")
+            raise
+
+        logger.info(f"Batched {n} predictions (incl. exp X) in {time.time() - start:.2f}s")
 
         baseline_cache = self._batch_compute_baselines(valid_inputs)
         return precomputed, baseline_cache
@@ -218,6 +264,29 @@ class DesignEvaluator:
                 )
                 nre = stats[0].get('noise_relative_error') if stats else None
                 precomputed[key] = {'pred_data': pred_data, 'design_nre': nre}
+
+                from biocomptools.toollib.typical_experimental_distribution import sample_latent
+
+                n_inputs = inp.network.nb_inputs
+                logger.debug(f"[safe] Computing exp_x for network {i}, n_inputs={n_inputs}")
+                exp_x_samples = sample_latent(150000, n_inputs, seed=42)
+                exp_predictor = NetworkPrediction(
+                    predict_at=[exp_x_samples],
+                    network_model=network_model,
+                    already_latent=True,
+                    device='gpu',
+                    verbose=False,
+                    skip_input_reorder=True,
+                )
+                exp_preds = exp_predictor.get_data(rescale_latent=True)
+                exp_x_data = PlotData(
+                    xval=exp_preds[0].x,
+                    yval=exp_preds[0].y,
+                    input_names=[f'X{j + 1}' for j in range(exp_preds[0].x.shape[1])],
+                    output_name='Y',
+                )
+                precomputed[key]['exp_x_data'] = exp_x_data
+                logger.debug(f"[safe] Added exp_x_data for network {i}")
             except Exception as e:
                 logger.warning(f"Failed to evaluate design {i}: {e}")
                 failed_indices.add(i)
@@ -320,7 +389,9 @@ class DesignEvaluator:
 
         Y_grid_2d = Y_grid if Y_grid.ndim == 2 else Y_grid.reshape(resolution[1], resolution[0])
 
-        td = prepare_target_data(inp.target, max_samples=48 * 48, seed=0, grid_resolution=resolution)
+        td = prepare_target_data(
+            inp.target, max_samples=48 * 48, seed=0, grid_resolution=resolution
+        )
         lattice_data = td.to_plot_data(model=self.model)
 
         return lattice_data, Y_grid_2d, lattice_extent, resolution
@@ -343,6 +414,7 @@ class DesignEvaluator:
             lattice_resolution=None,
             design_nre=None,
             baseline_nre=None,
+            exp_x_data=empty,
             is_valid=False,
         )
 

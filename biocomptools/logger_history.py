@@ -40,6 +40,7 @@ class BatchData:
             if hasattr(v, 'data') and hasattr(v.data, 'iter_leaves'):
                 return v
             return np.asarray(v)
+
         return {
             'batch_index': self.batch_index,
             'step_index': self.step_index,
@@ -252,6 +253,40 @@ class HistoryManager:
             timestamp=timestamp,
         )
         batch.batch_index = self._batch_index
+        self._batches.append(batch)
+        self._batch_index += 1
+
+    def append_loss_only(
+        self,
+        step: int,
+        loss: np.ndarray | float,
+        timestamp: float = 0.0,
+        all_losses: np.ndarray | None = None,
+    ):
+        """Lightweight append capturing only loss values.
+
+        Used for every-step accumulation without full step_history serialization overhead.
+        """
+        if hasattr(loss, 'shape'):
+            loss_arr = np.asarray(loss)
+            loss_scalar = float(np.nanmean(loss_arr))
+        else:
+            loss_scalar = float(loss)
+            loss_arr = np.array(loss)
+
+        arrays: dict[str, np.ndarray] = {'loss': loss_arr}
+        if all_losses is not None:
+            arrays['all_losses'] = np.asarray(all_losses)
+
+        batch = BatchData(
+            batch_index=self._batch_index,
+            step_index=step,
+            batch_in_step=0,
+            timestamp=timestamp,
+            loss=loss_scalar,
+            metrics={},
+            arrays=arrays,
+        )
         self._batches.append(batch)
         self._batch_index += 1
 

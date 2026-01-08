@@ -53,6 +53,7 @@ class DesignMetrics:
     distribution: DistributionStats
     recipe_summary: dict = field(default_factory=dict)
     nre: NREMetrics | None = None
+    fingerprint: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +68,7 @@ class DesignMetrics:
             'distribution': asdict(self.distribution),
             'recipe_summary': self.recipe_summary,
             **(({'nre': asdict(self.nre)}) if self.nre else {}),
+            **(({'fingerprint': self.fingerprint}) if self.fingerprint else {}),
         }
 
     def to_json(self, path: Path):
@@ -145,6 +147,7 @@ def compute_design_metrics(
     loss_components: dict | None = None,
     recipe_info: dict | None = None,
     nre_metrics: NREMetrics | None = None,
+    fingerprint: str | None = None,
 ) -> DesignMetrics:
     """Create DesignMetrics from evaluation data."""
     lc = loss_components or {}
@@ -166,6 +169,7 @@ def compute_design_metrics(
         distribution=DistributionStats.compute(y_true, y_pred),
         recipe_summary=recipe_info or {},
         nre=nre_metrics,
+        fingerprint=fingerprint,
     )
 
 

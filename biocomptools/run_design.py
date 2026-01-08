@@ -26,13 +26,14 @@ from biocomp.design import (
     set_design_debug_output_dir,
 )
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
+from biocomp.paramintrospect import format_network_params_rich
 from biocomp.network import Network, recipe_to_networks
 from biocomp.graphengine import GraphState
 from biocomp.recipe import Recipe
 from biocomp.jaxutils import tree_to_np, tree_get
 
 from dracon.commandline import Arg, dracon_program
-from biocomptools.optimtools import DEFAULT_TYPES, make_context_from_types
+from biocomptools.optimtools import DEFAULT_TYPES
 from biocomptools.toollib.common import config
 import dracon
 import asyncio
@@ -294,7 +295,7 @@ class DesignProgram(BaseOptimizationProgram):
             }
         )
 
-    async def execute_optimization(self, logger_callbacks, async_handler):
+    async def execute_optimization(self, logger_callbacks, async_handler, logger_objects=None):
         logger.info("Starting design optimization...")
         assert self._dmanager is not None
 
@@ -335,6 +336,7 @@ class DesignProgram(BaseOptimizationProgram):
             dconf=self.design_conf,
             model=self._model,
             loggers=logger_callbacks,
+            logger_objects=logger_objects,
             async_handler=async_handler,
             lock_ratios=self.lock_ratios,
         )
@@ -598,7 +600,7 @@ class DesignProgram(BaseOptimizationProgram):
         # Pre-compute all unique (rep_id, tid) pairs needed from topk
         needed_pairs: set[tuple[int, int]] = set()
         for tid in range(n_targets):
-            for rep_id, net_id, loss_val in topk[tid]:
+            for rep_id, _net_id, _loss_val in topk[tid]:
                 needed_pairs.add((rep_id, tid))
 
         # Pre-commit all needed parameter sets (expensive operation, do once per pair)
@@ -606,7 +608,7 @@ class DesignProgram(BaseOptimizationProgram):
         commit_failures: list[tuple[int, int, str]] = []
         t0 = time.perf_counter()
         logger.info(f"Pre-committing {len(needed_pairs)} unique (replicate, target) pairs...")
-        for i, (rep_id, tid) in enumerate(sorted(needed_pairs)):
+        for _i, (rep_id, tid) in enumerate(sorted(needed_pairs)):
             bparams = tree_get(final_params, (rep_id, tid))
             try:
                 commit_cache[(rep_id, tid)] = stack.commit(bparams)
@@ -663,7 +665,7 @@ class DesignProgram(BaseOptimizationProgram):
                         cnet = committed_networks[net_id]
                         assert cnet is not None, f"committed network {net_id} is None"
 
-                        recipe = cnet.to_recipe()
+                        recipe = cnet.to_recipe(auto_name_from_l1=True)
 
                         # Skip empty recipes (all TUs were pruned)
                         if not recipe.content:
@@ -781,8 +783,9 @@ class DesignProgram(BaseOptimizationProgram):
         from rich.console import Console
         from rich.panel import Panel
         from biocomp.designutils import side_by_side_txt_plot
-        from biocomptools.toollib.networkprediction import NetworkPrediction
+        from biocomp.fingerprint import compute_fingerprint, FINGERPRINT_SEED
         from biocomptools.modelmodel import NetworkModel
+        from biocomptools.toollib.networkprediction import NetworkPrediction
         from collections import defaultdict
 
         console = Console()
@@ -814,36 +817,58 @@ class DesignProgram(BaseOptimizationProgram):
 
         for target_name, designs in by_target.items():
             target = designs[0].get('target') if designs else None
+            if target is None or self._model is None:
+                continue
 
             console.print()
             console.print(
                 Panel(f"[bold white]{target_name}[/bold white]", style="blue", expand=False)
             )
 
-            for i, design in enumerate(designs[:top_n]):
-                network = design.get('network')
-                network_name = design.get('network_name', f"Net {i}")
-                loss = design.get('loss', float('nan'))
-                rep_id = design.get('replicate', 0)
+            valid_designs = [
+                (i, d) for i, d in enumerate(designs[:top_n]) if d.get('network') is not None
+            ]
+            if not valid_designs:
+                console.print("[red]No valid networks for this target[/red]")
+                continue
 
-                if network is None or target is None or self._model is None:
-                    console.print(
-                        f"[red]Rank {i + 1}: {network_name} - No network/target/model[/red]"
-                    )
-                    continue
+            try:
+                networks = [d['network'] for _, d in valid_designs]
+                nm = NetworkModel(model=self._model, network=networks)
+                X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
+                Y_target_grid = np.asarray(Y_target).reshape(yres, xres)
 
-                try:
-                    nm = NetworkModel(model=self._model, network=network)
-                    X_lat, Y_target = target.get_lattice(resolution=res, seed=0)
-                    pred = NetworkPrediction(
-                        predict_at=[X_lat], network_model=nm, already_latent=True
-                    )
-                    data = pred.get_data(rescale_latent=False)[0]
+                pred = NetworkPrediction(
+                    predict_at=[X_lat] * len(networks),
+                    network_model=nm,
+                    already_latent=True,
+                    z_value=0.0,
+                    disable_variational=True,
+                    seed=FINGERPRINT_SEED,
+                )
+                data_list = pred.get_data(rescale_latent=False)
+
+                for net_idx, ((orig_rank, design), data) in enumerate(
+                    zip(valid_designs, data_list, strict=True)
+                ):
+                    network_name = design.get('network_name', f"Net {orig_rank}")
+                    loss = design.get('loss', float('nan'))
+                    rep_id = design.get('replicate', 0)
+                    params = design.get('params')
+                    net_id = design.get('network_id', 0)
+
                     Y_pred_grid = np.asarray(data.y).reshape(yres, xres)
-                    Y_target_grid = np.asarray(Y_target).reshape(yres, xres)
+
+                    fp_str = ""
+                    try:
+                        fingerprint = compute_fingerprint(nm, network_idx=net_idx)
+                        fp_str = f" │ FP: {fingerprint}"
+                    except Exception as e:
+                        logger.warning(f"Fingerprint computation failed: {e}")
 
                     width = display_width * 2 + 13
-                    header = f" Rep {rep_id} {network_name} (rank {i + 1}/{len(designs[:top_n])}, loss={loss:.4f})"
+                    n_shown = len(valid_designs)
+                    header = f" Rep {rep_id} {network_name} (rank {orig_rank + 1}/{n_shown}, loss={loss:.4f}){fp_str}"
                     console.print(f"{'─' * width}")
                     console.print(header)
                     console.print(f"{'─' * width}")
@@ -867,11 +892,20 @@ class DesignProgram(BaseOptimizationProgram):
                     console.print(
                         f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}"
                     )
+
+                    if params is not None and self._dmanager and self._model:
+                        try:
+                            stack = self._dmanager.build_stack(self._model)
+                            console.print("")
+                            format_network_params_rich(stack, params, net_id, console)
+                        except Exception as e:
+                            logger.warning(f"Introspection failed for network {net_id}: {e}")
+
                     console.print()
 
-                except Exception as e:
-                    console.print(f"[red]Rank {i + 1}: {network_name} - Error: {e}[/red]")
-                    logger.debug(f"Failed prediction for {network_name}: {e}")
+            except Exception as e:
+                console.print(f"[red]Error processing designs for {target_name}: {e}[/red]")
+                logger.debug(f"Failed processing designs for {target_name}: {e}")
 
         console.rule(style="cyan")
 
@@ -940,6 +974,7 @@ class DesignProgram(BaseOptimizationProgram):
                     lattice_resolution=ev.lattice_resolution,
                     design_nre=ev.design_nre,
                     baseline_nre=ev.baseline_nre,
+                    exp_x_data=ev.exp_x_data,
                 )
 
                 if is_design_debug_enabled():

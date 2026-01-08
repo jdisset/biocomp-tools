@@ -8,7 +8,10 @@ from pydantic import ConfigDict, Field
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
-from biocomp.designutils import side_by_side_txt_plot, LOSS_ORDER
+from biocomp.designutils import (
+    side_by_side_txt_plot,
+    LOSS_ORDER,
+)
 
 logger = get_logger(__name__)
 
@@ -25,8 +28,12 @@ def _to_scalar(val: Any, default: float = 0.0) -> float:
     """Convert array-like (numpy/JAX) or scalar to float, averaging if multi-element."""
     if val is None:
         return default
-    if hasattr(val, 'shape') and getattr(val, 'size', 1) > 1:
-        return float(np.mean(val))
+    if hasattr(val, 'shape'):
+        size = getattr(val, 'size', 1)
+        if size > 1:
+            return float(np.mean(val))
+        if size == 1:
+            return float(np.asarray(val).item())
     try:
         return float(val) if val else default
     except (TypeError, ValueError):
@@ -295,6 +302,7 @@ class DesignHeatmapLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    required_arrays: list[str] = ["yhatdep", "latest_params"]
     async_ok: bool = False
     xres: int = Field(default=40, description="Horizontal resolution for ASCII heatmap")
     yres: int = Field(default=20, description="Vertical resolution for ASCII heatmap")
@@ -307,9 +315,14 @@ class DesignHeatmapLogger(Logger):
     )
     show_penalties: bool = Field(default=True, description="Show penalty breakdown in table")
     show_ratio_stats: bool = Field(default=True, description="Show ratio min/max/mean")
+    show_local_params: bool = Field(
+        default=True, description="Show local parameter values (ratios)"
+    )
     top_k: int = Field(default=3, description="Number of top networks to display (by loss)")
 
     _dmanager: Any = None
+    _model: Any = None
+    _stack: Any = None
     _grid_resolution: tuple[int, int] | None = None
     _cached_target_grid: np.ndarray | None = None
     _total_steps: int = 0
@@ -317,18 +330,53 @@ class DesignHeatmapLogger(Logger):
     _n_targets: int = 1
     _network_names: list[str] = []
 
+    use_fresh_predictions: bool = Field(
+        default=True,
+        description="Compute fresh predictions from latest_params (ensures display matches fingerprint)",
+    )
+    fingerprint_only_at_end: bool = Field(
+        default=True,
+        description="Only compute fingerprint at final step (saves time during training)",
+    )
+
+    save_reproduction_pickle: bool = Field(
+        default=False,
+        description="Save pickle with data for debugging logged vs committed prediction discrepancies",
+    )
+    reproduction_pickle_path: str | None = Field(
+        default=None,
+        description="Path to save reproduction pickle (default: output_dir/heatmap_repro.pickle)",
+    )
+
+    _output_dir: str | None = None
+    _last_step_history: dict | None = None
+    _model_path: str | None = None
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._dmanager = None
+        self._model = None
+        self._stack = None
         self._grid_resolution = None
         self._cached_target_grid = None
         self._total_steps = 0
         self._loss_weights = {}
         self._n_targets = 1
         self._network_names = []
+        self._output_dir = None
+        self._last_step_history = None
+        self._model_path = None
 
     def initialize(self, training_program=None):
         if training_program:
+            if hasattr(training_program, '_model'):
+                self._model = training_program._model
+            if hasattr(training_program, '_save_dir'):
+                self._output_dir = str(training_program._save_dir)
+            if hasattr(training_program, 'model_name') and training_program.model_name:
+                self._model_path = training_program.model_name
+            elif self._model and hasattr(self._model, 'path'):
+                self._model_path = str(self._model.path)
             if hasattr(training_program, '_dmanager'):
                 self._dmanager = training_program._dmanager
                 if self._dmanager:
@@ -370,6 +418,12 @@ class DesignHeatmapLogger(Logger):
                     if attr not in self._loss_weights and hasattr(dc, attr):
                         self._loss_weights[attr] = getattr(dc, attr)
 
+        if self._dmanager and self._model:
+            try:
+                self._stack = self._dmanager.build_stack(self._model)
+            except Exception as e:
+                logger.warning(f"Failed to build stack for introspection: {e}")
+
         if self._dmanager and self._grid_resolution:
             targets = self._dmanager.targets
             if self.target_idx < len(targets):
@@ -379,6 +433,55 @@ class DesignHeatmapLogger(Logger):
                     self._cached_target_grid = Y_grid
                 except Exception as e:
                     logger.warning(f"Failed to cache target grid: {e}")
+
+    def _compute_fresh_prediction(
+        self, params, rep_idx: int, target_idx: int, network_idx: int
+    ) -> np.ndarray | None:
+        """Compute fresh prediction from params to ensure display matches fingerprint.
+
+        Uses deterministic z_value=0.0 (same as fingerprint computation) on the canonical
+        lattice grid. This fixes the timing mismatch where logged yhatdep is from pre-update
+        params but latest_params is post-update.
+        """
+        if self._model is None or self._dmanager is None or self._grid_resolution is None:
+            return None
+
+        try:
+            import jax
+            from biocomp.jaxutils import tree_get
+            from biocomptools.modelmodel import NetworkModel
+
+            stack = self._dmanager.build_stack(self._model)
+            specific_params = tree_get(params, (rep_idx, target_idx))
+            committed_networks = stack.commit(specific_params)
+
+            if network_idx >= len(committed_networks):
+                return None
+
+            committed_net = committed_networks[network_idx]
+            if not committed_net.compute_graph.nodes:
+                return None
+
+            nm = NetworkModel(model=self._model, network=committed_net)
+            target = self._dmanager.targets[target_idx]
+            X_lat, _ = target.get_lattice(resolution=self._grid_resolution, seed=0)
+            X_lat = np.asarray(X_lat)
+
+            Y_pred, _ = nm.predict(
+                X_lat,
+                key=jax.random.PRNGKey(42),
+                disable_variational=True,
+                z_value=0.0,
+            )
+            Y_pred = np.asarray(Y_pred).flatten()
+            xres, yres = self._grid_resolution
+            return Y_pred.reshape(yres, xres)
+
+        except Exception as e:
+            logger.debug(
+                f"Fresh prediction failed (rid={rep_idx}, tid={target_idx}, nid={network_idx}): {e}"
+            )
+            return None
 
     def _get_top_k_designs(
         self, step_history: dict, tid: int, n_replicates: int, n_networks: int
@@ -440,11 +543,19 @@ class DesignHeatmapLogger(Logger):
         loss: float,
         Y_target_grid: np.ndarray | None,
         n_total_designs: int,
+        is_final: bool = False,
     ) -> list[str]:
         """Render heatmap and loss table for a single (replicate, network) design."""
         xres, yres = self._grid_resolution  # type: ignore
         net_name = self._network_names[nid] if nid < len(self._network_names) else f"Net {nid}"
-        Y_pred_grid = yhatdep[rid, :, tid, nid].reshape(yres, xres)
+
+        Y_pred_grid = None
+        params = step_history.get('latest_params')
+        if self.use_fresh_predictions and params is not None:
+            Y_pred_grid = self._compute_fresh_prediction(params, rid, tid, nid)
+
+        if Y_pred_grid is None:
+            Y_pred_grid = yhatdep[rid, :, tid, nid].reshape(yres, xres)
 
         tu_stats = step_history.get("tu_stats", {})
         tu_str = ""
@@ -482,9 +593,27 @@ class DesignHeatmapLogger(Logger):
             tu_pct = 100 * enabled / max(total, 1)
             tu_str = f" │ TUs: {int(enabled)}/{int(total)} ({tu_pct:.0f}%)"
 
-        header = (
-            f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}"
-        )
+        fp_str = ""
+        compute_fp = is_final or not self.fingerprint_only_at_end
+        params = step_history.get('latest_params')
+        if compute_fp and self._model and self._dmanager and params is not None:
+            try:
+                from biocomp.fingerprint import compute_fingerprint_from_params
+
+                stack = self._dmanager.build_stack(self._model)
+                fingerprint = compute_fingerprint_from_params(
+                    stack=stack,
+                    params=params,
+                    model=self._model,
+                    rep_id=rid,
+                    target_id=tid,
+                    network_idx=nid,
+                )
+                fp_str = f" │ FP: {fingerprint}"
+            except Exception as e:
+                logger.debug(f"Fingerprint computation failed: {e}")
+
+        header = f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}{fp_str}"
 
         def _extract_scalar(val, rid, nid):
             """Extract scalar from potentially multi-dim array using (rid, nid) indices."""
@@ -501,11 +630,17 @@ class DesignHeatmapLogger(Logger):
                 return float(np.mean(arr))
 
         penalties = {
-            "l0_penalty": _extract_at_indices(step_history.get("l0_penalty_per_network"), rid, tid, nid),
+            "l0_penalty": _extract_at_indices(
+                step_history.get("l0_penalty_per_network"), rid, tid, nid
+            ),
             "spread_penalty": _extract_scalar(step_history.get("spread_penalty", 0.0), rid, nid),
-            "coupling_penalty": _extract_scalar(step_history.get("coupling_penalty", 0.0), rid, nid),
+            "coupling_penalty": _extract_scalar(
+                step_history.get("coupling_penalty", 0.0), rid, nid
+            ),
             "tucount_penalty": _extract_scalar(step_history.get("tucount_penalty", 0.0), rid, nid),
-            "ern_tying_penalty": _extract_scalar(step_history.get("ern_tying_penalty", 0.0), rid, nid),
+            "ern_tying_penalty": _extract_scalar(
+                step_history.get("ern_tying_penalty", 0.0), rid, nid
+            ),
         }
 
         width = self.xres * 2 + 13
@@ -544,9 +679,56 @@ class DesignHeatmapLogger(Logger):
             if self.show_stats:
                 lines.append(f"Pred: [{Y_pred_grid.min():.2f}, {Y_pred_grid.max():.2f}]")
 
+        if self.show_local_params:
+            if params is None:
+                logger.warning(
+                    f"[DesignHeatmapLogger] Cannot show params: latest_params not in step_history. "
+                    f"Keys available: {list(step_history.keys())}"
+                )
+                lines.append("")
+                lines.append("[!] Cannot show params: latest_params not in step_history")
+            elif self._stack is None:
+                logger.warning(
+                    f"[DesignHeatmapLogger] Cannot introspect: stack not built. "
+                    f"model={self._model is not None}, dmanager={self._dmanager is not None}"
+                )
+                lines.append("")
+                lines.append(
+                    f"[!] Cannot introspect: stack not built "
+                    f"(model={self._model is not None}, dmanager={self._dmanager is not None})"
+                )
+            else:
+                try:
+                    from biocomp.jaxutils import tree_get
+                    from biocomp.paramintrospect import format_network_params_rich
+                    from io import StringIO
+                    from rich.console import Console
+
+                    specific_params = tree_get(params, (rid, tid))
+
+                    string_io = StringIO()
+                    console = Console(file=string_io, force_terminal=True, width=100)
+                    format_network_params_rich(self._stack, specific_params, nid, console)
+                    param_str = string_io.getvalue()
+
+                    if param_str:
+                        lines.append("")
+                        for line in param_str.split("\n"):
+                            lines.append(f"  {line}")
+                    else:
+                        logger.warning(
+                            f"[DesignHeatmapLogger] format_network_params_rich returned empty for network {nid}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[DesignHeatmapLogger] Introspection failed for network {nid}: {e}"
+                    )
+                    lines.append("")
+                    lines.append(f"[!] Introspection failed for network {nid}: {e}")
+
         return lines
 
-    def _render_heatmaps(self, step: int, step_history: dict) -> str | None:
+    def _render_heatmaps(self, step: int, step_history: dict, is_final: bool = False) -> str | None:
         if self._grid_resolution is None or self._dmanager is None:
             return None
 
@@ -616,6 +798,7 @@ class DesignHeatmapLogger(Logger):
                 loss,
                 Y_target_grid,
                 n_total_designs,
+                is_final=is_final,
             )
             all_lines.extend(design_lines)
             all_lines.append("")
@@ -630,11 +813,112 @@ class DesignHeatmapLogger(Logger):
 
         return '\n'.join(all_lines)
 
+    def _save_reproduction_pickle(self, step: int, step_history: dict):
+        """Save pickle with data needed to reproduce logged vs committed predictions."""
+        if not self.save_reproduction_pickle:
+            return
+
+        import pickle
+        from pathlib import Path
+        from copy import deepcopy
+        from biocomp.jaxutils import tree_get, tree_to_np
+
+        if self._dmanager is None or self._model is None:
+            logger.warning("Cannot save reproduction pickle: dmanager or model not available")
+            return
+
+        params = step_history.get("latest_params")
+        yhatdep = step_history.get("yhatdep")
+        if params is None or yhatdep is None:
+            logger.warning("Cannot save reproduction pickle: params or yhatdep not in step_history")
+            return
+
+        yhatdep = np.asarray(yhatdep)
+        xres, yres = self._grid_resolution or (32, 32)
+
+        if yhatdep.ndim == 5:
+            yhatdep = yhatdep[:, -1, :, :, :]
+        elif yhatdep.ndim == 4:
+            if yhatdep.shape[1] != xres * yres:
+                yhatdep = yhatdep[-1:, :, :, :]
+        elif yhatdep.ndim == 3:
+            yhatdep = yhatdep[np.newaxis, :, :, :]
+
+        n_replicates, batch_size, n_targets, n_networks = yhatdep.shape
+
+        top_designs = self._get_top_k_designs(
+            step_history, tid=0, n_replicates=n_replicates, n_networks=n_networks
+        )
+
+        needed_pairs: set[tuple[int, int]] = set()
+        for rep_id, _net_id, _ in top_designs:
+            for tid in range(n_targets):
+                needed_pairs.add((rep_id, tid))
+
+        committed_networks: dict[tuple[int, int], list] = {}
+        stack = self._dmanager.build_stack(self._model)
+
+        logger.info(f"Reproduction pickle: Committing {len(needed_pairs)} (rep, target) pairs...")
+        for rep_id, tid in sorted(needed_pairs):
+            try:
+                specific_params = tree_get(params, (rep_id, tid))
+                committed = stack.commit(specific_params)
+                committed_networks[(rep_id, tid)] = deepcopy(committed)
+            except Exception as e:
+                logger.warning(
+                    f"Reproduction pickle: Commit failed for (rep={rep_id}, tid={tid}): {e}"
+                )
+                committed_networks[(rep_id, tid)] = []
+
+        target_grids = {}
+        for tid, target in enumerate(self._dmanager.targets):
+            try:
+                _, Y_grid = target.get_lattice(resolution=self._grid_resolution, seed=0)
+                target_grids[tid] = np.asarray(Y_grid)
+            except Exception as e:
+                logger.warning(f"Reproduction pickle: Failed to get target grid for tid={tid}: {e}")
+
+        repro_data = {
+            "step": step,
+            "latest_params": tree_to_np(params),
+            "yhatdep": yhatdep,
+            "networks": deepcopy(self._dmanager.networks),
+            "committed_networks": committed_networks,
+            "tu_id_to_idx": getattr(stack, "tu_id_to_idx", None),
+            "grid_resolution": self._grid_resolution,
+            "targets": self._dmanager.targets,
+            "model_path": self._model_path,
+            "model_signature": self._model.signature if hasattr(self._model, 'signature') else None,
+            "top_designs": top_designs,
+            "loss_weights": self._loss_weights,
+            "target_grids": target_grids,
+            "n_replicates": n_replicates,
+            "n_targets": n_targets,
+            "n_networks": n_networks,
+        }
+
+        if self.reproduction_pickle_path:
+            pickle_path = Path(self.reproduction_pickle_path)
+        elif self._output_dir:
+            pickle_path = Path(self._output_dir) / "heatmap_repro.pickle"
+        else:
+            pickle_path = Path("heatmap_repro.pickle")
+
+        pickle_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(pickle_path, "wb") as f:
+            pickle.dump(repro_data, f)
+
+        logger.info(f"Reproduction pickle: Saved reproduction data to {pickle_path}")
+        logger.info(
+            f"Reproduction pickle: Contains {len(top_designs)} top designs, "
+            f"{len(committed_networks)} committed network sets"
+        )
+
     def get_callbacks(self, training_program=None):
         def callback(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is None:
                 return
-            output = self._render_heatmaps(step, step_history)
+            output = self._render_heatmaps(step, step_history, is_final=False)
             if output:
                 print(output)
                 print()
@@ -642,13 +926,16 @@ class DesignHeatmapLogger(Logger):
         def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is None:
                 return
-            output = self._render_heatmaps(step, step_history)
+            output = self._render_heatmaps(step, step_history, is_final=True)
             if output:
                 print("\n" + "═" * 60)
                 print(" FINAL RESULT ".center(60, "═"))
                 print("═" * 60)
                 print(output)
                 print()
+
+            if self.save_reproduction_pickle:
+                self._save_reproduction_pickle(step, step_history)
 
         return [(self.periods, callback), (-1, final_callback)]
 
