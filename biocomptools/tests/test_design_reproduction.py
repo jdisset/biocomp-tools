@@ -189,6 +189,32 @@ def compute_prediction_metrics(y_pred: np.ndarray, y_target: np.ndarray) -> dict
     }
 
 
+def check_pickle_has_locked_ratios(repro_data: dict) -> tuple[bool, int, int]:
+    """Check if any committed networks have locked=True ratios.
+
+    Returns:
+        (has_locked, locked_count, total_count)
+    """
+    committed_networks = repro_data.get("committed_networks", {})
+    locked_count = 0
+    total_count = 0
+
+    for (_rep_id, _tid), net_list in committed_networks.items():
+        for net in net_list:
+            for node in net.compute_graph.nodes.values():
+                if node.node_type != "aggregation":
+                    continue
+                members = node.extra.get("members", {})
+                if isinstance(members, dict):
+                    for member in members.values():
+                        if isinstance(member, dict):
+                            total_count += 1
+                            if member.get("locked", False):
+                                locked_count += 1
+
+    return locked_count > 0, locked_count, total_count
+
+
 def test_logged_vs_committed_from_pickle(repro_data):
     """Compare logged predictions to committed network predictions from pickle."""
     from biocomptools.modelmodel import BiocompModel, NetworkModel
@@ -209,6 +235,10 @@ def test_logged_vs_committed_from_pickle(repro_data):
     n_targets = repro_data["n_targets"]
     n_networks = repro_data["n_networks"]
 
+    has_locked, locked_count, total_count = check_pickle_has_locked_ratios(repro_data)
+    is_legacy_pickle = not has_locked
+    threshold = LEGACY_DISCREPANCY_THRESHOLD if is_legacy_pickle else STRICT_DISCREPANCY_THRESHOLD
+
     print(f"\n{'=' * 70}")
     print("REPRODUCTION PICKLE ANALYSIS")
     print(f"{'=' * 70}")
@@ -217,6 +247,8 @@ def test_logged_vs_committed_from_pickle(repro_data):
     print(f"Shape: {n_replicates} replicates × {n_targets} targets × {n_networks} networks")
     print(f"Grid resolution: {grid_resolution}")
     print(f"Top designs: {len(top_designs)}")
+    print(f"Locked ratios: {locked_count}/{total_count} ({'LEGACY PICKLE' if is_legacy_pickle else 'FIXED PICKLE'})")
+    print(f"Using threshold: {threshold}")
 
     discrepancies = []
 
@@ -294,7 +326,7 @@ def test_logged_vs_committed_from_pickle(repro_data):
             print(f"  Logged vs Committed: corr={logged_vs_committed_corr:.4f}")
             print(f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
 
-            if max_diff > DISCREPANCY_THRESHOLD:
+            if max_diff > threshold:
                 discrepancies.append(
                     {
                         "rep_id": rep_id,
@@ -308,7 +340,7 @@ def test_logged_vs_committed_from_pickle(repro_data):
                     }
                 )
 
-                print(f"\n  >>> DISCREPANCY DETECTED (>{DISCREPANCY_THRESHOLD}) <<<")
+                print(f"\n  >>> DISCREPANCY DETECTED (>{threshold}) <<<")
 
                 tu_diag = diagnose_tu_mask_difference(repro_data, rep_id, tid, net_id)
                 print("\n  TU Masking Diagnostics:")
@@ -323,7 +355,7 @@ def test_logged_vs_committed_from_pickle(repro_data):
     print(f"\n{'=' * 70}")
     if discrepancies:
         print(
-            f"RESULT: {len(discrepancies)} discrepancies found (threshold={DISCREPANCY_THRESHOLD})"
+            f"RESULT: {len(discrepancies)} discrepancies found (threshold={threshold})"
         )
         for d in discrepancies:
             print(

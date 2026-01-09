@@ -26,7 +26,7 @@ from biocomp.design import (
     set_design_debug_output_dir,
 )
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
-from biocomp.paramintrospect import format_network_params_rich
+from biocomp.paramintrospect import format_committed_network_tus
 from biocomp.network import Network, recipe_to_networks
 from biocomp.graphengine import GraphState
 from biocomp.recipe import Recipe
@@ -66,6 +66,26 @@ def _safe_get_input_proteins(network) -> list | None:
         return network.get_inverted_input_proteins()
     except (AssertionError, AttributeError):
         return None
+
+
+def _create_swapped_network(network: Network) -> Network | None:
+    """Create a copy of the network with swapped input_order (x<->y axes)."""
+    input_order = network.metadata.get("input_order")
+    if input_order is None or len(input_order) != 2:
+        return None
+
+    swapped = network.model_copy(deep=True)
+    swapped_order = [input_order[1], input_order[0]]
+    swapped.apply_input_order(swapped_order)
+    swapped.name = f"{network.name}_swapped"
+
+    if "axis_mapping" in swapped.metadata:
+        old_mapping = swapped.metadata["axis_mapping"]
+        swapped.metadata["axis_mapping"] = {
+            k: ("y" if v == "x" else "x") for k, v in old_mapping.items()
+        }
+
+    return swapped
 
 
 @dracon_program(
@@ -120,6 +140,12 @@ class DesignProgram(BaseOptimizationProgram):
     show_difference_plots: Annotated[bool, Arg(help='Show difference plots')] = False
     lock_ratios: Annotated[
         bool, Arg(help='Lock ratios to recipe-specified values (for zero-freedom baseline tests)')
+    ] = False
+    save_commit_debug: Annotated[
+        bool, Arg(help='Save networks and params before/after commit for debugging')
+    ] = False
+    swap_axes_duplicate: Annotated[
+        bool, Arg(help='Duplicate each network with swapped x/y input_order for both orientations')
     ] = False
 
     def model_post_init(self, __context):
@@ -207,6 +233,17 @@ class DesignProgram(BaseOptimizationProgram):
         if self.network_subset_size is not None:
             networks = networks[: self.network_subset_size]
             logger.info(f"Limited networks to first {self.network_subset_size}")
+
+        if self.swap_axes_duplicate:
+            swapped_networks = []
+            for net in networks:
+                swapped = _create_swapped_network(net)
+                if swapped is not None:
+                    swapped_networks.append(swapped)
+            networks.extend(swapped_networks)
+            logger.info(
+                f"Added {len(swapped_networks)} swapped-axes network variants (total: {len(networks)})"
+            )
 
         if isinstance(self.targets, (Target, DataTarget)):
             self.targets = [self.targets]
@@ -608,10 +645,45 @@ class DesignProgram(BaseOptimizationProgram):
         commit_failures: list[tuple[int, int, str]] = []
         t0 = time.perf_counter()
         logger.info(f"Pre-committing {len(needed_pairs)} unique (replicate, target) pairs...")
+
+        # setup commit debug directory if enabled
+        commit_debug_dir = None
+        if self.save_commit_debug:
+            commit_debug_dir = save_dir / "commit_debug"
+            commit_debug_dir.mkdir(exist_ok=True)
+            logger.info(f"Saving commit debug data to {commit_debug_dir}")
+
         for _i, (rep_id, tid) in enumerate(sorted(needed_pairs)):
             bparams = tree_get(final_params, (rep_id, tid))
+
+            # save pre-commit state if debug enabled
+            if commit_debug_dir is not None:
+                pre_commit_data = {
+                    'rep_id': rep_id,
+                    'tid': tid,
+                    'params': tree_to_np(bparams),
+                    'networks': [n.model_copy(deep=True) for n in stack.networks],
+                    'tu_id_to_idx': stack.tu_id_to_idx,
+                }
+                pre_path = commit_debug_dir / f"pre_commit_rep{rep_id}_tid{tid}.pickle"
+                with open(pre_path, 'wb') as f:
+                    pickle.dump(pre_commit_data, f)
+
             try:
-                commit_cache[(rep_id, tid)] = stack.commit(bparams)
+                committed_networks = stack.commit(bparams)
+                commit_cache[(rep_id, tid)] = committed_networks
+
+                # save post-commit state if debug enabled
+                if commit_debug_dir is not None:
+                    post_commit_data = {
+                        'rep_id': rep_id,
+                        'tid': tid,
+                        'committed_networks': committed_networks,
+                    }
+                    post_path = commit_debug_dir / f"post_commit_rep{rep_id}_tid{tid}.pickle"
+                    with open(post_path, 'wb') as f:
+                        pickle.dump(post_commit_data, f)
+
             except Exception as e:
                 # Log error but don't crash - return empty network list
                 error_msg = f"{type(e).__name__}: {e}"
@@ -709,8 +781,15 @@ class DesignProgram(BaseOptimizationProgram):
                         with open(recipe_filename, 'w') as rf:
                             rf.write(metadata_yaml + '\n' + recipe_yaml)
                         network_pickle = design_dir / f"{recipe_hash}.pickle"
-                        with open(network_pickle, 'wb') as npf:
-                            pickle.dump(cnet, npf)
+                        try:
+                            with open(network_pickle, 'wb') as npf:
+                                pickle.dump(cnet, npf)
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to pickle network {recipe_hash}: {e}. "
+                                f"Continuing without pickle file."
+                            )
+                            network_pickle.unlink(missing_ok=True)
 
                         target_input_names = getattr(target, 'input_names', None)
                         scaffold_input_proteins = None
@@ -854,8 +933,6 @@ class DesignProgram(BaseOptimizationProgram):
                     network_name = design.get('network_name', f"Net {orig_rank}")
                     loss = design.get('loss', float('nan'))
                     rep_id = design.get('replicate', 0)
-                    params = design.get('params')
-                    net_id = design.get('network_id', 0)
 
                     Y_pred_grid = np.asarray(data.y).reshape(yres, xres)
 
@@ -893,13 +970,14 @@ class DesignProgram(BaseOptimizationProgram):
                         f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}"
                     )
 
-                    if params is not None and self._dmanager and self._model:
+                    # display committed network TUs (directly from network structure)
+                    committed_net = design.get('network')
+                    if committed_net is not None:
                         try:
-                            stack = self._dmanager.build_stack(self._model)
                             console.print("")
-                            format_network_params_rich(stack, params, net_id, console)
+                            format_committed_network_tus(committed_net, console)
                         except Exception as e:
-                            logger.warning(f"Introspection failed for network {net_id}: {e}")
+                            logger.warning(f"Committed network introspection failed: {e}")
 
                     console.print()
 

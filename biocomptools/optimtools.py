@@ -1,4 +1,4 @@
-from biocomptools.logging_config import get_logger
+from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.toollib.common import config, make_context_from_types
 from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.trainutils import make_unique_dir, make_json_ready, plot_loss, print_matadata
@@ -155,6 +155,10 @@ class BaseOptimizationProgram(BaseModel, ABC):
         self._run_name = self._save_dir.name
         logger.info(f"Experiment: {self.experiment_name} | Run: {self._run_name}")
         logger.info(f"Output directory: {self._save_dir}")
+
+        log_file = self._save_dir / "run.log"
+        setup_logging(log_file=log_file, force=True)
+        logger.info(f"Logging to file: {log_file}")
 
         self._construct_loggers()
         self.gen_metadata()
