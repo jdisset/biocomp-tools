@@ -22,7 +22,7 @@ from biocomp.metric_utils import (
     noise_relative_error as compute_nre,
     SPLIT_HALF_SUBSET_SIZE,
     SPLIT_HALF_N_BOOTSTRAPS,
-    DEFAULT_GRIDSTATS_PARAMS,
+    GridStatsFields,
 )
 from pathlib import Path
 import time
@@ -63,13 +63,16 @@ def _compute_split_half_nrmse(
     n_bootstraps: int = SPLIT_HALF_N_BOOTSTRAPS,
     seed: int = 42,
 ) -> float:
-    """
-    Compute intrinsic noise floor via bootstrapped split-half nRMSE.
+    """Compute intrinsic noise floor via bootstrapped split-half nRMSE.
 
     For each bootstrap iteration, draws two independent subsets (with replacement)
     of fixed size, computes local means for each at shared grid points, then
     measures the nRMSE between them. Uses fixed subset size for fair comparison
     across datasets of different sizes.
+
+    Note: dataquality.compute_split_half_nrmse uses a permutation-based approach
+    which is conceptually similar but uses different sampling strategy. This
+    bootstrap version is used for prediction noise estimation.
     """
     rng = np.random.RandomState(seed)
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
@@ -443,7 +446,7 @@ def _calculate_grid_stats(
     }
 
 
-class NetworkPrediction(DataSource):
+class NetworkPrediction(GridStatsFields, DataSource):
     """Performs predictions using a NetworkModel and prepares data for plotting.
 
     IMPORTANT - Space Handling (Latent vs Raw):
@@ -508,12 +511,7 @@ class NetworkPrediction(DataSource):
     )
 
     enable_gridstats: bool = True
-    gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
-    gridstats_hypercube_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
-    gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
-    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
-    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
-    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
+    # gridstats_* fields inherited from GridStatsFields mixin
 
     shuffle_inputs: bool = False  # shuffle inputs before prediction (False preserves spatial structure)
 
@@ -634,7 +632,7 @@ class NetworkPrediction(DataSource):
         aligned_predict_at = []
         aligned_ground_truth = []
 
-        for i, (x, gt, network) in enumerate(
+        for i, (x, gt, _network) in enumerate(
             zip(self.predict_at, self.ground_truth, self.network_model.network, strict=True)
         ):
             if len(x) < effective_max_evals:
@@ -921,14 +919,7 @@ class NetworkPrediction(DataSource):
             if self.per_prediction_info is not None and i < len(self.per_prediction_info):
                 network_info['extra_prediction_info'] = self.per_prediction_info[i]
 
-            gridstats_params = {
-                'hypercube_res': self.gridstats_hypercube_res,
-                'hypercube_min': self.gridstats_hypercube_min,
-                'hypercube_max': self.gridstats_hypercube_max,
-                'k': self.gridstats_k,
-                'radius': self.gridstats_radius,
-                'min_points': self.gridstats_min_points,
-            }
+            gridstats_params = self.get_gridstats_params()
 
             tasks.append(
                 {
@@ -1037,14 +1028,7 @@ class NetworkPrediction(DataSource):
         rescaler = (
             self.network_model.model.rescaler if not self.already_latent else IdentityRescaler()
         )
-        gridstats_params = {
-            'hypercube_res': self.gridstats_hypercube_res,
-            'hypercube_min': self.gridstats_hypercube_min,
-            'hypercube_max': self.gridstats_hypercube_max,
-            'k': self.gridstats_k,
-            'radius': self.gridstats_radius,
-            'min_points': self.gridstats_min_points,
-        }
+        gridstats_params = self.get_gridstats_params()
 
         # Build tasks
         tasks = []

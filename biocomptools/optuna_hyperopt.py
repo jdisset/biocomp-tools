@@ -75,12 +75,14 @@ class HyperoptProgram(BaseHyperoptProgram):
     )
 
     # Validation - defaults from metric_utils.DEFAULT_GRIDSTATS_PARAMS
+    # Note: uses validation_ prefix to distinguish from potential training-time gridstats
     use_validation_loss: bool = False
     validation_set: NetworkSet | None = None
     n_validation_evals: int = 32000
     validation_objective: str = "geomean_nre"
     validation_enable_gridstats: bool = True
     validation_gridstats_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    validation_gridstats_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
     validation_gridstats_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
     validation_gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
     validation_gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
@@ -293,6 +295,7 @@ class HyperoptProgram(BaseHyperoptProgram):
                 per_prediction_info=[{'network_name': n.name} for n in networks],
                 enable_gridstats=needs_gridstats,
                 gridstats_hypercube_res=self.validation_gridstats_res,
+                gridstats_hypercube_min=self.validation_gridstats_min,
                 gridstats_hypercube_max=self.validation_gridstats_max,
                 gridstats_k=self.validation_gridstats_k,
                 gridstats_radius=self.validation_gridstats_radius,

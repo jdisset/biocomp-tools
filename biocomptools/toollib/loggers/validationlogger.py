@@ -9,7 +9,7 @@ from sqlmodel import Session
 from biocomp.compute import ComputeConfig
 from biocomptools.run_training import TrainingProgram
 from biocomptools.toollib.common import config
-from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
+from biocomp.metric_utils import GridStatsFields
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Callable, Optional, Dict, Any, Union, Literal
@@ -22,16 +22,12 @@ import time
 logger = get_logger(__name__)
 
 
-class ValidationLossLogger(Logger):
+class ValidationLossLogger(GridStatsFields, Logger):
     name: Optional[str] = None
     validation_set: Optional[NetworkSet] = None
     n_evals: int = 2048
     enable_gridstats: bool = False
-    gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
-    gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
-    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
-    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
-    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
+    # gridstats_* fields inherited from GridStatsFields mixin
     seed: int = 42
     predictor_n_stats_workers: int = 1
     plot_training_losses: bool = False
@@ -55,13 +51,7 @@ class ValidationLossLogger(Logger):
         super().model_post_init(*args, **kwargs)
         self._console = Console()
 
-    def find_myself(self, training_program: Optional[TrainingProgram] = None):
-        if not training_program:
-            return 0
-        for i, lgr in enumerate(training_program.loggers):
-            if lgr is self:
-                return i
-        return 0
+    # find_myself() inherited from Logger base class
 
     def initialize(self, training_program):
         if self.name is None:
@@ -117,11 +107,13 @@ class ValidationLossLogger(Logger):
             seed=self.seed, disable_variational=True, max_evals=self.n_evals,
             already_latent=True, n_stats_workers=self.predictor_n_stats_workers,
             enable_gridstats=self.enable_gridstats,
+            per_prediction_info=per_prediction_info, device=self.device,
             gridstats_hypercube_res=self.gridstats_hypercube_res,
+            gridstats_hypercube_min=self.gridstats_hypercube_min,
             gridstats_hypercube_max=self.gridstats_hypercube_max,
             gridstats_k=self.gridstats_k,
             gridstats_radius=self.gridstats_radius,
-            per_prediction_info=per_prediction_info, device=self.device,
+            gridstats_min_points=self.gridstats_min_points,
         )
 
         self.metadata = {

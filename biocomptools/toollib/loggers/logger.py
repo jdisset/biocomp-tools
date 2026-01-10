@@ -105,6 +105,20 @@ class Logger(BaseModel):
         """Optional cleanup after training ends."""
         pass
 
+    def find_myself(self, training_program=None) -> int:
+        """Find this logger's index in the training program's logger list.
+
+        Useful for generating unique names when multiple loggers of the same
+        type are used, e.g., f"loss_{self.find_myself(training_program)}".
+        """
+        if not training_program:
+            return 0
+        loggers = getattr(training_program, 'loggers', [])
+        for i, logger_obj in enumerate(loggers):
+            if logger_obj is self:
+                return i
+        return 0
+
 
 class FunctionLogger(Logger):
     functions: List[Callable] = []
@@ -120,4 +134,4 @@ class FunctionLogger(Logger):
             f"Number of periods in FunctionLogger ({len(self.periods)}) must match number of functions ({len(self.functions)})"
         )
 
-        return list(zip(self.periods, self.functions))
+        return list(zip(self.periods, self.functions, strict=True))

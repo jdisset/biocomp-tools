@@ -35,15 +35,7 @@ class BaseMetricsLogger(Logger):
         super().model_post_init(*args, **kwargs)
         self._console = Console()
 
-    def find_myself(self, training_program: Optional[TrainingProgram] = None):
-        """Find this logger's index in the training program's logger list."""
-        idx = 0
-        if training_program:
-            for i, logger_obj in enumerate(training_program.loggers):
-                if logger_obj is self:
-                    idx = i
-                    break
-        return idx
+    # find_myself() inherited from Logger base class
 
     def initialize(self, training_program):
         """Initialize the logger with training program context."""
