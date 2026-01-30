@@ -1,10 +1,12 @@
-!if ${D.dimensions.input == 1}:
+!set_default force_dim: 3
+
+!if ${D.dimensions.input == 1 or force_dim == 1}:
   <<: !include pkg:biocomptools:configs/plots/tasks/1D
 
-!if ${D.dimensions.input == 2}:
+!if ${D.dimensions.input == 2 or force_dim == 2}:
   <<: !include pkg:biocomptools:configs/plots/tasks/2D
 
-!if ${D.dimensions.input == 3}:
+!if ${D.dimensions.input == 3 and force_dim == 3}:
   <<: !include pkg:biocomptools:configs/plots/tasks/3D_stack
 
 !if ${D.dimensions.input > 3}:

@@ -1,10 +1,13 @@
 !set_default axnum: null
+!set_default zslice: null
 
 plot_method:
   func: biocomp.plotutils.smooth
   kwargs:
+    force_dim: 2
     plot_data: ${D}
     ax: ${FIG.flat_ax if axnum is None else FIG.flat_ax[axnum]}
     xtitle: ${get_pretty_axis_label(0, D)}
     ytitle: ${get_pretty_axis_label(1, D)}
     vtitle: ${D.output_name}
+    zslice: ${zslice}

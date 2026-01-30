@@ -1,8 +1,9 @@
 """
 Typical experimental distribution sampling for design predictions.
 
-KDE fitted from MatrixPgu experiment (2023-11-26) with independent input variables.
-Only supports 1D and 2D sampling (no 3D - would need different experiment).
+KDE fitted from MatrixPgu experiment (2023-11-26). Empirical correlation ~0.475 between
+inputs in Gaussian copula space. For dim > 2, uses Gaussian copula with equicorrelation
+and pooled marginal from 2D data.
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ import importlib.resources
 from functools import lru_cache
 
 import numpy as np
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, norm
+
+EMPIRICAL_COPULA_RHO = 0.475
 
 
 def _logb(x, base=10):
@@ -124,25 +127,69 @@ def _load_data():
         return data['data_1d'].copy(), data['data_2d'].copy()
 
 
-@lru_cache(maxsize=2)
-def _get_kde(dim: int) -> gaussian_kde:
+@lru_cache(maxsize=3)
+def _get_kde(kind: str) -> gaussian_kde:
     data_1d, data_2d = _load_data()
-    if dim == 1:
+    if kind == '1d':
         return gaussian_kde(data_1d.T)
-    elif dim == 2:
+    elif kind == '2d':
         return gaussian_kde(data_2d.T)
-    raise ValueError(f"dim must be 1 or 2, got {dim}")
+    elif kind == 'pooled':
+        pooled = np.concatenate([data_2d[:, 0], data_2d[:, 1]])
+        return gaussian_kde(pooled)
+    raise ValueError(f"kind must be '1d', '2d', or 'pooled', got {kind}")
 
 
-def sample_latent(n_samples: int, dim: int, seed: int | None = None) -> np.ndarray:
-    """Sample from typical experimental distribution in latent space [0, 1]."""
-    assert dim in (1, 2), f"dim must be 1 or 2, got {dim}"
+def _inverse_kde_cdf(kde: gaussian_kde, u: np.ndarray, n_grid: int = 1000) -> np.ndarray:
+    """Invert KDE CDF via interpolation."""
+    x_grid = np.linspace(-0.5, 1.5, n_grid)
+    cdf_grid = np.array([kde.integrate_box_1d(-np.inf, xi) for xi in x_grid])
+    return np.interp(u, cdf_grid, x_grid)
+
+
+def sample_latent(
+    n_samples: int,
+    dim: int,
+    seed: int | None = None,
+    rho: float | None = None,
+) -> np.ndarray:
+    """Sample from typical experimental distribution in latent space [0, 1].
+
+    For dim=1,2: uses empirical KDE directly.
+    For dim>2: uses Gaussian copula with equicorrelation and pooled marginal.
+
+    Args:
+        n_samples: number of samples
+        dim: dimensionality
+        seed: random seed
+        rho: pairwise correlation in Gaussian copula space. If None, uses
+             EMPIRICAL_COPULA_RHO (~0.475) for dim>2, ignored for dim<=2.
+             Set to 0 for independent sampling.
+    """
     rng = np.random.default_rng(seed)
-    kde = _get_kde(dim)
-    samples = kde.resample(n_samples, seed=rng).T
+
+    if dim == 1:
+        samples = _get_kde('1d').resample(n_samples, seed=rng).T
+    elif dim == 2:
+        samples = _get_kde('2d').resample(n_samples, seed=rng).T
+    else:
+        if rho is None:
+            rho = EMPIRICAL_COPULA_RHO
+        cov = np.full((dim, dim), rho)
+        np.fill_diagonal(cov, 1.0)
+        z = rng.multivariate_normal(np.zeros(dim), cov, size=n_samples)
+        u = norm.cdf(z)
+        marginal_kde = _get_kde('pooled')
+        samples = np.column_stack([_inverse_kde_cdf(marginal_kde, u[:, d]) for d in range(dim)])
+
     return np.clip(samples, 0, 1)
 
 
-def sample_raw(n_samples: int, dim: int, seed: int | None = None) -> np.ndarray:
+def sample_raw(
+    n_samples: int,
+    dim: int,
+    seed: int | None = None,
+    rho: float | None = None,
+) -> np.ndarray:
     """Sample from typical experimental distribution in raw space."""
-    return RESCALER.inv(sample_latent(n_samples, dim, seed))
+    return RESCALER.inv(sample_latent(n_samples, dim, seed, rho))

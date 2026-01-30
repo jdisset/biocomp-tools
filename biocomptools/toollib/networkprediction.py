@@ -10,6 +10,7 @@ from biocomptools.modelmodel import NetworkModel, BiocompModel, NodeSpec
 from biocomptools.logging_config import get_logger
 import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
+from biocomptools.toollib.types import InputOrderElement
 from biocomp.plotting.plotting_core import knn_stats, build_tree
 from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
 from biocomp.metric_utils import (
@@ -204,11 +205,11 @@ def validate_ground_truth(v: Any) -> Optional[List[Optional[NdArray]]]:
     return v
 
 
-def validate_input_order(v: Any) -> Optional[List[List[int]]]:
-    """convert list of ints to list of lists of ints"""
+def validate_input_order(v: Any) -> Optional[List[List[InputOrderElement]]]:
+    """Convert flat list of ints/strings to list of lists for broadcasting."""
     if v is None:
         return None
-    if isinstance(v, list) and all(isinstance(x, int) for x in v):
+    if isinstance(v, list) and all(isinstance(x, (int, str)) for x in v):
         return [v]
     return v
 
@@ -487,7 +488,9 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
     predict_at: Annotated[Union[NdArray, List[NdArray]], BeforeValidator(validate_predict_at)]
     network_model: NetworkModel
-    input_order: Annotated[Optional[List[List[int]]], BeforeValidator(validate_input_order)] = None
+    input_order: Annotated[
+        Optional[List[List[InputOrderElement]]], BeforeValidator(validate_input_order)
+    ] = None
     ground_truth: Annotated[
         Optional[Union[NdArray, List[Optional[NdArray]]]],
         BeforeValidator(validate_ground_truth),
@@ -1182,7 +1185,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
         except Exception as e:
             logger.error(f"failed to save CSV to {self.save_csv_to}: {e}")
 
-    def _normalize_input_order(self) -> List[Optional[List[int]]]:
+    def _normalize_input_order(self) -> List[Optional[List[InputOrderElement]]]:
         """normalize input_order to ensure it's consistent across networks"""
         assert self.network_model is not None
         assert isinstance(self.network_model.network, list)
@@ -1194,8 +1197,8 @@ class NetworkPrediction(GridStatsFields, DataSource):
             return [None] * len(self.network_model.network)
 
         if isinstance(self.input_order, list):
-            # single input order for all networks
-            if all(isinstance(x, int) for x in self.input_order):
+            # single input order for all networks (ints or protein names)
+            if all(isinstance(x, (int, str)) for x in self.input_order):
                 logger.debug(f"using same input_order {self.input_order} for all networks")
                 return [self.input_order] * len(self.network_model.network)
 
@@ -1412,7 +1415,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
         self,
         network_idx: int,
         network,
-        input_order: Optional[List[int]],
+        input_order: Optional[List[InputOrderElement]],
         metadata: Dict[str, Any],
         rescale_latent: bool = False,
         with_shared_params: Optional[pr.ParameterTree] = None,

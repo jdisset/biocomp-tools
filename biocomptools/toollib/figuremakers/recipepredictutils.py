@@ -21,6 +21,7 @@ class RecipePredictionData(BaseModel):
     resolution: int = 50
     n_samples: int = 5000
     seed: int = 42
+    input_order: list | None = None
 
     _uniform_data: PlotData = PrivateAttr()
     _experimental_data: PlotData = PrivateAttr()
@@ -43,7 +44,7 @@ class RecipePredictionData(BaseModel):
             content = f.read()
         if '\n!biocomp.recipe.Recipe' in content:
             idx = content.index('\n!biocomp.recipe.Recipe')
-            recipe_part = content[idx + 1:]
+            recipe_part = content[idx + 1 :]
         elif content.startswith('!biocomp.recipe.Recipe'):
             recipe_part = content
         else:
@@ -59,7 +60,7 @@ class RecipePredictionData(BaseModel):
         ndim = network.nb_inputs
 
         if ndim > 2:
-            raise ValueError(
+            print(
                 f"Recipe '{network.name}' has {ndim} inputs, "
                 f"but experimental sampling only supports 1D/2D"
             )
@@ -74,7 +75,8 @@ class RecipePredictionData(BaseModel):
             network_model=nm,
             already_latent=True,
             enable_gridstats=False,
-            skip_input_reorder=True,
+            skip_input_reorder=False if self.input_order is not None else True,
+            input_order=self.input_order,
         )
         self._uniform_data = pred_uniform.get_data(rescale_latent=True)[0]
         self._uniform_data.metadata.update(
@@ -90,7 +92,8 @@ class RecipePredictionData(BaseModel):
             network_model=nm,
             already_latent=True,
             enable_gridstats=False,
-            skip_input_reorder=True,
+            skip_input_reorder=False if self.input_order is not None else True,
+            input_order=self.input_order,
         )
         self._experimental_data = pred_exp.get_data(rescale_latent=True)[0]
         self._experimental_data.metadata.update(

@@ -1,6 +1,7 @@
 ## {{{                          --     imports     --
 from pydantic import model_validator, ConfigDict
-from typing import Any, Optional, List, Union
+from typing import Any, Optional, List
+from biocomptools.toollib.types import InputOrderSpec
 from sqlalchemy.orm.session import make_transient
 import numpy as np
 from biocomp.library import load_lib
@@ -87,7 +88,7 @@ config = cm.config
 
 
 class DBSource(DataSource, NetworkSet):
-    input_order: Optional[Union[List[int], str]] = None
+    input_order: Optional[InputOrderSpec] = None
 
     @model_validator(mode='before')
     def show_data(cls, values):
@@ -192,6 +193,85 @@ class DBSource(DataSource, NetworkSet):
             if d is not None:
                 res.append(d)
 
+        return res
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                       --     FileSource     --
+
+
+class FileSource(DataSource):
+    """Load data from parquet/csv file + recipe YAML (no database)."""
+
+    data_file: str | Path
+    recipe_file: str | Path
+    input_order: Optional[InputOrderSpec] = None
+
+    _networks: list = []
+    _lib: Any = None
+
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+        self._lib = load_lib()
+        self._load_networks()
+
+    def _load_networks(self):
+        import dracon
+        from biocomp.recipe import Recipe
+        from biocomp.network import recipe_to_networks
+
+        recipe_path = Path(self.recipe_file).expanduser().resolve()
+        assert recipe_path.exists(), f"Recipe file not found: {recipe_path}"
+
+        content = recipe_path.read_text()
+        if '!biocomp.recipe.Recipe' in content and not content.strip().startswith('!biocomp'):
+            idx = content.find('!biocomp.recipe.Recipe')
+            content = content[idx:]
+
+        recipe_data = dracon.loads(content)
+        recipe = Recipe.model_validate(recipe_data)
+        self._networks = recipe_to_networks(recipe, lib=self._lib)
+
+    def _data_from_network(self, network: bc.network.Network) -> Optional[PlotData]:
+        from biocomp.datautils import get_network_XY
+
+        data_path = Path(self.data_file).expanduser().resolve()
+        assert data_path.exists(), f"Data file not found: {data_path}"
+
+        metadata = self.metadata.copy()
+        metadata['network_name'] = network.name
+        metadata['built_network'] = network
+        metadata['datasource_type'] = 'file'
+        metadata['file_stem'] = data_path.stem
+        metadata['network_info'] = {'cotx': {}}
+
+        def get_XY(_):
+            logger.debug(f"FileSource: getting XY data for network {network.name}")
+            X, Y = get_network_XY(network, data_path)
+            assert X.shape[1] == network.nb_inputs, (
+                f"Input size mismatch: expected {network.nb_inputs}, got {X.shape[1]}"
+            )
+            logger.debug(f"FileSource: XY data for {network.name}: X{X.shape}, Y{Y.shape}")
+            return X, Y
+
+        pdata = pu.extract_lazy_plot_data_from_network(
+            network,
+            get_XY,
+            input_order=self.input_order,
+            metadata=metadata,
+        )
+
+        pdata.metadata['pretty_inputs'] = pdata.input_names
+        pdata.metadata['ordered_input_names'] = '-'.join(pdata.input_names)
+        return pdata
+
+    def get_data(self) -> List[PlotData]:
+        res = []
+        for network in maybetqdm(self._networks, desc='Loading data from files'):
+            pdata = self._data_from_network(network)
+            if pdata is not None:
+                res.append(pdata)
         return res
 
 
