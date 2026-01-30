@@ -41,6 +41,7 @@ class DesignSummaryLogger(Logger):
     model: Any | None = None
     targets: list[Any] | None = None
     dmanager: Any | None = None
+    design_conf: Any | None = None
 
     _results_manager: DesignResultsManager | None = None
     _loss_history: list[float] = []
@@ -50,6 +51,9 @@ class DesignSummaryLogger(Logger):
     _run_name: str = ""
 
     def initialize(self, training_program=None):
+        if training_program:
+            if hasattr(training_program, 'design_conf'):
+                self.design_conf = training_program.design_conf
         if self.output_dir:
             design_dir = Path(self.output_dir) / 'design'
             self._results_manager = DesignResultsManager(design_dir)
@@ -82,7 +86,16 @@ class DesignSummaryLogger(Logger):
             return self._cached_stack
         if self.dmanager is not None and self.model is not None:
             try:
-                self._cached_stack = self.dmanager.build_stack(self.model)
+                from biocomp.designutils import build_design_stack
+
+                auto_lock = (
+                    getattr(self.design_conf, 'auto_lock_topology_tus', True)
+                    if self.design_conf
+                    else True
+                )
+                self._cached_stack = build_design_stack(
+                    self.dmanager, self.model, auto_lock_topology_tus=auto_lock
+                )
                 return self._cached_stack
             except Exception as e:
                 logger.warning(f"Failed to build stack: {e}")

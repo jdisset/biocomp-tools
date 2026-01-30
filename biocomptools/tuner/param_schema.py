@@ -189,7 +189,8 @@ def _build_ratio_metadata(session: TunerSession) -> dict[str, list[RatioInfo]]:
             full_node = node.get(stack)
             extra = full_node.extra
             cotx_name = extra.get("cotx_group", "unknown")
-            tu_names = extra.get("members", [])
+            members_data = extra.get("members", {})
+            tu_names = sorted(members_data.keys()) if isinstance(members_data, dict) else []
             ratio_infos.append(RatioInfo(cotx_name=cotx_name, tu_names=tu_names))
         metadata[ns] = ratio_infos
 

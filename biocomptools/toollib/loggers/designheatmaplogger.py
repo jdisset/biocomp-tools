@@ -11,6 +11,7 @@ from biocomp.plotting.ascii_heatmap import heatmap
 from biocomp.designutils import (
     side_by_side_txt_plot,
     LOSS_ORDER,
+    build_design_stack,
 )
 
 logger = get_logger(__name__)
@@ -323,6 +324,7 @@ class DesignHeatmapLogger(Logger):
     _dmanager: Any = None
     _model: Any = None
     _stack: Any = None
+    _design_conf: Any = None
     _grid_resolution: tuple[int, int] | None = None
     _cached_target_grid: np.ndarray | None = None
     _total_steps: int = 0
@@ -357,6 +359,7 @@ class DesignHeatmapLogger(Logger):
         self._dmanager = None
         self._model = None
         self._stack = None
+        self._design_conf = None
         self._grid_resolution = None
         self._cached_target_grid = None
         self._total_steps = 0
@@ -392,6 +395,7 @@ class DesignHeatmapLogger(Logger):
 
             if hasattr(training_program, 'design_conf'):
                 dc = training_program.design_conf
+                self._design_conf = dc
                 if hasattr(dc, 'n_epochs') and hasattr(dc, 'n_batches_per_epoch'):
                     self._total_steps = dc.n_epochs * dc.n_batches_per_epoch
 
@@ -420,7 +424,14 @@ class DesignHeatmapLogger(Logger):
 
         if self._dmanager and self._model:
             try:
-                self._stack = self._dmanager.build_stack(self._model)
+                auto_lock = (
+                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
+                    if self._design_conf
+                    else True
+                )
+                self._stack = build_design_stack(
+                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                )
             except Exception as e:
                 logger.warning(f"Failed to build stack for introspection: {e}")
 
@@ -451,7 +462,14 @@ class DesignHeatmapLogger(Logger):
             from biocomp.jaxutils import tree_get
             from biocomptools.modelmodel import NetworkModel
 
-            stack = self._dmanager.build_stack(self._model)
+            auto_lock = (
+                getattr(self._design_conf, 'auto_lock_topology_tus', True)
+                if self._design_conf
+                else True
+            )
+            stack = build_design_stack(
+                self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+            )
             specific_params = tree_get(params, (rep_idx, target_idx))
             committed_networks = stack.commit(specific_params)
 
@@ -600,7 +618,14 @@ class DesignHeatmapLogger(Logger):
             try:
                 from biocomp.fingerprint import compute_fingerprint_from_params
 
-                stack = self._dmanager.build_stack(self._model)
+                auto_lock = (
+                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
+                    if self._design_conf
+                    else True
+                )
+                stack = build_design_stack(
+                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                )
                 fingerprint = compute_fingerprint_from_params(
                     stack=stack,
                     params=params,
@@ -856,7 +881,12 @@ class DesignHeatmapLogger(Logger):
                 needed_pairs.add((rep_id, tid))
 
         committed_networks: dict[tuple[int, int], list] = {}
-        stack = self._dmanager.build_stack(self._model)
+        auto_lock = (
+            getattr(self._design_conf, 'auto_lock_topology_tus', True)
+            if self._design_conf
+            else True
+        )
+        stack = build_design_stack(self._dmanager, self._model, auto_lock_topology_tus=auto_lock)
 
         logger.info(f"Reproduction pickle: Committing {len(needed_pairs)} (rep, target) pairs...")
         for rep_id, tid in sorted(needed_pairs):

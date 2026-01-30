@@ -127,7 +127,8 @@ FluoNode:
       align: center
 
   AggregationNode[style_class=~${e[0]}]:
-    style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 12, resolution: 0.01, z_index: 1 }
+    style.background_color: ${e[1]['base']}
+    style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 10, resolution: 0.01, z_index: 1 }
 
   TUNode[style_class=~${e[0]}]:
     style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 15, resolution: 0.01 }
@@ -136,6 +137,12 @@ FluoNode:
       font_size: 6
       vertical_align: middle
       align: center
+
+  BiasNode[style_class=~${e[0]}]:
+    style.background_color: ${e[1]['light']}
+    style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 12, resolution: 0.01, z_index: 1 }
+    Text:
+      color: ${e[1]['dark']}
 
   Text[style_class=tu_label_marker][style_class=~${e[0]}]:
     color: ${e[1]['dark']}
@@ -177,10 +184,9 @@ AggregationNode[style_class=!collapsed]:
     is_overlay: false
 
 AggregationNode[style_class=collapsed]:
-  min_dimensions: !Size { width: 15, height: 4 }
-  max_dimensions: !Size { width: 15, height: 4 }
-  style.background_color: "#111"
-  style.corner_radius: 2
+  min_dimensions: !Size { width: 20, height: 8 }
+  max_dimensions: !Size { width: 20, height: 8 }
+  style.corner_radius: 3
   style.border_width: 0
   style.padding: [0, 0, 0, 0]
 

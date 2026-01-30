@@ -26,7 +26,7 @@ from biocomp.design import (
     set_design_debug_output_dir,
 )
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
-from biocomp.paramintrospect import format_committed_network_tus
+from biocomp.paramintrospect import format_committed_network_params_rich
 from biocomp.network import Network, recipe_to_networks
 from biocomp.graphengine import GraphState
 from biocomp.recipe import Recipe
@@ -624,11 +624,15 @@ class DesignProgram(BaseOptimizationProgram):
 
         assert len(topk) == n_targets, f"topk length {len(topk)} != n_targets {n_targets}"
 
-        import biocomp.compute as cmp
+        from biocomp.designutils import build_design_stack
         import time
 
-        stack = cmp.ComputeStack(networks=self._dmanager.networks)
-        stack.build(self._model.compute_config, enable_tu_masking=True)
+        stack = build_design_stack(
+            self._dmanager,
+            self._model,
+            unlock_ratios=False,
+            auto_lock_topology_tus=self.design_conf.auto_lock_topology_tus,
+        )
 
         run_datetime = datetime.now().isoformat()
         run_name = self._run_name
@@ -851,13 +855,15 @@ class DesignProgram(BaseOptimizationProgram):
             self._generate_design_diagnostic_plots(save_dir, all_design_results)
 
         if all_design_results:
-            self._print_rich_design_summary(all_design_results)
+            self._print_rich_design_summary(all_design_results, stack=stack)
 
         logger.info(f"Saved best designs summary to {summary_file}")
         if design_results_dir.exists() and any(design_results_dir.iterdir()):
             logger.info(f"Saved design results to {design_results_dir}")
 
-    def _print_rich_design_summary(self, all_design_results: list[dict], top_n: int = 3):
+    def _print_rich_design_summary(
+        self, all_design_results: list[dict], top_n: int = 3, stack=None
+    ):
         """Print design summary using same format as DesignHeatmapLogger."""
         from rich.console import Console
         from rich.panel import Panel
@@ -923,6 +929,7 @@ class DesignProgram(BaseOptimizationProgram):
                     already_latent=True,
                     z_value=0.0,
                     disable_variational=True,
+                    skip_input_reorder=True,
                     seed=FINGERPRINT_SEED,
                 )
                 data_list = pred.get_data(rescale_latent=False)
@@ -970,12 +977,17 @@ class DesignProgram(BaseOptimizationProgram):
                         f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}"
                     )
 
-                    # display committed network TUs (directly from network structure)
                     committed_net = design.get('network')
                     if committed_net is not None:
                         try:
                             console.print("")
-                            format_committed_network_tus(committed_net, console)
+                            bparams = design.get('params')
+                            net_id = design.get('network_id', 0)
+                            assert stack is not None, "stack required for committed network display"
+                            assert bparams is not None, "params required for committed network display"
+                            format_committed_network_params_rich(
+                                committed_net, stack, bparams, net_id, console
+                            )
                         except Exception as e:
                             logger.warning(f"Committed network introspection failed: {e}")
 

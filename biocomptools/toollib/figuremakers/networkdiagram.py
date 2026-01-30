@@ -174,6 +174,7 @@ class NetworkDiagram(Container):
     _net_info: dict = PrivateAttr(default_factory=dict)
     _marker_tu_names: set[str] = PrivateAttr(default_factory=set)
     _marker_only_nodes: set[int] = PrivateAttr(default_factory=set)
+    _cotx_marker_map: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -182,6 +183,7 @@ class NetworkDiagram(Container):
         self._net_info = self.network.generate_network_info()
         self._marker_tu_names = self._find_marker_tu_names()
         self._marker_only_nodes = self._find_marker_only_nodes()
+        self._cotx_marker_map = self._build_cotx_marker_map()
         self._build()
 
     @property
@@ -211,6 +213,88 @@ class NetworkDiagram(Container):
                 if len(parts_split) == 2:
                     marker_tu_prefixes.add(parts_split[0])  # 'TU_0' or 'reporter_test'
         return marker_tu_prefixes
+
+    def _build_cotx_marker_map(self) -> dict[str, str]:
+        """Map cotx_group names to their marker protein names (inverted inputs or fluo_bias)."""
+        markers = set(self._net_info.get("markers", ()))
+        all_parts = self._net_info.get("all_parts", {})
+        cotx_to_marker: dict[str, str] = {}
+        for node in self._graph.nodes.values():
+            if node.node_type != "source":
+                continue
+            cotx = node.extra.get("cotx_group")
+            if not cotx or cotx in cotx_to_marker:
+                continue
+            tu_name = node.extra.get("name", "")
+            for tu_full_name, parts in all_parts.items():
+                if not tu_full_name.startswith(tu_name):
+                    continue
+                for part_name in parts.keys():
+                    if part_name in markers:
+                        cotx_to_marker[cotx] = part_name
+                        break
+                if cotx in cotx_to_marker:
+                    break
+        for node in self._graph.nodes.values():
+            if node.node_type != "bias":
+                continue
+            fluo_bias = node.extra.get("fluo_bias")
+            if not fluo_bias or not isinstance(fluo_bias, dict):
+                continue
+            protein = fluo_bias.get("protein")
+            if not protein:
+                continue
+            cotx = self._find_cotx_for_bias(node.node_id)
+            if cotx and cotx not in cotx_to_marker:
+                cotx_to_marker[cotx] = protein
+        return cotx_to_marker
+
+    _MARKER_COLORS: dict[str, str] = {
+        "EBFP2": "#6cafc3",
+        "EBFP": "#6cafc3",
+        "MKO2": "#ef957d",
+        "MKO": "#ef957d",
+        "MKATE2": "#ef957d",
+        "MKATE": "#ef957d",
+        "TDTOMATO": "#ef957d",
+        "MNEONGREEN": "#6ccb83",
+        "MNG": "#6ccb83",
+        "NEONGREEN": "#6ccb83",
+        "EGFP": "#6ccb83",
+        "EYFP": "#fad26d",
+        "EYFPG5A": "#fad26d",
+        "IRFP720": "#df9ae4",
+        "IRFP": "#df9ae4",
+        "MMAROON": "#d3a888",
+        "MMAROON1": "#d3a888",
+    }
+
+    def _get_marker_color(self, marker: str) -> str:
+        """Get the color for a marker protein name."""
+        return self._MARKER_COLORS.get(marker, "#aaa")
+
+    def _find_cotx_for_bias(self, node_id: int) -> str | None:
+        """Find cotx_group for a bias node by traversing edges."""
+        visited = set()
+        current_id = node_id
+        while current_id not in visited:
+            visited.add(current_id)
+            current = self._graph.nodes.get(current_id)
+            if not current:
+                break
+            if current.node_type in ("aggregation", "source"):
+                return current.extra.get("cotx_group")
+            if current.node_type.startswith("inv_"):
+                orig = current.is_inverse_of
+                if orig:
+                    orig_node = self._graph.nodes.get(orig.node_id)
+                    if orig_node and orig_node.extra.get("cotx_group"):
+                        return orig_node.extra.get("cotx_group")
+            outgoing = list(self._graph.get_outgoing_edges(current_id))
+            if not outgoing:
+                break
+            current_id = outgoing[0].target_id
+        return None
 
     def _is_marker_only_edge(self, edge) -> bool:
         """Check if edge carries only marker TU IDs."""
@@ -284,10 +368,12 @@ class NetworkDiagram(Container):
         cls = NODE_CLASSES[ntype]
 
         if cls is AggregationNode:
-            proteins = self._find_input_proteins(nid)
             style = ["aggregation", "collapsed"] if self.simplified else ["aggregation"]
-            if proteins:
-                style.append(proteins[0].upper())
+            cotx = node.extra.get("cotx_group")
+            marker = None
+            if cotx and cotx in self._cotx_marker_map:
+                marker = self._cotx_marker_map[cotx].upper()
+                style.append(marker)
             has_bias = any(
                 self._graph.nodes.get(e.source_id)
                 and self._graph.nodes[e.source_id].node_type == "bias"
@@ -295,7 +381,6 @@ class NetworkDiagram(Container):
             )
             if has_bias:
                 style.append("bias_connected")
-            # Add hidden sources as overlay children (theme makes them infinitesimal, for connection anchoring)
             agg = AggregationNode(style_class=style, collapsed=self.simplified, **kw)
             if self.simplified:
                 for e in self._graph.get_outgoing_edges(nid):
@@ -313,14 +398,19 @@ class NetworkDiagram(Container):
 
         if cls is TUNode:
             name = node.extra.get("name", "")
+            cotx = node.extra.get("cotx_group")
             style = ["source"]
             if name in self.disabled_tu_ids:
                 style.append("disabled")
+            if cotx and cotx in self._cotx_marker_map:
+                style.append(self._cotx_marker_map[cotx].upper())
             return TUNode(style_class=style, **kw)
 
         if cls is FluoNode:
             # Use dependent_outputs for coloring (the non-marker output protein)
-            proteins = self._net_info.get("dependent_outputs", ()) or self._net_info.get("output_proteins", ())
+            proteins = self._net_info.get("dependent_outputs", ()) or self._net_info.get(
+                "output_proteins", ()
+            )
             f = FluoNode(**kw)
             if proteins:
                 f.style_class.append(proteins[0].upper())
@@ -338,6 +428,13 @@ class NetworkDiagram(Container):
                 protein = self._output_proteins[idx]
                 return InputNode(node_label=protein, style_class=["input", protein.upper()], **kw)
             return InputNode(**kw)
+
+        if cls is BiasNode:
+            cotx = self._find_cotx_for_bias(nid)
+            style = ["bias"]
+            if cotx and cotx in self._cotx_marker_map:
+                style.append(self._cotx_marker_map[cotx].upper())
+            return BiasNode(style_class=style, **kw)
 
         return cls(**kw)
 
@@ -478,6 +575,47 @@ class NetworkDiagram(Container):
         return layers
 
 
+_MARKER_COLORS_THEME = {
+    "EBFP2": {"base": "#6cafc3", "bright": "#1AD5FF60"},
+    "EBFP": {"base": "#6cafc3", "bright": "#1AD5FF60"},
+    "MKO2": {"base": "#ef957d", "bright": "#FF2C4944"},
+    "MKO": {"base": "#ef957d", "bright": "#FF2C4944"},
+    "MKATE2": {"base": "#ef957d", "bright": "#FF2C4944"},
+    "MKATE": {"base": "#ef957d", "bright": "#FF2C4944"},
+    "TDTOMATO": {"base": "#ef957d", "bright": "#FF2C4944"},
+    "MNEONGREEN": {"base": "#6ccb83", "bright": "#0EFF7377"},
+    "MNG": {"base": "#6ccb83", "bright": "#0EFF7377"},
+    "NEONGREEN": {"base": "#6ccb83", "bright": "#0EFF7377"},
+    "EGFP": {"base": "#6ccb83", "bright": "#0EFF7377"},
+    "EYFP": {"base": "#fad26d", "bright": "#FFC83Caa"},
+    "EYFPG5A": {"base": "#fad26d", "bright": "#FFC83Caa"},
+    "IRFP720": {"base": "#df9ae4", "bright": "#FF82FCaa"},
+    "IRFP": {"base": "#df9ae4", "bright": "#FF82FCaa"},
+    "MMAROON": {"base": "#d3a888", "bright": "#FF9853a0"},
+    "MMAROON1": {"base": "#d3a888", "bright": "#FF9853a0"},
+}
+
+
+def _apply_marker_colors_to_collapsed_aggregations(diagram: "NetworkDiagram", Shadow):
+    """Post-process collapsed aggregation nodes to apply marker colors."""
+
+    def apply_to_component(comp):
+        if isinstance(comp, AggregationNode) and comp.collapsed:
+            for sc in comp.style_class:
+                if sc in _MARKER_COLORS_THEME:
+                    colors = _MARKER_COLORS_THEME[sc]
+                    comp.style.background_color = colors["base"]
+                    comp.style.shadow = Shadow(
+                        color=colors["bright"], blur_radius=8, resolution=0.01, z_index=2
+                    )
+                    break
+        if hasattr(comp, "children"):
+            for child in comp.children:
+                apply_to_component(child)
+
+    apply_to_component(diagram)
+
+
 def render_diagram_to_ax(
     network: Any,
     ax: matplotlib.axes.Axes,
@@ -535,6 +673,9 @@ def render_diagram_to_ax(
         layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
     )
     jstyle.apply(root)
+
+    if simplified:
+        _apply_marker_colors_to_collapsed_aggregations(diagram, Shadow)
 
     ax.set_aspect("equal")
     ax.axis("off")

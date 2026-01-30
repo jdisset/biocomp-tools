@@ -189,10 +189,16 @@ def extract_recipe_summary(network: Any, params: Any = None) -> dict:
                     summary['uorfs'].append(
                         {'node_id': str(nid), 'value': extra.get('part_name', 'unknown')}
                     )
-                if ndata.get('type') == 'aggregation' and 'ratios' in extra:
-                    summary['ratios'][extra.get('cotx_group', 'unknown')] = list(
-                        map(float, extra['ratios'])
-                    )
+                if ndata.get('type') == 'aggregation':
+                    members_data = extra.get('members', {})
+                    if isinstance(members_data, dict) and members_data:
+                        ratio_vals = [
+                            members_data[m].get("ratio", 1.0)
+                            if isinstance(members_data[m], dict)
+                            else 1.0
+                            for m in sorted(members_data.keys())
+                        ]
+                        summary['ratios'][extra.get('cotx_group', 'unknown')] = ratio_vals
         if (
             hasattr(network, 'source_recipe')
             and network.source_recipe

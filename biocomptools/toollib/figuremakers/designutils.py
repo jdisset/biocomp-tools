@@ -319,3 +319,31 @@ def render_smooth_with_extent(
         vlims=(None, None),
         **kwargs,
     )
+
+
+def render_network_diagram_full_width(
+    fig,
+    axes_to_remove: list,
+    network,
+    title: str = "Network Diagram",
+    **_kwargs,
+):
+    """Render network diagram spanning full width by replacing two axes.
+
+    Removes the given axes and creates a new subplot spanning their positions.
+    """
+    from biocomptools.toollib.figuremakers.networkdiagram import render_diagram_to_ax
+
+    positions = [a.get_position() for a in axes_to_remove]
+
+    for a in axes_to_remove:
+        a.remove()
+
+    x0 = min(p.x0 for p in positions)
+    y0 = min(p.y0 for p in positions)
+    x1 = max(p.x1 for p in positions)
+    y1 = max(p.y1 for p in positions)
+
+    spanning_ax = fig.add_axes([x0, y0, x1 - x0, y1 - y0])
+
+    render_diagram_to_ax(network, spanning_ax, title=title)
