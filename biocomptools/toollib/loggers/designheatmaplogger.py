@@ -16,14 +16,6 @@ from biocomp.designutils import (
 
 logger = get_logger(__name__)
 
-PENALTY_ORDER = [
-    "l0_penalty",
-    "spread_penalty",
-    "coupling_penalty",
-    "tucount_penalty",
-    "ern_tying_penalty",
-]
-
 
 def _to_scalar(val: Any, default: float = 0.0) -> float:
     """Convert array-like (numpy/JAX) or scalar to float, averaging if multi-element."""
@@ -69,226 +61,6 @@ def _extract_at_indices(arr: Any, rid: int, tid: int, nid: int) -> float:
             ]
         )
     return float(np.mean(arr))
-
-
-def _format_loss_table_comparison(
-    training_sublosses: dict,
-    eval_losses: dict | None,
-    penalties: dict,
-    loss_weights: dict,
-    show_penalties: bool = True,
-) -> list[str]:
-    """Format loss table with Training vs Eval comparison (3-column with delta)."""
-    lines = []
-    lines.append("┌─────────────────┬──────────┬──────────┬─────────┐")
-    lines.append("│ Grid Losses     │ Training │     Eval │   Delta │")
-    lines.append("├─────────────────┼──────────┼──────────┼─────────┤")
-
-    train_grid_total = 0.0
-    eval_grid_total = 0.0
-
-    for name in LOSS_ORDER:
-        train_key = f"{name}_weighted"
-        train_val = training_sublosses.get(train_key, training_sublosses.get(name, 0.0))
-        if hasattr(train_val, 'ndim') and train_val.ndim > 0:
-            train_val = float(np.mean(np.asarray(train_val)))
-        elif train_val:
-            train_val = float(train_val)
-        else:
-            train_val = 0.0
-
-        eval_val = eval_losses.get(name, 0.0) if eval_losses else None
-        if eval_val is not None:
-            if hasattr(eval_val, 'ndim') and eval_val.ndim > 0:
-                eval_val = float(np.mean(np.asarray(eval_val)))
-            weight = loss_weights.get(f"w_{name}", loss_weights.get(name, 1.0))
-            if hasattr(weight, 'ndim') and weight.ndim > 0:
-                weight = float(np.mean(np.asarray(weight)))
-            eval_val = float(eval_val) * float(weight)
-
-        if train_val > 1e-8 or (eval_val is not None and eval_val > 1e-8):
-            train_grid_total += train_val
-            if eval_val is not None:
-                eval_grid_total += eval_val
-                delta = abs(train_val - eval_val)
-                lines.append(f"│ {name:15} │ {train_val:8.4f} │ {eval_val:8.4f} │ {delta:7.4f} │")
-            else:
-                lines.append(f"│ {name:15} │ {train_val:8.4f} │      n/a │         │")
-
-    lines.append("├─────────────────┼──────────┼──────────┼─────────┤")
-    if eval_losses:
-        delta_total = abs(train_grid_total - eval_grid_total)
-        lines.append(
-            f"│ {'GRID TOTAL':15} │ {train_grid_total:8.4f} │ {eval_grid_total:8.4f} │ {delta_total:7.4f} │"
-        )
-    else:
-        lines.append(f"│ {'GRID TOTAL':15} │ {train_grid_total:8.4f} │      n/a │         │")
-
-    if show_penalties and penalties:
-        lines.append("├─────────────────┼──────────┼──────────┼─────────┤")
-        penalty_sum = 0.0
-        for pen_name in PENALTY_ORDER:
-            pen_val = _to_scalar(penalties.get(pen_name, 0.0))
-            if pen_val > 1e-8:
-                penalty_sum += pen_val
-                lines.append(f"│ {pen_name:15} │ {pen_val:8.4f} │      n/a │         │")
-
-        if penalty_sum > 1e-8:
-            lines.append("├─────────────────┼──────────┼──────────┼─────────┤")
-            total_loss = train_grid_total + penalty_sum
-            lines.append(f"│ {'TOTAL LOSS':15} │ {total_loss:8.4f} │      n/a │         │")
-
-    lines.append("└─────────────────┴──────────┴──────────┴─────────┘")
-    return lines
-
-
-def _format_loss_table_eval_only(
-    eval_losses: dict,
-    penalties: dict,
-    loss_weights: dict,
-    show_penalties: bool = True,
-) -> list[str]:
-    """Format loss table with eval-only column (for NSGA2 mode where no training sublosses)."""
-    lines = []
-    lines.append("┌─────────────────┬──────────┐")
-    lines.append("│ Grid Losses     │     Eval │")
-    lines.append("├─────────────────┼──────────┤")
-
-    grid_total = 0.0
-
-    for name in LOSS_ORDER:
-        raw_val = _to_scalar(eval_losses.get(name, 0.0))
-        weight = _to_scalar(loss_weights.get(f"w_{name}", loss_weights.get(name, 1.0)), default=1.0)
-        weighted_val = raw_val * weight
-
-        if weighted_val > 1e-8:
-            grid_total += weighted_val
-            lines.append(f"│ {name:15} │ {weighted_val:8.4f} │")
-
-    lines.append("├─────────────────┼──────────┤")
-    lines.append(f"│ {'GRID TOTAL':15} │ {grid_total:8.4f} │")
-
-    if show_penalties and penalties:
-        lines.append("├─────────────────┼──────────┤")
-        penalty_sum = 0.0
-        for pen_name in PENALTY_ORDER:
-            pen_val = _to_scalar(penalties.get(pen_name, 0.0))
-            if pen_val > 1e-8:
-                penalty_sum += pen_val
-                lines.append(f"│ {pen_name:15} │ {pen_val:8.4f} │")
-
-        if penalty_sum > 1e-8:
-            lines.append("├─────────────────┼──────────┤")
-            total_loss = grid_total + penalty_sum
-            lines.append(f"│ {'TOTAL':15} │ {total_loss:8.4f} │")
-
-    lines.append("└─────────────────┴──────────┘")
-    return lines
-
-
-def _format_loss_table_simple(
-    training_sublosses: dict,
-    penalties: dict,
-    loss_weights: dict,
-    show_penalties: bool = True,
-) -> list[str]:
-    """Format loss table with Unweighted vs Weighted columns (2-column)."""
-    lines = []
-    lines.append("┌─────────────────┬──────────┬──────────┐")
-    lines.append("│ Grid Losses     │ Unweight │ Weighted │")
-    lines.append("├─────────────────┼──────────┼──────────┤")
-
-    weighted_total = 0.0
-
-    for name in LOSS_ORDER:
-        raw_val = training_sublosses.get(name, 0.0)
-        weighted_val = training_sublosses.get(f"{name}_weighted", 0.0)
-
-        if hasattr(raw_val, 'ndim') and raw_val.ndim > 0:
-            raw_val = float(np.mean(np.asarray(raw_val)))
-        elif raw_val:
-            raw_val = float(raw_val)
-        else:
-            raw_val = 0.0
-
-        if hasattr(weighted_val, 'ndim') and weighted_val.ndim > 0:
-            weighted_val = float(np.mean(np.asarray(weighted_val)))
-        elif weighted_val:
-            weighted_val = float(weighted_val)
-        else:
-            weighted_val = 0.0
-
-        if raw_val > 1e-8 or weighted_val > 1e-8:
-            weighted_total += weighted_val
-            lines.append(f"│ {name:15} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
-
-    lines.append("├─────────────────┼──────────┼──────────┤")
-    lines.append(f"│ {'GRID TOTAL':15} │          │ {weighted_total:8.4f} │")
-
-    if show_penalties and penalties:
-        lines.append("├─────────────────┼──────────┼──────────┤")
-        penalty_sum = 0.0
-        for pen_name in PENALTY_ORDER:
-            pen_val = _to_scalar(penalties.get(pen_name, 0.0))
-            if pen_val > 1e-8:
-                penalty_sum += pen_val
-                lines.append(f"│ {pen_name:15} │          │ {pen_val:8.4f} │")
-
-        if penalty_sum > 1e-8:
-            lines.append("├─────────────────┼──────────┼──────────┤")
-            total_loss = weighted_total + penalty_sum
-            lines.append(f"│ {'TOTAL LOSS':15} │          │ {total_loss:8.4f} │")
-
-    lines.append("└─────────────────┴──────────┴──────────┘")
-    return lines
-
-
-def _format_loss_table_per_design(
-    training_sublosses: dict,
-    penalties: dict,
-    loss_weights: dict,
-    rid: int,
-    tid: int,
-    nid: int,
-    show_penalties: bool = True,
-) -> list[str]:
-    """Format loss table extracting values for a specific (replicate, target, network)."""
-    lines = []
-    lines.append("┌─────────────────┬──────────┬──────────┐")
-    lines.append("│ Grid Losses     │ Unweight │ Weighted │")
-    lines.append("├─────────────────┼──────────┼──────────┤")
-
-    weighted_total = 0.0
-
-    for name in LOSS_ORDER:
-        raw_val = _extract_at_indices(training_sublosses.get(name), rid, tid, nid)
-        weighted_val = _extract_at_indices(
-            training_sublosses.get(f"{name}_weighted"), rid, tid, nid
-        )
-
-        if raw_val > 1e-8 or weighted_val > 1e-8:
-            weighted_total += weighted_val
-            lines.append(f"│ {name:15} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
-
-    lines.append("├─────────────────┼──────────┼──────────┤")
-    lines.append(f"│ {'GRID TOTAL':15} │          │ {weighted_total:8.4f} │")
-
-    if show_penalties and penalties:
-        lines.append("├─────────────────┼──────────┼──────────┤")
-        penalty_sum = 0.0
-        for pen_name in PENALTY_ORDER:
-            pen_val = _to_scalar(penalties.get(pen_name, 0.0))
-            if pen_val > 1e-8:
-                penalty_sum += pen_val
-                lines.append(f"│ {pen_name:15} │          │ {pen_val:8.4f} │")
-
-        if penalty_sum > 1e-8:
-            lines.append("├─────────────────┼──────────┼──────────┤")
-            total_loss = weighted_total + penalty_sum
-            lines.append(f"│ {'TOTAL LOSS':15} │          │ {total_loss:8.4f} │")
-
-    lines.append("└─────────────────┴──────────┴──────────┘")
-    return lines
 
 
 class DesignHeatmapLogger(Logger):
@@ -350,6 +122,11 @@ class DesignHeatmapLogger(Logger):
         description="Path to save reproduction pickle (default: output_dir/heatmap_repro.pickle)",
     )
 
+    params_view: str = Field(
+        default="raw",
+        description="Parameter view: 'raw' (pre-commit, shows all TUs) or 'committed' (post-commit, shows surviving TUs only)",
+    )
+
     _output_dir: str | None = None
     _last_step_history: dict | None = None
     _model_path: str | None = None
@@ -397,7 +174,8 @@ class DesignHeatmapLogger(Logger):
                 dc = training_program.design_conf
                 self._design_conf = dc
                 if hasattr(dc, 'n_epochs') and hasattr(dc, 'n_batches_per_epoch'):
-                    self._total_steps = dc.n_epochs * dc.n_batches_per_epoch
+                    batches_per_step = getattr(dc, 'batches_per_step', 1)
+                    self._total_steps = dc.n_epochs * max(1, dc.n_batches_per_epoch // batches_per_step)
 
                 # Extract loss weights from loss_function.kwargs (primary source)
                 if hasattr(dc, 'loss_function'):
@@ -446,13 +224,16 @@ class DesignHeatmapLogger(Logger):
                     logger.warning(f"Failed to cache target grid: {e}")
 
     def _compute_fresh_prediction(
-        self, params, rep_idx: int, target_idx: int, network_idx: int
+        self, params, rep_idx: int, target_idx: int, network_idx: int, stack=None
     ) -> np.ndarray | None:
         """Compute fresh prediction from params to ensure display matches fingerprint.
 
         Uses deterministic z_value=0.0 (same as fingerprint computation) on the canonical
         lattice grid. This fixes the timing mismatch where logged yhatdep is from pre-update
         params but latest_params is post-update.
+
+        Args:
+            stack: Optional pre-built stack. If None, builds fresh (can be stale after hard-pruning).
         """
         if self._model is None or self._dmanager is None or self._grid_resolution is None:
             return None
@@ -462,14 +243,15 @@ class DesignHeatmapLogger(Logger):
             from biocomp.jaxutils import tree_get
             from biocomptools.modelmodel import NetworkModel
 
-            auto_lock = (
-                getattr(self._design_conf, 'auto_lock_topology_tus', True)
-                if self._design_conf
-                else True
-            )
-            stack = build_design_stack(
-                self._dmanager, self._model, auto_lock_topology_tus=auto_lock
-            )
+            if stack is None:
+                auto_lock = (
+                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
+                    if self._design_conf
+                    else True
+                )
+                stack = build_design_stack(
+                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                )
             specific_params = tree_get(params, (rep_idx, target_idx))
             committed_networks = stack.commit(specific_params)
 
@@ -562,6 +344,7 @@ class DesignHeatmapLogger(Logger):
         Y_target_grid: np.ndarray | None,
         n_total_designs: int,
         is_final: bool = False,
+        stack=None,
     ) -> list[str]:
         """Render heatmap and loss table for a single (replicate, network) design."""
         xres, yres = self._grid_resolution  # type: ignore
@@ -570,7 +353,7 @@ class DesignHeatmapLogger(Logger):
         Y_pred_grid = None
         params = step_history.get('latest_params')
         if self.use_fresh_predictions and params is not None:
-            Y_pred_grid = self._compute_fresh_prediction(params, rid, tid, nid)
+            Y_pred_grid = self._compute_fresh_prediction(params, rid, tid, nid, stack=stack)
 
         if Y_pred_grid is None:
             Y_pred_grid = yhatdep[rid, :, tid, nid].reshape(yres, xres)
@@ -705,6 +488,7 @@ class DesignHeatmapLogger(Logger):
                 lines.append(f"Pred: [{Y_pred_grid.min():.2f}, {Y_pred_grid.max():.2f}]")
 
         if self.show_local_params:
+            introspect_stack = stack if stack is not None else self._stack
             if params is None:
                 logger.warning(
                     f"[DesignHeatmapLogger] Cannot show params: latest_params not in step_history. "
@@ -712,7 +496,7 @@ class DesignHeatmapLogger(Logger):
                 )
                 lines.append("")
                 lines.append("[!] Cannot show params: latest_params not in step_history")
-            elif self._stack is None:
+            elif introspect_stack is None:
                 logger.warning(
                     f"[DesignHeatmapLogger] Cannot introspect: stack not built. "
                     f"model={self._model is not None}, dmanager={self._dmanager is not None}"
@@ -725,7 +509,7 @@ class DesignHeatmapLogger(Logger):
             else:
                 try:
                     from biocomp.jaxutils import tree_get
-                    from biocomp.paramintrospect import format_network_params_rich
+                    from biocomp.paramintrospect import format_network_params_rich, format_committed_network_params_rich
                     from io import StringIO
                     from rich.console import Console
 
@@ -733,7 +517,16 @@ class DesignHeatmapLogger(Logger):
 
                     string_io = StringIO()
                     console = Console(file=string_io, force_terminal=True, width=100)
-                    format_network_params_rich(self._stack, specific_params, nid, console)
+
+                    if self.params_view == "committed":
+                        committed_networks = introspect_stack.commit(specific_params)
+                        if nid < len(committed_networks):
+                            format_committed_network_params_rich(
+                                committed_networks[nid], introspect_stack, specific_params, nid, console
+                            )
+                    else:
+                        format_network_params_rich(introspect_stack, specific_params, nid, console)
+
                     param_str = string_io.getvalue()
 
                     if param_str:
@@ -753,7 +546,9 @@ class DesignHeatmapLogger(Logger):
 
         return lines
 
-    def _render_heatmaps(self, step: int, step_history: dict, is_final: bool = False) -> str | None:
+    def _render_heatmaps(
+        self, step: int, step_history: dict, is_final: bool = False, stack=None
+    ) -> str | None:
         if self._grid_resolution is None or self._dmanager is None:
             return None
 
@@ -824,6 +619,7 @@ class DesignHeatmapLogger(Logger):
                 Y_target_grid,
                 n_total_designs,
                 is_final=is_final,
+                stack=stack,
             )
             all_lines.extend(design_lines)
             all_lines.append("")
@@ -948,7 +744,7 @@ class DesignHeatmapLogger(Logger):
         def callback(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is None:
                 return
-            output = self._render_heatmaps(step, step_history, is_final=False)
+            output = self._render_heatmaps(step, step_history, is_final=False, stack=stack)
             if output:
                 print(output)
                 print()
@@ -956,7 +752,7 @@ class DesignHeatmapLogger(Logger):
         def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
             if step_history is None:
                 return
-            output = self._render_heatmaps(step, step_history, is_final=True)
+            output = self._render_heatmaps(step, step_history, is_final=True, stack=stack)
             if output:
                 print("\n" + "═" * 60)
                 print(" FINAL RESULT ".center(60, "═"))
