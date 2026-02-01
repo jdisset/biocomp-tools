@@ -195,12 +195,7 @@ class DesignSublossLogger(Logger):
                 data[pname] = scalar_val
                 total_penalty += scalar_val
         data["total_penalty"] = total_penalty
-        data["penalty_fraction"] = (
-            total_penalty / total_loss if total_loss > 0 else 0.0
-        )
-
-        # Temperature
-        data["tu_temperature"] = _to_scalar(step_history.get("tu_temperature"))
+        data["penalty_fraction"] = total_penalty / total_loss if total_loss > 0 else 0.0
 
         return data
 
@@ -217,6 +212,7 @@ class DesignSublossLogger(Logger):
 
         try:
             import matplotlib
+
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             from matplotlib.gridspec import GridSpec
@@ -244,7 +240,6 @@ class DesignSublossLogger(Logger):
             return
 
         targets = self._dmanager.targets if self._dmanager else []
-        sublosses = step_history.get("sublosses", {})
 
         # Get loss weights from design config
         loss_weights = {}
@@ -262,7 +257,6 @@ class DesignSublossLogger(Logger):
                 continue
 
             target_name = getattr(target, 'name', f'target_{tid}')
-            X = self._generate_lattice_coordinates(target)
             x_extent, y_extent = _get_target_extents(target)
 
             # Get Y_true from target
@@ -281,7 +275,9 @@ class DesignSublossLogger(Logger):
                     Y_true_grid = Y_true.reshape(yres, xres)
                     logger.info(f"Using Y_true from step_history key {y_true_key}")
                 else:
-                    logger.warning(f"No Y_true available for target {tid}, will show predictions only")
+                    logger.warning(
+                        f"No Y_true available for target {tid}, will show predictions only"
+                    )
 
             # Select networks to plot (best, worst, median by loss)
             if n_networks > self.max_networks_to_plot:
@@ -299,7 +295,7 @@ class DesignSublossLogger(Logger):
                         ]
                         if len(sorted_idx) > 3:
                             net_indices.append(sorted_idx[len(sorted_idx) // 4])
-                        net_indices = sorted(set(net_indices))[:self.max_networks_to_plot]
+                        net_indices = sorted(set(net_indices))[: self.max_networks_to_plot]
                     else:
                         net_indices = list(range(min(n_networks, self.max_networks_to_plot)))
                 else:
@@ -357,12 +353,10 @@ class DesignSublossLogger(Logger):
             # TU masking stats
             tu_enabled = data.get('tu_enabled_count', 0)
             tu_total = data.get('tu_total_count', 1)
-            tu_temp = data.get('tu_temperature', float('nan'))
             tu_prob = data.get('tu_mean_prob', float('nan'))
             header_text += (
                 f"TU MASKING: {tu_enabled:.0f}/{tu_total:.0f} enabled "
-                f"({100*tu_enabled/max(tu_total,1):.1f}%) | "
-                f"temp={tu_temp:.4f} | mean_prob={tu_prob:.3f}\n"
+                f"({100 * tu_enabled / max(tu_total, 1):.1f}%) | mean_prob={tu_prob:.3f}\n"
             )
 
             # Prediction stats
@@ -389,7 +383,9 @@ class DesignSublossLogger(Logger):
                 header_text += "TARGET: [DATA UNAVAILABLE - check target.get_lattice()]"
 
             ax_header.text(
-                0.02, 0.95, header_text,
+                0.02,
+                0.95,
+                header_text,
                 transform=ax_header.transAxes,
                 fontsize=9,
                 fontfamily='monospace',
@@ -402,16 +398,25 @@ class DesignSublossLogger(Logger):
             ax_true = fig.add_subplot(gs[1, 0])
             if Y_true_grid is not None:
                 im = ax_true.imshow(
-                    Y_true_grid, cmap='viridis', origin='lower',
+                    Y_true_grid,
+                    cmap='viridis',
+                    origin='lower',
                     extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                    aspect='equal'
+                    aspect='equal',
                 )
                 ax_true.set_title(f"Y_TRUE\nmean={y_true_mean:.3f}", fontsize=9)
                 plt.colorbar(im, ax=ax_true, fraction=0.046)
             else:
-                ax_true.text(0.5, 0.5, "TARGET DATA\nUNAVAILABLE",
-                           ha='center', va='center', fontsize=12, color='red',
-                           transform=ax_true.transAxes)
+                ax_true.text(
+                    0.5,
+                    0.5,
+                    "TARGET DATA\nUNAVAILABLE",
+                    ha='center',
+                    va='center',
+                    fontsize=12,
+                    color='red',
+                    transform=ax_true.transAxes,
+                )
                 ax_true.set_title("Y_TRUE\n[ERROR]", fontsize=9, color='red')
             ax_true.set_xlabel('X₀')
             ax_true.set_ylabel('X₁')
@@ -424,25 +429,21 @@ class DesignSublossLogger(Logger):
 
                 # Compute per-pixel stats if Y_true available
                 if Y_true_grid is not None:
-                    error = Y_pred - Y_true_grid
-                    sq_error = error ** 2
                     corr = np.corrcoef(Y_true_grid.ravel(), Y_pred.ravel())[0, 1]
-                    mse = np.mean(sq_error)
                 else:
                     corr = float('nan')
-                    mse = float('nan')
 
                 # Y_pred
                 ax_pred = fig.add_subplot(gs[1, i + 1])
                 im = ax_pred.imshow(
-                    Y_pred, cmap='viridis', origin='lower',
+                    Y_pred,
+                    cmap='viridis',
+                    origin='lower',
                     extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                    aspect='equal'
+                    aspect='equal',
                 )
                 ax_pred.set_title(
-                    f"NET {nid}: Y_PRED\n"
-                    f"mean={Y_pred.mean():.3f} corr={corr:.3f}",
-                    fontsize=9
+                    f"NET {nid}: Y_PRED\nmean={Y_pred.mean():.3f} corr={corr:.3f}", fontsize=9
                 )
                 ax_pred.set_xlabel('X₀')
                 plt.colorbar(im, ax=ax_pred, fraction=0.046)
@@ -455,20 +456,29 @@ class DesignSublossLogger(Logger):
             if Y_true_grid is not None:
                 error_best = np.abs(Y_pred_best - Y_true_grid)
                 im = ax_err.imshow(
-                    error_best, cmap='Reds', origin='lower',
+                    error_best,
+                    cmap='Reds',
+                    origin='lower',
                     extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                    aspect='equal'
+                    aspect='equal',
                 )
                 ax_err.set_title(
                     f"BEST NET {best_nid}: |ERROR|\n"
                     f"mean={error_best.mean():.4f} max={error_best.max():.4f}",
-                    fontsize=9
+                    fontsize=9,
                 )
                 plt.colorbar(im, ax=ax_err, fraction=0.046)
             else:
-                ax_err.text(0.5, 0.5, "NO TARGET\nFOR ERROR",
-                           ha='center', va='center', fontsize=12, color='red',
-                           transform=ax_err.transAxes)
+                ax_err.text(
+                    0.5,
+                    0.5,
+                    "NO TARGET\nFOR ERROR",
+                    ha='center',
+                    va='center',
+                    fontsize=12,
+                    color='red',
+                    transform=ax_err.transAxes,
+                )
                 ax_err.set_title(f"NET {best_nid}: ERROR\n[UNAVAILABLE]", fontsize=9, color='red')
             ax_err.set_xlabel('X₀')
             ax_err.set_xlim(x_extent)
@@ -479,15 +489,24 @@ class DesignSublossLogger(Logger):
             ax_title.axis('off')
             if Y_true_grid is not None:
                 ax_title.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     "PER-PIXEL\nLOSS\nCONTRIBUTION\n(darker=worse)",
-                    ha='center', va='center', fontsize=10, fontweight='bold'
+                    ha='center',
+                    va='center',
+                    fontsize=10,
+                    fontweight='bold',
                 )
             else:
                 ax_title.text(
-                    0.5, 0.5,
+                    0.5,
+                    0.5,
                     "PER-PIXEL\nPREDICTION\nVARIATION\n(no target)",
-                    ha='center', va='center', fontsize=10, fontweight='bold', color='orange'
+                    ha='center',
+                    va='center',
+                    fontsize=10,
+                    fontweight='bold',
+                    color='orange',
                 )
 
             # MSE contribution map (or variance map if no target)
@@ -498,28 +517,24 @@ class DesignSublossLogger(Logger):
                 if Y_true_grid is not None:
                     sq_error = (Y_pred - Y_true_grid) ** 2
                     im = ax_mse.imshow(
-                        sq_error, cmap='hot', origin='lower',
+                        sq_error,
+                        cmap='hot',
+                        origin='lower',
                         extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                        aspect='equal'
+                        aspect='equal',
                     )
                     mse_val = np.mean(sq_error)
-                    ax_mse.set_title(
-                        f"NET {nid}: SQUARED ERROR\n"
-                        f"MSE={mse_val:.4f}",
-                        fontsize=9
-                    )
+                    ax_mse.set_title(f"NET {nid}: SQUARED ERROR\nMSE={mse_val:.4f}", fontsize=9)
                 else:
                     # Show prediction magnitude instead
                     im = ax_mse.imshow(
-                        Y_pred, cmap='hot', origin='lower',
+                        Y_pred,
+                        cmap='hot',
+                        origin='lower',
                         extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                        aspect='equal'
+                        aspect='equal',
                     )
-                    ax_mse.set_title(
-                        f"NET {nid}: Y_PRED MAG\n"
-                        f"mean={Y_pred.mean():.4f}",
-                        fontsize=9
-                    )
+                    ax_mse.set_title(f"NET {nid}: Y_PRED MAG\nmean={Y_pred.mean():.4f}", fontsize=9)
                 ax_mse.set_xlabel('X₀')
                 plt.colorbar(im, ax=ax_mse, fraction=0.046)
 
@@ -531,42 +546,49 @@ class DesignSublossLogger(Logger):
                 signed_error = Y_pred_best - Y_true_grid
                 vmax = max(abs(signed_error.min()), abs(signed_error.max()), 1e-6)
                 im = ax_signed.imshow(
-                    signed_error, cmap='RdBu_r', origin='lower',
+                    signed_error,
+                    cmap='RdBu_r',
+                    origin='lower',
                     extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                    aspect='equal', vmin=-vmax, vmax=vmax
+                    aspect='equal',
+                    vmin=-vmax,
+                    vmax=vmax,
                 )
                 ax_signed.set_title(
-                    f"BEST NET {best_nid}: SIGNED ERROR\n"
-                    f"(blue=under, red=over)",
-                    fontsize=9
+                    f"BEST NET {best_nid}: SIGNED ERROR\n(blue=under, red=over)", fontsize=9
                 )
             else:
                 # Show spatial gradient of predictions instead
                 grad_y, grad_x = np.gradient(Y_pred_best)
                 grad_mag = np.sqrt(grad_x**2 + grad_y**2)
                 im = ax_signed.imshow(
-                    grad_mag, cmap='viridis', origin='lower',
+                    grad_mag,
+                    cmap='viridis',
+                    origin='lower',
                     extent=[x_extent[0], x_extent[1], y_extent[0], y_extent[1]],
-                    aspect='equal'
+                    aspect='equal',
                 )
                 ax_signed.set_title(
-                    f"NET {best_nid}: GRADIENT MAG\n"
-                    f"(spatial variation)",
-                    fontsize=9
+                    f"NET {best_nid}: GRADIENT MAG\n(spatial variation)", fontsize=9
                 )
             ax_signed.set_xlabel('X₀')
             plt.colorbar(im, ax=ax_signed, fraction=0.046)
 
             # === ROW 3: Network comparison and stats ===
             # Loss distribution across networks
-            ax_dist = fig.add_subplot(gs[3, :n_nets // 2 + 1])
+            ax_dist = fig.add_subplot(gs[3, : n_nets // 2 + 1])
             all_losses_arr = step_history.get("all_losses")
             if all_losses_arr is not None:
                 arr = np.asarray(all_losses_arr)
                 if arr.ndim >= 4:
                     net_losses = arr[0, 0, 0, :] if arr.ndim == 4 else arr[0, 0, 0, 0, :]
                     ax_dist.bar(range(len(net_losses)), net_losses, alpha=0.7)
-                    ax_dist.axhline(np.mean(net_losses), color='r', linestyle='--', label=f'mean={np.mean(net_losses):.4f}')
+                    ax_dist.axhline(
+                        np.mean(net_losses),
+                        color='r',
+                        linestyle='--',
+                        label=f'mean={np.mean(net_losses):.4f}',
+                    )
                     ax_dist.set_xlabel('Network Index')
                     ax_dist.set_ylabel('Loss')
                     ax_dist.set_title('Loss per Network (lower=better)')
@@ -576,7 +598,7 @@ class DesignSublossLogger(Logger):
                         ax_dist.bar(nid, net_losses[nid], color='red', alpha=0.8)
 
             # Correlation/std scatter across networks
-            ax_corr = fig.add_subplot(gs[3, n_nets // 2 + 1:])
+            ax_corr = fig.add_subplot(gs[3, n_nets // 2 + 1 :])
             stds = []
             means = []
             corrs = []
@@ -645,7 +667,9 @@ class DesignSublossLogger(Logger):
             weighted = data.get(f'subloss_{key}_weighted', float('nan'))
             if not np.isnan(raw):
                 pct = 100 * weighted / total if total > 0 else 0
-                lines.append(f"    {key:>10}: {raw:.6f} (weighted: {weighted:.6f}, {pct:.1f}% of total)")
+                lines.append(
+                    f"    {key:>10}: {raw:.6f} (weighted: {weighted:.6f}, {pct:.1f}% of total)"
+                )
 
         # Penalties
         lines.append("")
@@ -653,30 +677,39 @@ class DesignSublossLogger(Logger):
         for pname in ['l0_penalty', 'spread_penalty', 'coupling_penalty', 'ern_tying_penalty']:
             val = data.get(pname, 0)
             pct = 100 * val / total if total > 0 else 0
-            lines.append(f"    {pname.replace('_penalty', ''):>12}: {val:.6f} ({pct:.1f}% of total)")
+            lines.append(
+                f"    {pname.replace('_penalty', ''):>12}: {val:.6f} ({pct:.1f}% of total)"
+            )
 
         lines.append("")
-        lines.append(f"  Total Penalty: {data.get('total_penalty', 0):.6f} ({data.get('penalty_fraction', 0) * 100:.1f}% of total)")
+        lines.append(
+            f"  Total Penalty: {data.get('total_penalty', 0):.6f} ({data.get('penalty_fraction', 0) * 100:.1f}% of total)"
+        )
 
         # Predictions
         lines.extend(["", "PREDICTIONS:", "-" * 40])
         lines.append(f"  Shape: {data.get('yhatdep_shape', 'N/A')}")
         lines.append(f"  Mean: {data.get('yhatdep_mean', float('nan')):.6f}")
         lines.append(f"  Std: {data.get('yhatdep_std', float('nan')):.6f}")
-        lines.append(f"  Range: [{data.get('yhatdep_min', float('nan')):.6f}, {data.get('yhatdep_max', float('nan')):.6f}]")
+        lines.append(
+            f"  Range: [{data.get('yhatdep_min', float('nan')):.6f}, {data.get('yhatdep_max', float('nan')):.6f}]"
+        )
         lines.append(f"  NaN count: {data.get('yhatdep_nan_count', 0)}")
 
         # TU masking
         lines.extend(["", "TU MASKING:", "-" * 40])
-        lines.append(f"  Temperature: {data.get('tu_temperature', float('nan')):.6f}")
-        lines.append(f"  Enabled: {data.get('tu_enabled_count', 'N/A')}/{data.get('tu_total_count', 'N/A')}")
+        lines.append(
+            f"  Enabled: {data.get('tu_enabled_count', 'N/A')}/{data.get('tu_total_count', 'N/A')}"
+        )
         lines.append(f"  Mean Probability: {data.get('tu_mean_prob', float('nan')):.6f}")
 
         # Ratios
         lines.extend(["", "RATIO STATS:", "-" * 40])
         lines.append(f"  Mean: {data.get('ratio_mean', float('nan')):.6f}")
         lines.append(f"  Std: {data.get('ratio_std', float('nan')):.6f}")
-        lines.append(f"  Range: [{data.get('ratio_min', float('nan')):.6f}, {data.get('ratio_max', float('nan')):.6f}]")
+        lines.append(
+            f"  Range: [{data.get('ratio_min', float('nan')):.6f}, {data.get('ratio_max', float('nan')):.6f}]"
+        )
 
         lines.append("")
         lines.append("=" * 80)
@@ -704,8 +737,7 @@ class DesignSublossLogger(Logger):
                     raw_data[key] = np.asarray(val)
                 elif isinstance(val, dict):
                     raw_data[key] = {
-                        k: np.asarray(v) if hasattr(v, '__array__') else v
-                        for k, v in val.items()
+                        k: np.asarray(v) if hasattr(v, '__array__') else v for k, v in val.items()
                     }
                 else:
                     raw_data[key] = val
@@ -737,8 +769,7 @@ class DesignSublossLogger(Logger):
                 # Diagnostic plot
                 if self.generate_plots:
                     self._generate_diagnostic_plot(
-                        step, step_history, data,
-                        step_dir / "diagnostic.png"
+                        step, step_history, data, step_dir / "diagnostic.png"
                     )
 
         def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
@@ -758,13 +789,13 @@ class DesignSublossLogger(Logger):
 
                     if self.generate_plots:
                         self._generate_diagnostic_plot(
-                            step, step_history, data,
-                            final_dir / "diagnostic.png"
+                            step, step_history, data, final_dir / "diagnostic.png"
                         )
 
                     # Save history
                     if self.save_pickle:
                         import dill as pickle
+
                         with open(self._save_dir / "subloss_history.pickle", 'wb') as f:
                             pickle.dump(self._history, f)
 
@@ -779,6 +810,7 @@ class DesignSublossLogger(Logger):
 
         try:
             import matplotlib
+
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
         except ImportError:
@@ -799,11 +831,21 @@ class DesignSublossLogger(Logger):
 
         # Weighted sublosses (stacked area)
         ax = axes[0, 1]
-        weighted_keys = ['subloss_sinkhorn_weighted', 'subloss_lncc_weighted', 'subloss_mse_weighted']
+        weighted_keys = [
+            'subloss_sinkhorn_weighted',
+            'subloss_lncc_weighted',
+            'subloss_mse_weighted',
+        ]
         bottoms = np.zeros(len(self._history))
         for key in weighted_keys:
             vals = np.array([h.get(key, 0) for h in self._history])
-            ax.fill_between(steps, bottoms, bottoms + vals, alpha=0.7, label=key.replace('subloss_', '').replace('_weighted', ''))
+            ax.fill_between(
+                steps,
+                bottoms,
+                bottoms + vals,
+                alpha=0.7,
+                label=key.replace('subloss_', '').replace('_weighted', ''),
+            )
             bottoms += vals
         ax.set_xlabel('Step')
         ax.set_ylabel('Loss Contribution')
@@ -819,7 +861,8 @@ class DesignSublossLogger(Logger):
             steps,
             np.array(yhat_mean) - np.array(yhat_std),
             np.array(yhat_mean) + np.array(yhat_std),
-            alpha=0.3, label='±1 std'
+            alpha=0.3,
+            label='±1 std',
         )
         ax.plot(steps, yhat_mean, 'b-', linewidth=1.5, label='mean')
         ax.set_xlabel('Step')
@@ -832,7 +875,7 @@ class DesignSublossLogger(Logger):
         ax = axes[1, 1]
         tu_enabled = [h.get("tu_enabled_count", 0) for h in self._history]
         tu_total = [h.get("tu_total_count", 1) for h in self._history]
-        tu_pct = [100 * e / max(t, 1) for e, t in zip(tu_enabled, tu_total)]
+        tu_pct = [100 * e / max(t, 1) for e, t in zip(tu_enabled, tu_total, strict=True)]
         ax.plot(steps, tu_pct, 'g-', linewidth=1.5)
         ax.set_xlabel('Step')
         ax.set_ylabel('% TU Enabled')

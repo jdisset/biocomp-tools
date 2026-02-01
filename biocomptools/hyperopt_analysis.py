@@ -181,7 +181,7 @@ def plot_comprehensive_report(
     ax_bars.barh(y_pos, imps, color=colors, edgecolor='#2c3e50', linewidth=0.5)
 
     for i, (_, imp, _, best, cat) in enumerate(
-        zip(names, imps, corrs, bests, [c[0] for c in categories])
+        zip(names, imps, corrs, bests, [c[0] for c in categories], strict=True)
     ):
         best_str = f'{best:.1e}' if best < 0.01 else (f'{best:.2f}' if best < 1 else f'{best:.1f}')
         ax_bars.annotate(

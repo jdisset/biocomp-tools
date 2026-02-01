@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)

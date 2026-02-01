@@ -7,7 +7,6 @@ import numpy as np
 import jax
 from math import ceil, sqrt
 from pathlib import Path
-from pydantic import Field
 from typing import Union, Optional, List, Tuple, Callable, Literal
 
 
@@ -527,7 +526,7 @@ def _plot_parameter_section(
 
         # Create a mapping of gradient names to values for efficient lookup
         gname_to_value = {}
-        for gname, gvalue in zip(gnames, gvalues):
+        for gname, gvalue in zip(gnames, gvalues, strict=True):
             # Convert to comparable format (both as strings of the path)
             gname_str = str(gname.actual_path if hasattr(gname, "actual_path") else gname)
             gname_to_value[gname_str] = gvalue

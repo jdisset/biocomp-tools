@@ -1,10 +1,5 @@
 """Tests for vmap-trials hyperparameter optimization."""
 import pytest
-import sys
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -137,7 +132,7 @@ class TestBuildPerTrialWeights:
 
         # Simulate what _build_per_trial_weights does
         per_trial_weights = []
-        for i in range(n_trials):
+        for _ in range(n_trials):
             weights = np.random.rand(n_outputs) + 0.1
             per_trial_weights.append(weights)
 

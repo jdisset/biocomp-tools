@@ -3,16 +3,15 @@
 from pathlib import Path
 from datetime import datetime
 import re
-import dracon as dr
 from dracon.deferred import DeferredNode
 import numpy as np
 import logging
 from scipy.ndimage import gaussian_filter1d
-from labellines import labelLine, labelLines
+from labellines import labelLines
 import matplotlib.pyplot as plt
 from numpy import ndarray as ndArray
-from typing import Dict, List, Optional, Tuple, Callable, Union, Annotated, Literal, TypeVar
-from pydantic import BaseModel, ConfigDict
+from typing import Tuple
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ def make_unique_dir(directory: Path | str, prefix: str = '', suffix: str = ''):
 
     directory.mkdir(parents=True, exist_ok=True)
 
-    pattern = re.compile(f'^{re.escape(prefix)}{datestr}-(\d+){re.escape(suffix)}$')
+    pattern = re.compile(rf'^{re.escape(prefix)}{datestr}-(\d+){re.escape(suffix)}$')
 
     max_number = -1
     for existing_dir in directory.iterdir():
@@ -123,7 +122,7 @@ def plot_loss(all_losses: list[ndArray]):
     ax = fig.add_subplot(gs[0])
 
     nan_mask = np.isnan(losses_array)
-    filled_losses = ffill(losses_array)
+    ffill(losses_array)
     best_loss_id, smoothed_losses, _ = get_best_smoothed_loss_replicate_id(all_losses)
 
     yrange = np.nanmax(losses_array) - np.nanmin(losses_array)
@@ -133,7 +132,7 @@ def plot_loss(all_losses: list[ndArray]):
     lines = []
     for i in range(losses_array.shape[0]):
         non_nan_indices = ~nan_mask[i]
-        l = ax.plot(
+        line = ax.plot(
             np.arange(losses_array.shape[1])[non_nan_indices],
             losses_array[i, non_nan_indices],
             color='#AAA',
@@ -141,7 +140,7 @@ def plot_loss(all_losses: list[ndArray]):
             linewidth=1,
             alpha=0.5,
         )
-        lines.append(l)
+        lines.append(line)
 
         nan_boundaries = np.where(np.diff(non_nan_indices))[0]
         # plot red cross
@@ -184,7 +183,7 @@ def plot_loss(all_losses: list[ndArray]):
 
     try:
         labelLines(ax.get_lines(), zorder=2.5)
-    except Exception as e:
+    except Exception:
         pass
 
     ax.set_yscale('log')

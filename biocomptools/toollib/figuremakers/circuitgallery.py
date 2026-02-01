@@ -1,6 +1,5 @@
 """Figuremaker for side-by-side circuit + diagram rendering."""
 
-from typing import Any
 import matplotlib.axes
 
 from biocomp.recipe import Recipe

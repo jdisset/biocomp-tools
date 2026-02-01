@@ -1,12 +1,9 @@
 """Tests for biocomp-tuner module."""
 
-import pytest
 import numpy as np
 
-from biocomptools.tuner import TunerSession, TunerConfig, ParamDescriptor
+from biocomptools.tuner import TunerConfig, ParamDescriptor
 from biocomptools.tuner.param_schema import (
-    extract_editable_params,
-    is_editable,
     is_ratio_param,
     is_embedding_param,
     get_mask_options_count,

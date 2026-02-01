@@ -2,7 +2,6 @@
 
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
-import numpy as np
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -43,14 +42,14 @@ class LoggerMetricsHistory(BaseModel):
     logger_name: str
     logger_type: str
     history: List[StepMetrics] = Field(default_factory=list)
-    
+
     def get_latest_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Get the latest metrics, optionally for a specific replicate."""
         if not self.history:
             return None
-        
+
         latest_step = self.history[-1]
-        
+
         if replicate is not None:
             if replicate < len(latest_step.metrics):
                 return {f'{self.logger_name}_{self.logger_type}': latest_step.metrics[replicate]}
@@ -58,8 +57,8 @@ class LoggerMetricsHistory(BaseModel):
                 return None
         else:
             return {f'{self.logger_type}::{self.logger_name}': latest_step.metrics}
-    
-    def add_step_metrics(self, step: int, metrics: List[ReplicateMetrics], 
+
+    def add_step_metrics(self, step: int, metrics: List[ReplicateMetrics],
                         training_loss: Optional[Any] = None, eval_time: Optional[float] = None):
         """Add metrics for a new step."""
         step_metrics = StepMetrics(

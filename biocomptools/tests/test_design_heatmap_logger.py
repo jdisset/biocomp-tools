@@ -1,6 +1,5 @@
 """Tests for DesignHeatmapLogger, specifically the fresh prediction fix."""
 
-import pytest
 import numpy as np
 
 

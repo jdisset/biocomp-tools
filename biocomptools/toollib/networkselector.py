@@ -2,17 +2,16 @@ from biocomp.library import PartsLibrary
 from biocomp.datautils import get_network_XY
 from tqdm import tqdm
 from biocomp.datautils import DataConfig, DEFAULT_DATA_CONFIG, DataManager
-from pydantic import BaseModel, Field, BeforeValidator, model_validator, field_validator, ConfigDict
+from pydantic import BaseModel, model_validator, field_validator, ConfigDict
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func
 from sqlmodel import select, Session, col
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union, Annotated
+from typing import Any, List, Optional, Tuple, Callable, Union
 from biocomptools.toollib.models import NetworkDataPair, Recipe, DataFile, Network, Experiment
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.common import config
 from sqlalchemy.exc import SQLAlchemyError
 from biocomp.library import load_lib
-from dracon.utils import ser_debug, list_like, dict_like
+from dracon.utils import list_like
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 from collections.abc import Mapping
@@ -164,7 +163,7 @@ class NetworkSelector(BaseModel):
 
             # filter by output name if specified
             if self.output_name is not None:
-                original_count = len(networks)
+                len(networks)
                 networks = [
                     network
                     for network in networks
@@ -774,7 +773,7 @@ class CleanupFilter(NetworkFilter):
             if rows.any():
                 complementaries = lib.sequestrons[rows][complementary_col].values
                 found = False
-                for j, tp2 in enumerate(all_parts):
+                for _j, tp2 in enumerate(all_parts):
                     if any([p in tp2 for p in complementaries]):
                         found = True
                         break
@@ -914,14 +913,14 @@ def build_data_manager(
     if not net_data:
         raise ValueError("No networks and data found in the dataset. Please check your selectors.")
 
-    networks, datafiles = zip(*net_data)
+    networks, datafiles = zip(*net_data, strict=True)
     ndp_weights = {ndp.network_name: ndp.weight for ndp in dataset.content}
 
     data = []
     actual_networks = []
     weights = []
 
-    for n, f in tqdm(list(zip(networks, datafiles)), desc='Building networks & loading data'):
+    for n, f in tqdm(list(zip(networks, datafiles, strict=True)), desc='Building networks & loading data'):
         n.build(lib)
         network = n._network
         if isinstance(network, list):
@@ -939,7 +938,7 @@ def build_data_manager(
             actual_networks.append(net)
             weights.append(ndp_weights.get(n.name, 1.0))
 
-    X, Y = zip(*data)
+    X, Y = zip(*data, strict=True)
 
     return DataManager(
         X,

@@ -249,7 +249,7 @@ class DesignProgram(BaseOptimizationProgram):
             self.targets = [self.targets]
         logger.info(
             f"Creating DesignManager with {len(self.targets)} targets, {len(networks)} networks, "
-            f"{self.sampling.strategy} sampling, TU masking={self.design_conf.enable_tu_masking}"
+            f"{self.sampling.strategy} sampling, TU masking mode={self.design_conf.tu_masking.mode.value}"
         )
         self._dmanager = DesignManager(
             targets=self.targets,
@@ -259,7 +259,8 @@ class DesignProgram(BaseOptimizationProgram):
         )
         if self.design_conf.enable_tu_masking:
             n_networks = len(self._dmanager.networks)
-            logger.info(f"TU masking enabled: {self._dmanager.n_tus} TUs × {n_networks} networks")
+            mode = self.design_conf.tu_masking.mode.value
+            logger.info(f"TU masking ({mode}): {self._dmanager.n_tus} TUs × {n_networks} networks")
 
     def _get_logger_context(self) -> dict:
         context = super()._get_logger_context()
@@ -984,7 +985,9 @@ class DesignProgram(BaseOptimizationProgram):
                             bparams = design.get('params')
                             net_id = design.get('network_id', 0)
                             assert stack is not None, "stack required for committed network display"
-                            assert bparams is not None, "params required for committed network display"
+                            assert bparams is not None, (
+                                "params required for committed network display"
+                            )
                             format_committed_network_params_rich(
                                 committed_net, stack, bparams, net_id, console
                             )

@@ -322,9 +322,10 @@ def _w_parse_xp_file(args: Tuple[str, str]) -> Tuple[str, Optional[md.Experiment
     xp_dir, base_dir = Path(xp_dir_s), Path(base_dir_s)
     xp_meta_file = xp_dir / 'experiment.json5'
 
-    get_rel_path = lambda p, base: (
-        p.relative_to(base).as_posix() if p.is_relative_to(base) else p.as_posix()
-    )
+    def get_rel_path(p, base):
+        return (
+            p.relative_to(base).as_posix() if p.is_relative_to(base) else p.as_posix()
+        )
 
     if not xp_meta_file.exists():
         return xp_dir.name, None
@@ -391,13 +392,14 @@ def _core_proc_df(df_path: Path, base_dir: Path, xp_name: str) -> ProcessDatafil
 
 def _extract_file_meta(file_path: Path) -> dict:
     meta = {}
-    fmt = lambda v: (
-        [str(i) for i in v]
-        if isinstance(v, pikepdf.Array)
-        else str(v)
-        if isinstance(v, pikepdf.String)
-        else v
-    )
+    def fmt(v):
+        return (
+            [str(i) for i in v]
+            if isinstance(v, pikepdf.Array)
+            else str(v)
+            if isinstance(v, pikepdf.String)
+            else v
+        )
     try:
         if file_path.suffix.lower() == '.pdf':
             with pikepdf.open(file_path) as pdf:

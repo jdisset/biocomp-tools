@@ -41,7 +41,7 @@ def get_package_git_hashes(package_names: list[str]) -> dict[str, Optional[str]]
                 else:
                     results[package_name] = None
 
-        except Exception as e:
+        except Exception:
             results[package_name] = None
 
     return results
@@ -1061,9 +1061,9 @@ class NGramMix:
         self.prob_dicts = []
         self.n = []
 
-        for indices, values in zip(self.indices, self.values):
+        for indices, values in zip(self.indices, self.values, strict=True):
             ddict = defaultdict(lambda: np.zeros(VSIZE, dtype=np.float64))
-            for idx, val in zip(indices.T, values):
+            for idx, val in zip(indices.T, values, strict=True):
                 ddict[tuple(idx[:-1])][idx[-1]] = val
 
             plaindict = {k: v / np.sum(v) for k, v in ddict.items()}
@@ -1074,7 +1074,7 @@ class NGramMix:
     def __call__(self, ctx):
         probs = np.zeros(VSIZE, dtype=np.float64)
 
-        for n, c, d in zip(self.n, self.coefs, self.prob_dicts):
+        for n, c, d in zip(self.n, self.coefs, self.prob_dicts, strict=True):
             if len(ctx) < n - 1:
                 continue
             probs += c * d.get(tuple(ctx[-n + 1 :]), 0)

@@ -3,7 +3,6 @@
 import pytest
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 
 from jeanplot import jstyle
 from jeanplot.core.renderer.matplotlib import MatplotlibRenderer
@@ -204,7 +203,6 @@ class TestNetworkDiagramText:
             result = self.measure_diagram_text(network, name)
             results.append(result)
 
-        expected_ratio = 7 / 18
 
         ratios = [r['text_to_node_ratio'] for r in results if 'text_to_node_ratio' in r]
         if ratios:

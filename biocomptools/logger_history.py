@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import dill

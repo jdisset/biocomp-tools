@@ -3,14 +3,10 @@
 from biocomptools.toollib.loggers.base_metrics_logger import BaseMetricsLogger
 from biocomptools.toollib.loggers.metrics_models import ReplicateMetrics, NetworkDataPairMetrics
 from biocomptools.logging_config import get_logger
-from biocomptools.run_training import TrainingProgram
 from biocomp.datautils import DataManager
 import numpy as np
-from pathlib import Path
 from typing import List, Tuple, Callable, Optional, Dict, Any
-from rich.console import Console
 from rich.table import Table
-import time
 
 logger = get_logger(__name__)
 
@@ -75,7 +71,7 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
             # compute overall metrics
             mse = float(np.mean((y_rep - yhat_rep) ** 2))
             rmse = float(np.sqrt(mse))
-            
+
             # Debug logging to trace data values
             logger.info(f"Rep {rep_idx}: DetailedTraining - y_rep stats: mean={y_rep.mean():.6f}, std={y_rep.std():.6f}, shape={y_rep.shape}")
             logger.info(f"Rep {rep_idx}: DetailedTraining - yhat_rep stats: mean={yhat_rep.mean():.6f}, std={yhat_rep.std():.6f}")
@@ -191,12 +187,12 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
             per_net_yhat = np.split(yhat, slice_at_y, axis=1)
 
             # Compute metrics for each network
-            for i, (net_y, net_yhat, network) in enumerate(zip(per_net_y, per_net_yhat, networks)):
+            for i, (net_y, net_yhat, network) in enumerate(zip(per_net_y, per_net_yhat, networks, strict=True)):
                 if net_y.size > 0:  # Only compute if there's data
                     mse = np.mean((net_y - net_yhat) ** 2)
                     rmse = np.sqrt(mse)
                     network_name = network.name
-                    
+
                     # Debug logging for per-network
                     if i == 0:  # Log first network
                         logger.info(f"DetailedTraining Per-Network {network_name} - net_y stats: mean={net_y.mean():.6f}, std={net_y.std():.6f}, shape={net_y.shape}")

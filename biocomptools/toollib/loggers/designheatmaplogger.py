@@ -10,7 +10,6 @@ from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
 from biocomp.designutils import (
     side_by_side_txt_plot,
-    LOSS_ORDER,
     build_design_stack,
 )
 

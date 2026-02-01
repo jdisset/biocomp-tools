@@ -39,6 +39,7 @@ from biocomp.design import (
 from biocomp.designloss import HYPEROPT_SCHEDULE_NAMESPACE
 from biocomp.recipe import Recipe
 from biocomp.tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
+from biocomp.tumasking_strategy import get_full_log_alpha
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, compile_step
 from biocomp.parameters import ParameterTree
 
@@ -140,6 +141,7 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
     _ratio_paths: list | None = None
     _total_steps: int | None = None
     _design_conf: Any = None
+    _tu_masking_strategy: Any = None
 
     def model_post_init(self, _):
         if isinstance(self.targets, TargetUnion):
@@ -223,7 +225,9 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
 
         Also prepopulates non-optimized params from loss_fn_defaults as constants.
         """
-        assert self.hyperparams, "hyperparams must be set before calling _prepopulate_hyperopt_schedules"
+        assert self.hyperparams, (
+            "hyperparams must be set before calling _prepopulate_hyperopt_schedules"
+        )
         ns = HYPEROPT_SCHEDULE_NAMESPACE
         shape = (n_replicates, n_targets)
 
@@ -235,11 +239,26 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
             # This ensures the params tree structure is complete before JIT
             for suffix in SCHEDULE_SUFFIXES:
                 path = f"{ns}/{sched_name}{suffix}"
-                params.at(path, jnp.zeros(shape, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+                params.at(
+                    path,
+                    jnp.zeros(shape, dtype=jnp.float32),
+                    tags=["non_grad", "hyperopt"],
+                    overwrite=True,
+                )
 
             # Also prepopulate phase fractions
-            params.at(f"{ns}/{sched_name}_phase1_frac", jnp.full(shape, 0.4, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
-            params.at(f"{ns}/{sched_name}_phase2_frac", jnp.full(shape, 0.75, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+            params.at(
+                f"{ns}/{sched_name}_phase1_frac",
+                jnp.full(shape, 0.4, dtype=jnp.float32),
+                tags=["non_grad", "hyperopt"],
+                overwrite=True,
+            )
+            params.at(
+                f"{ns}/{sched_name}_phase2_frac",
+                jnp.full(shape, 0.75, dtype=jnp.float32),
+                tags=["non_grad", "hyperopt"],
+                overwrite=True,
+            )
 
         # Also prepopulate non-optimized params from loss function defaults as constants
         # This prevents "schedule not found" warnings for params we intentionally don't optimize
@@ -250,12 +269,31 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
                 val = float(default_val)
                 for suffix in SCHEDULE_SUFFIXES:
                     path = f"{ns}/{name}{suffix}"
-                    params.at(path, jnp.full(shape, val, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
-                params.at(f"{ns}/{name}_phase1_frac", jnp.full(shape, 0.4, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
-                params.at(f"{ns}/{name}_phase2_frac", jnp.full(shape, 0.75, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
-            logger.debug(f"Pre-populated {len(loss_fn_defaults) - len(optimized_names)} non-optimized schedule defaults")
+                    params.at(
+                        path,
+                        jnp.full(shape, val, dtype=jnp.float32),
+                        tags=["non_grad", "hyperopt"],
+                        overwrite=True,
+                    )
+                params.at(
+                    f"{ns}/{name}_phase1_frac",
+                    jnp.full(shape, 0.4, dtype=jnp.float32),
+                    tags=["non_grad", "hyperopt"],
+                    overwrite=True,
+                )
+                params.at(
+                    f"{ns}/{name}_phase2_frac",
+                    jnp.full(shape, 0.75, dtype=jnp.float32),
+                    tags=["non_grad", "hyperopt"],
+                    overwrite=True,
+                )
+            logger.debug(
+                f"Pre-populated {len(loss_fn_defaults) - len(optimized_names)} non-optimized schedule defaults"
+            )
 
-        logger.debug(f"Pre-populated {len(schedule_info)} hyperopt schedules in params tree (shape={shape})")
+        logger.debug(
+            f"Pre-populated {len(schedule_info)} hyperopt schedules in params tree (shape={shape})"
+        )
 
     def _compile_design_step(self, dconf: DesignConfig):
         """Compile the design step function once, to be reused across trials."""
@@ -270,7 +308,9 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         stack = self._dmanager.build_stack(self._model)
         self._cached_stack = stack
 
-        n_tus = self._dmanager.n_tus if self._dmanager.enable_tu_masking else 0
+        strategy = dconf.build_tu_masking_strategy()
+        self._tu_masking_strategy = strategy
+        n_tus = self._dmanager.n_tus if strategy.has_masking else 0
         n_networks = len(self._dmanager.networks)
 
         initial_params = initialize_params(
@@ -279,10 +319,11 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
             self._dmanager.n_targets,
             self._model.shared_params,
             pkey,
+            strategy=strategy,
             n_tus=n_tus,
             n_networks=n_networks,
-            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
         )
 
         loss_fn_defaults = getattr(dconf.loss_function, 'kwargs', None) or {}
@@ -310,10 +351,13 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
                 params = normalize_ratio_source_arrays(
                     params, source_ratio_paths, normalize_ratios_prune
                 )
-            if TU_LOG_ALPHA_PATH in params:
-                params = params.update_leaves_by_path(
-                    [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
-                )
+            # Clip TU log_alpha params if strategy uses direct mode
+            if strategy.has_masking:
+                for path in strategy.param_paths:
+                    if 'log_alpha' in path and path in params:
+                        params = params.update_leaves_by_path(
+                            [path], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+                        )
             return params
 
         loss_func = dconf.loss_function.get_impl()(
@@ -402,9 +446,16 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         expanded_hp = expand_schedule_hyperparams(hp, phase1_frac, phase2_frac)
 
         def set_param(path: str, val: float) -> None:
-            assert path in params, f"Path {path} not in params - was _prepopulate_hyperopt_schedules called?"
+            assert path in params, (
+                f"Path {path} not in params - was _prepopulate_hyperopt_schedules called?"
+            )
             shape = params[path].shape
-            params.at(path, jnp.full(shape, val, dtype=jnp.float32), tags=["non_grad", "hyperopt"], overwrite=True)
+            params.at(
+                path,
+                jnp.full(shape, val, dtype=jnp.float32),
+                tags=["non_grad", "hyperopt"],
+                overwrite=True,
+            )
 
         schedule_names: set[str] = set()
         for name, value in expanded_hp.items():
@@ -430,11 +481,14 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         def apply_with_tu_mask(params, x_batch, z_batch, keys, tu_mask):
             def apply_single(x, z, k):
                 return stack.apply(params, x, z, k, tu_enabled_random_vars=tu_mask)
+
             return vmap(apply_single)(x_batch, z_batch, keys)
 
         self._cached_eval_fn = jax.jit(apply_with_tu_mask)
         self._eval_dep_mask = stack.get_dependent_output_mask()
-        self._eval_num_z = int(self._static_params["global/number_of_random_variables"][0, 0].squeeze())
+        self._eval_num_z = int(
+            self._static_params["global/number_of_random_variables"][0, 0].squeeze()
+        )
         logger.debug("Evaluation function pre-compiled")
 
     def _evaluate_cached(
@@ -455,7 +509,7 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         x_combined = xraw.transpose(1, 2, 3, 0, 4).reshape(n_replicates, n_samples, n_targets, -1)
         y_combined = yraw[0]
 
-        has_tu_masking = TU_LOG_ALPHA_PATH in final_params
+        has_tu_masking = self._tu_masking_strategy.has_masking
         all_losses = []
 
         for rep_idx in range(n_replicates):
@@ -466,8 +520,8 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
                 y_slice = y_combined[rep_idx, :, tid, :]
 
                 if has_tu_masking:
-                    tu_log_alpha = rep_params[TU_LOG_ALPHA_PATH]
-                    tu_mask = jax.nn.sigmoid(tu_log_alpha)
+                    log_alpha = get_full_log_alpha(rep_params)
+                    tu_mask = jax.nn.sigmoid(log_alpha) if log_alpha is not None else None
                 else:
                     tu_mask = None
 
@@ -484,7 +538,9 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
                     )
                     yhats.append(yhat)
 
-                yhat_dep = jnp.compress(self._eval_dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
+                yhat_dep = jnp.compress(
+                    self._eval_dep_mask, jnp.concatenate(yhats, axis=0), axis=-1
+                )
                 rep_losses.append(
                     jnp.mean((yhat_dep - jnp.tile(y_slice, (1, n_networks))) ** 2, axis=0).tolist()
                 )
@@ -506,15 +562,18 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
             params = deepcopy(self._initial_params)
             self._inject_hyperparams(params, hp)
 
-            if TU_LOG_ALPHA_PATH in params and (
-                'tu_log_alpha_init_mean' in hp or 'tu_log_alpha_init_std' in hp
+            # Re-initialize TU params if hyperparams specify different init values
+            if self._tu_masking_strategy.has_masking and (
+                'tu_init_mean' in hp or 'tu_init_std' in hp
             ):
-                mean = hp.get('tu_log_alpha_init_mean', dconf.tu_log_alpha_init_mean)
-                std = hp.get('tu_log_alpha_init_std', dconf.tu_log_alpha_init_std)
-                old_shape = params[TU_LOG_ALPHA_PATH].shape
-                new_log_alpha = mean + std * jax.random.normal(tu_key, shape=old_shape)
-                new_log_alpha = jnp.clip(new_log_alpha, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
-                params.at(TU_LOG_ALPHA_PATH, new_log_alpha, overwrite=True)
+                mean = hp.get('tu_init_mean', dconf.tu_masking.init_mean)
+                std = hp.get('tu_init_std', dconf.tu_masking.init_std)
+                # Only handle direct log_alpha mode - other modes have more complex init
+                if TU_LOG_ALPHA_PATH in params:
+                    old_shape = params[TU_LOG_ALPHA_PATH].shape
+                    new_log_alpha = mean + std * jax.random.normal(tu_key, shape=old_shape)
+                    new_log_alpha = jnp.clip(new_log_alpha, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+                    params.at(TU_LOG_ALPHA_PATH, new_log_alpha, overwrite=True)
 
             static, dynamic = params.filter_by_tag(["non_grad", "shared"])
             opt_state = vmap(vmap(dconf.optimizer.init))(dynamic)

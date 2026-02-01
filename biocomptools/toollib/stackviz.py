@@ -1,7 +1,13 @@
-from jinja2 import Template
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Callable, List, Optional
 import json
-from typing import Callable, List, Optional
+
+from jinja2 import Template
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from biocomp.compute import ComputeStack
 
 
 class StackVisualizerConfig(BaseModel):
@@ -241,7 +247,7 @@ _HTML_TEMPLATE = """
             margin: 0;
             padding: 20px;
         }
-        
+
         .tooltip {
             position: absolute;
             padding: 8px;
@@ -252,18 +258,18 @@ _HTML_TEMPLATE = """
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             z-index: 1000;
         }
-        
+
         .layer-label {
             font-size: 12px;
             dominant-baseline: middle;
         }
-        
+
         .title {
             font-size: 18px;
             font-weight: bold;
             margin-bottom: 10px;
         }
-        
+
         .description {
             font-size: 14px;
             color: #666;
@@ -282,41 +288,41 @@ _HTML_TEMPLATE = """
 </head>
 <body>
     <div id="visualization"></div>
-    
+
     <script>
         // Visualization data
         const vizData = {{ viz_data | safe }};
-        
+
         // Calculate dimensions
         const maxNodesInLayer = Math.max(...vizData.layers.map(l => l.nodeCount));
         const width = vizData.config.uniformLayerWidth
             ? vizData.config.leftMargin + maxNodesInLayer * vizData.config.nodeSpacing + vizData.config.rightMargin
             : vizData.config.leftMargin + Math.max(...vizData.layers.map(l => l.nodeCount * vizData.config.nodeSpacing)) + vizData.config.rightMargin;
         const height = vizData.layers.length * (vizData.config.layerHeight + vizData.config.layerSpacing);
-        
+
         // Create SVG
         const svg = d3.select("#visualization")
             .append("svg")
             .attr("width", width)
             .attr("height", height + 100); // Extra space for title
-            
+
         // Add title and description
         svg.append("text")
             .attr("class", "title")
             .attr("x", vizData.config.leftMargin)
             .attr("y", 30)
             .text(`Compute Stack Visualization`);
-            
+
         svg.append("text")
             .attr("class", "description")
             .attr("x", vizData.config.leftMargin)
             .attr("y", 50)
             .text(`${vizData.summary.totalNetworks} Networks, ${vizData.summary.totalLayers} Layers, ${vizData.summary.totalNodes} Nodes`);
-            
+
         // Create main group and move it down to make room for title
         const mainGroup = svg.append("g")
             .attr("transform", "translate(0, 80)");
-            
+
         // Define arrow marker
         mainGroup.append("defs").append("marker")
             .attr("id", "arrowhead")
@@ -329,14 +335,14 @@ _HTML_TEMPLATE = """
             .append("path")
             .attr("d", "M0,-5L10,0L0,5")
             .attr("fill", vizData.config.arrowColor);
-            
+
         // Helper function to get node position
         function getNodePosition(node) {
             const layer = vizData.layers[node.layerId];
             const layerWidth = vizData.config.uniformLayerWidth
                 ? maxNodesInLayer * vizData.config.nodeSpacing
                 : layer.nodeCount * vizData.config.nodeSpacing;
-            
+
             return {
                 x: vizData.config.leftMargin + (layerWidth / (layer.nodeCount + 1)) * (node.localId + 1),
                 y: node.layerId * (vizData.config.layerHeight + vizData.config.layerSpacing) + vizData.config.layerHeight / 2
@@ -347,23 +353,23 @@ _HTML_TEMPLATE = """
         function calculateEdgeAngles(node) {
             const outgoingEdges = vizData.edges.filter(e => e.source === node.id);
             const incomingEdges = vizData.edges.filter(e => e.target === node.id);
-            
+
             // Calculate angles for outgoing edges
             outgoingEdges.forEach((edge, i) => {
                 const angleDelta = vizData.config.edgeAngleCone / (outgoingEdges.length + 1);
                 edge.sourceAngle = -vizData.config.edgeAngleCone/2 + angleDelta * (i + 1);
             });
-            
+
             // Calculate angles for incoming edges
             incomingEdges.forEach((edge, i) => {
                 const angleDelta = vizData.config.edgeAngleCone / (incomingEdges.length + 1);
                 edge.targetAngle = -vizData.config.edgeAngleCone/2 + angleDelta * (i + 1);
             });
         }
-        
+
         // Calculate edge angles for all nodes
         vizData.nodes.forEach(calculateEdgeAngles);
-        
+
         // Create layers
         mainGroup.selectAll(".layer")
             .data(vizData.layers)
@@ -380,7 +386,7 @@ _HTML_TEMPLATE = """
             .attr("fill", (d, i) => vizData.config.layerColors[i % vizData.config.layerColors.length])
             .attr("opacity", 0.3)
             .attr("stroke", "black");
-            
+
         // Add layer labels
         mainGroup.selectAll(".layer-label")
             .data(vizData.layers)
@@ -405,7 +411,7 @@ _HTML_TEMPLATE = """
                     .attr("dy", "1.2em")
                     .style("font-size", "10px");
             });
-            
+
         // Create edges with distributed angles
         const edgeGroup = mainGroup.append("g").attr("class", "edges");
         const edges = edgeGroup.selectAll(".edge")
@@ -420,29 +426,29 @@ _HTML_TEMPLATE = """
             .attr("d", d => {
                 const source = getNodePosition(vizData.nodes.find(n => n.id === d.source));
                 const target = getNodePosition(vizData.nodes.find(n => n.id === d.target));
-                
+
                 // Use the pre-calculated angles for a more even distribution
                 const sourceAngle = d.sourceAngle || 0;
                 const targetAngle = d.targetAngle || 0;
-                
+
                 // Calculate control points using the angles
                 const dx = target.x - source.x;
                 const dy = target.y - source.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
-                
+
                 const cp1 = {
                     x: source.x + Math.sin(sourceAngle) * vizData.config.edgeControlOffset,
                     y: source.y + Math.cos(sourceAngle) * vizData.config.edgeControlOffset
                 };
-                
+
                 const cp2 = {
                     x: target.x + Math.sin(targetAngle) * vizData.config.edgeControlOffset,
                     y: target.y - Math.cos(targetAngle) * vizData.config.edgeControlOffset
                 };
-                
+
                 return `M${source.x},${source.y} C${cp1.x},${cp1.y} ${cp2.x},${cp2.y} ${target.x},${target.y}`;
             });
-            
+
         // Create tooltip
         const tooltip = d3.select("body")
             .append("div")
@@ -450,7 +456,7 @@ _HTML_TEMPLATE = """
             .style("opacity", 0)
             .style("background-color", vizData.config.tooltipBgColor)
             .style("border", `1px solid ${vizData.config.tooltipBorderColor}`);
-            
+
             // Create nodes with hover effects
             const nodeGroup = mainGroup.append("g").attr("class", "nodes");
             const nodes = nodeGroup.selectAll(".node")
@@ -577,16 +583,16 @@ _HTML_TEMPLATE = """
                         .duration(500)
                         .style("opacity", 0);
                 });
-                
+
             // Add zoom behavior
             const zoom = d3.zoom()
                 .scaleExtent([0.1, 4])
                 .on("zoom", (event) => {
                     mainGroup.attr("transform", event.transform);
                 });
-            
+
             svg.call(zoom);
-            
+
             // Center the visualization initially
             const initialScale = 0.9;
             const initialX = (width - width * initialScale) / 2;

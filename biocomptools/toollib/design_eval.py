@@ -4,6 +4,7 @@ Single source of truth for all design evaluation. All networks are batched into
 ONE NetworkModel to avoid repeated JIT compilation (~25s savings per batch).
 """
 
+import warnings
 import numpy as np
 import time
 import traceback
@@ -64,10 +65,11 @@ class EvaluatedDesign:
 class DesignEvaluator:
     """Batched design evaluation - single source of truth for predictions and NRE."""
 
-    def __init__(self, model: Any, max_evals: int = 50000):
+    def __init__(self, model: Any, max_evals: int = 50000, fail_fast: bool = False):
         assert model is not None, "model required for evaluation"
         self.model = model
         self.max_evals = max_evals
+        self.fail_fast = fail_fast
 
     def evaluate_designs(self, inputs: list[DesignInput]) -> list[EvaluatedDesign]:
         """Evaluate all designs in ONE batched call. Returns fully populated results."""
@@ -86,6 +88,8 @@ class DesignEvaluator:
         try:
             precomputed, baseline_cache = self._batch_compute(valid_inputs)
         except Exception as e:
+            if self.fail_fast:
+                raise
             logger.warning(f"Batch compute failed ({e}), falling back to one-by-one evaluation")
             precomputed, baseline_cache, failed_indices = self._batch_compute_safe(valid_inputs)
             invalid_indices.update(failed_indices)
@@ -428,6 +432,11 @@ def precompute_for_design_results(
     model: Any, design_results: list[dict], max_evals: int = 50000
 ) -> tuple[dict[tuple, dict], dict[int, float | None]]:
     """Legacy function - use DesignEvaluator.evaluate_designs() instead."""
+    warnings.warn(
+        "precompute_for_design_results() is deprecated, use DesignEvaluator.evaluate_designs()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     evaluator = DesignEvaluator(model, max_evals)
 
     inputs = [

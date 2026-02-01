@@ -108,7 +108,7 @@ class InnerNodesFigure(Figure):
             v: Any = self.model.shared_params
             for k in path.split('/'):
                 v = v[k]
-            return {n: float(x[0]) for n, x in zip(names, v)}
+            return {n: float(x[0]) for n, x in zip(names, v, strict=True)}
         except (KeyError, IndexError, TypeError):
             return {}
 
@@ -456,7 +456,7 @@ class InnerNodesFigure(Figure):
         axes = sf.subplots(1, ne + 1, width_ratios=[1] * ne + [0.05], gridspec_kw={'wspace': 0.3})
         outs = [self._eval(n, gi) for n in nodes[:ne]]
         vmin, vmax = min(o.min() for o in outs), max(o.max() for o in outs)
-        for i, (n, o) in enumerate(zip(nodes[:ne], outs)):
+        for i, (n, o) in enumerate(zip(nodes[:ne], outs, strict=True)):
             im = axes[i].imshow(
                 o.reshape(100, 100),
                 extent=[x[0], x[-1], x[0], x[-1]],
@@ -654,7 +654,7 @@ class InnerNodesFigure(Figure):
             "fwd": lambda s, d: self._fwd_row(s, *d),
             "inv": lambda s, d: self._inv_row(s, *d),
         }
-        for sf, (rt, d) in zip(sfs, rows):
+        for sf, (rt, d) in zip(sfs, rows, strict=True):
             fns[rt](sf, d)
         fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.05)
         return fig

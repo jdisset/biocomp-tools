@@ -10,16 +10,11 @@ the exact scenario users encounter.
 import os
 import pytest
 import numpy as np
-import jax
-import jax.numpy as jnp
-from jax import random
 from pathlib import Path
 
 import dracon as dr
 from biocomp.design import DesignManager, DesignConfig, start
 from biocomp.design_targets import SVGTarget, LatticeSampling
-from biocomp.compute import ComputeStack
-from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.jaxutils import tree_get
 from biocomp.recipe import Recipe
 
@@ -225,7 +220,7 @@ def test_logged_yhatdep_matches_committed_prediction(design_setup):
     stack = dmanager.build_stack(model, unlock_ratios=True)
 
     X_lat, Y_target = target.get_lattice(resolution=resolution, seed=0)
-    n_samples = X_lat.shape[0]
+    X_lat.shape[0]
 
     print(f"\nX_lat shape: {X_lat.shape}, Y_target shape: {Y_target.shape}")
 
@@ -257,7 +252,7 @@ def test_logged_yhatdep_matches_committed_prediction(design_setup):
     print(f"Committed prediction range: [{Y_committed.min():.4f}, {Y_committed.max():.4f}]")
 
     Y_logged = None
-    expected_shape_4d = (n_replicates, final_logged_yhatdep.shape[1], n_targets, n_networks)
+    (n_replicates, final_logged_yhatdep.shape[1], n_targets, n_networks)
 
     if final_logged_yhatdep.ndim == 4:
         print(f"yhatdep is 4D: {final_logged_yhatdep.shape}")

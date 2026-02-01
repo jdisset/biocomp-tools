@@ -3,9 +3,8 @@ import sys
 from pathlib import Path
 import json
 from typing import Any, List, Optional, Tuple, Callable, Dict
-from pydantic import Field, ConfigDict, BaseModel
+from pydantic import Field, ConfigDict
 import numpy as np
-from dracon.deferred import DeferredNode
 from biocomptools.toollib.common import config
 import time
 from biocomptools.toollib.loggers.logger import Logger
@@ -77,8 +76,8 @@ class MLflowLogger(Logger):
 
     def _sanitize_metric_name(self, name: str) -> str:
         """Sanitize metric names for MLFlow compatibility.
-        
-        MLFlow only allows: alphanumerics, underscores (_), dashes (-), 
+
+        MLFlow only allows: alphanumerics, underscores (_), dashes (-),
         periods (.), spaces ( ), colon(:) and slashes (/).
         """
         import re
@@ -167,7 +166,7 @@ class MLflowLogger(Logger):
         try:
             # Use set_experiment which handles creation automatically
             mlflow.set_experiment(training_program.experiment_name)
-            
+
             # Start the run with the same name as the training program's run
             self._active_run = mlflow.start_run(
                 run_name=training_program._run_name
@@ -185,7 +184,7 @@ class MLflowLogger(Logger):
             error_msg = f"Failed to set up MLflow experiment '{training_program.experiment_name}': {e}"
             logger.error(error_msg)
             logger.exception(e)
-            raise RuntimeError(error_msg)
+            raise RuntimeError(error_msg) from e
 
     def _log_training_config(self):
         """Log all configuration objects and metadata"""
@@ -322,7 +321,7 @@ class MLflowLogger(Logger):
                         for i, loss in enumerate(losses)
                         if not np.isnan(loss).any()
                     }
-                    valid_losses = [l for l in losses if not np.isnan(l).any()]
+                    valid_losses = [loss_arr for loss_arr in losses if not np.isnan(loss_arr).any()]
                     if valid_losses:
                         metrics["loss_min"] = float(np.min(np.concatenate(valid_losses)))
                     sanitized_metrics = self._sanitize_metrics(metrics)

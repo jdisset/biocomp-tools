@@ -15,7 +15,6 @@ from jax import random
 
 from biocomp.design import DesignManager, DesignConfig
 from biocomp.design_targets import SVGTarget
-from biocomp.compute import ComputeStack
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 
 pytestmark = pytest.mark.skipif(
@@ -73,8 +72,6 @@ def test_committed_network_matches_evaluation(design_setup):
     """
     from biocomptools.modelmodel import NetworkModel
     from biocomptools.toollib.networkprediction import NetworkPrediction
-    from biocomp.parameters import ParameterTree, load_params
-    import biocomp.biorules as br
 
     model = design_setup["model"]
     target = design_setup["target"]
@@ -91,7 +88,7 @@ def test_committed_network_matches_evaluation(design_setup):
         networks=[network],
         grid_resolution=resolution,
     )
-    dconf = DesignConfig(n_replicates=n_replicates)
+    DesignConfig(n_replicates=n_replicates)
     stack = dmanager.build_stack(model, unlock_ratios=True)
 
     key = random.PRNGKey(42)
@@ -180,8 +177,6 @@ def test_committed_network_matches_evaluation(design_setup):
 
 def test_committed_ratios_preserved(design_setup):
     """Verify that ratios are correctly transferred during commit."""
-    from biocomp.parameters import ParameterTree
-    import biocomp.biorules as br
 
     model = design_setup["model"]
     target = design_setup["target"]

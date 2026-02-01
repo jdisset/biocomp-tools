@@ -1,13 +1,10 @@
 ## {{{                          --     imports     --
-import os
 
 # set BCTOOLS_DEBUG to 1 to enable debug logging
 # os.environ.setdefault('BCTOOLS_DEBUG', '1')
 
 from biocomptools.logging_config import get_logger, setup_logging
-import biocomp.utils as ut
 from biocomp.network import generate_network_info
-from biocomptools.modelmodel import BiocompModel
 from typing import TypeVar
 import pandas as pd
 from rich.console import Console
@@ -15,37 +12,24 @@ from rich.panel import Panel
 from rich.console import Group
 from rich.text import Text
 from rich.align import Align
-from rich.layout import Layout
 from pathlib import Path
 from dracon.deferred import DeferredNode
 from typing import Optional, Annotated
-from pydantic import Field, BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict
 from biocomptools.toollib.common import config, make_context_from_types
 from dracon.commandline import make_program, Arg
 import sys
-from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
 
-from biocomptools.toollib.datasources import DataSource, DBSource
 from biocomp.library import PartsLibrary
 
 from sqlmodel import Session
-from biocomp.utils import PartialFunction
 
 from biocomp.library import load_lib
 
 from biocomptools.toollib.networkselector import (
     build_data_manager,
-    NetworkSelector,
-    Regex,
     NetworkDataPair,
-    NetworkSetUnion,
-    NetworkSetIntersection,
-    NetworkSetDifference,
-    NetworkFilter,
     NetworkSet,
-    UorfFilter,
 )
 
 from biocomptools.plot import DEFAULT_TYPES
@@ -122,7 +106,7 @@ def pretty_print_networks(training_dman):
             'datafile': network.metadata.get('data_file', ''),
             "info": generate_network_info(network),
         }
-        for data, network in zip(raw_X, networks)
+        for data, network in zip(raw_X, networks, strict=True)
     ]
     df = pd.DataFrame(data)
     console = Console()

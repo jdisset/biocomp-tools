@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 class PartsDBUpdater(BaseModel):
     """Update biocomp parts database with Google Sheets data."""
-    
+
     db_url: Annotated[Optional[str], Arg(help="Database URL. If not provided, uses default location.")] = None
     dry_run: Annotated[bool, Arg(help="Fetch sheets but don't update database")] = False
     google_app_credentials: Annotated[str, Arg(help="Path to Google application credentials")] = Field(
@@ -33,7 +33,7 @@ class PartsDBUpdater(BaseModel):
     sheet_key: Annotated[str, Arg(help="Google Sheets key")] = Field(
         default_factory=lambda: cm.config.db.gsheet.parts_sheet_key
     )
-    
+
     @model_validator(mode='after')
     def setup_db_url(self) -> 'PartsDBUpdater':
         """Set up default database URL if not provided."""
@@ -42,7 +42,7 @@ class PartsDBUpdater(BaseModel):
                 root = Path(cm.config.paths.root).expanduser().resolve()
                 db_path = root / 'partsdb.sqlite'
                 self.db_url = f'sqlite:///{db_path}'
-                logger.info(f"Database URL not provided. Using default location:")
+                logger.info("Database URL not provided. Using default location:")
                 logger.info(f"  Root directory: {root}")
                 logger.info(f"  Database file: {db_path}")
                 logger.info(f"  Database URL: {self.db_url}")
@@ -82,7 +82,7 @@ class PartsDBUpdater(BaseModel):
         try:
             logger.info("Establishing connection to Google Sheets API")
             gspread_client = gspread.service_account(filename=self.google_app_credentials)
-            connection_time = time.time() - start_time
+            time.time() - start_time
 
             try:
                 logger.info(f"Opening workbook with key: {self.sheet_key}")

@@ -1,17 +1,14 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, and_, or_
+from pydantic import BaseModel, field_validator, model_validator
+from sqlalchemy import and_
 from sqlalchemy.orm import selectinload
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import with_loader_criteria
 from sqlmodel import select, Session, col
-from typing import Any, Dict, List, Optional, Union, Literal, Tuple
+from typing import Any, Dict, List, Optional, Union, Literal
 from enum import Enum
 from itertools import groupby
-from operator import attrgetter
 from biocomptools.toollib.models import (
     TrainedModel,
     NetworkDataPair,
-    TrainingSetLink,
     DataSet,
     DataSetNetworkDataPair,
     Metric,
@@ -584,7 +581,7 @@ class ModelSet(BaseModel):
                 logger.debug(f"Found {len(models)} matching models")
             elif isinstance(item, ModelSet):
                 # recursively run selectors on nested ModelSets
-                logger.debug(f"Running nested ModelSet")
+                logger.debug("Running nested ModelSet")
                 item.run_selectors(sess)
                 for model in item.content:
                     if model.name not in seen_models:

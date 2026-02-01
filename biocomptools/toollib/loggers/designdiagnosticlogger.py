@@ -486,7 +486,6 @@ class DesignDiagnosticLogger(Logger):
         'spread_penalty',
         'coupling_penalty',
         'ern_tying_penalty',
-        'tu_temperature',
     ]
     required_arrays: list[str] = ['yhatdep', 'X', 'Y', 'params', 'latest_params', 'grad']
 
@@ -531,8 +530,8 @@ class DesignDiagnosticLogger(Logger):
                 self._dmanager = training_program._dmanager
                 if hasattr(self._dmanager, 'grid_resolution') and self._dmanager.grid_resolution:
                     self._grid_resolution = self._dmanager.grid_resolution
-                if hasattr(self._dmanager, '_tu_id_to_idx') and self._dmanager._tu_id_to_idx:
-                    self._tu_idx_to_id = {v: k for k, v in self._dmanager._tu_id_to_idx.items()}
+                if hasattr(self._dmanager, 'tu_id_to_idx') and self._dmanager.tu_id_to_idx:
+                    self._tu_idx_to_id = {v: k for k, v in self._dmanager.tu_id_to_idx.items()}
             if hasattr(training_program, 'design_conf'):
                 self._design_config = training_program.design_conf
                 if hasattr(self._design_config, 'n_epochs') and hasattr(
@@ -754,7 +753,6 @@ class DesignDiagnosticLogger(Logger):
             if val is not None:
                 metrics[pname] = _to_scalar(val)
 
-        metrics["tu_temperature"] = _to_scalar(step_history.get("tu_temperature"))
         return metrics
 
     def _append_to_history(self, target_id: int, network_id: int, metrics: dict):
@@ -1117,7 +1115,6 @@ class DesignDiagnosticLogger(Logger):
             "tu_max_log_alpha",
             "tu_min_log_alpha",
             "tu_std_log_alpha",
-            "tu_temperature",
         ]
         pred_keys = ["pred_mean", "pred_std", "pred_min", "pred_max"]
         penalty_keys = [
@@ -1203,7 +1200,7 @@ class DesignDiagnosticLogger(Logger):
             if isinstance(val, dict):
                 for k, v in val.items():
                     summary[f"{key}.{k}"] = _to_scalar(v)
-        for pname in ["l0_penalty", "spread_penalty", "coupling_penalty", "tu_temperature"]:
+        for pname in ["l0_penalty", "spread_penalty", "coupling_penalty"]:
             val = step_history.get(pname)
             if val is not None:
                 summary[pname] = _to_scalar(val)

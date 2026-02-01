@@ -10,7 +10,6 @@ Critical verification points:
 """
 
 import pytest
-import jax.numpy as jnp
 import optuna
 
 from biocomptools.hyperopt.base import (
@@ -21,7 +20,6 @@ from biocomptools.hyperopt.base import (
 )
 from biocomp.parameters import ParameterTree
 from biocomp.designloss import (
-    normalize_schedule_spec,
     init_schedule_params,
     _get_schedule_value,
     HYPEROPT_SCHEDULE_NAMESPACE,

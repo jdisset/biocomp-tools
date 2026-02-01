@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, model_validator, BeforeValidator, Field
+from pydantic import BaseModel, ConfigDict, BeforeValidator, Field
 from dracon.utils import ser_debug
 from typing import Optional, List, Union, Tuple, Callable, Type, TypeVar, Literal
 import numpy as np
@@ -9,10 +9,8 @@ import xxhash
 from typing import Annotated
 import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
-import biocomptools.toollib.models as md
 import biocomp.parameters as pr
 from biocomptools.logging_config import get_logger
-from biocomptools.toollib.common import config
 from dracon.utils import dict_like
 from biocomp.library import load_lib
 from biocomp.utils import ArbitraryModel
@@ -265,8 +263,6 @@ class NetworkModel(BaseModel):
         """build compute stack from networks"""
         try:
             import jax
-            import jax.numpy as jnp
-            from time import time
 
             self._stack = cmp.ComputeStack(networks=self.network)
             self._stack.build(self.model.compute_config)

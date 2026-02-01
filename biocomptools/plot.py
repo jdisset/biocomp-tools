@@ -28,7 +28,6 @@ from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
-from biocomptools.toollib.pickle_utils import convert_jax_to_numpy_inplace, detach_lazy_plot_data
 from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
     UORFMatrixFigure,
     bundle_uorf_data,
@@ -463,6 +462,7 @@ class PlotJob(BaseModel):
                             sequential_figs,
                             desc=f'Sequential figures in batch {batch_idx}/{num_batches}',
                         ),
+                        strict=True,
                     ):
                         results[i] = run_figure(fig, overwrite=overwrite)
 

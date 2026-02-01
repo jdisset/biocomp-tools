@@ -3,7 +3,6 @@ from tqdm import tqdm
 from pathlib import Path
 
 # using base58 instead of base64 because it's url-safe
-import base58
 
 from dracon.lazy import resolve_all_lazy
 
@@ -13,7 +12,6 @@ from typing import (
     Tuple,
     Dict,
     TypeVar,
-    Optional,
 )
 
 import logging

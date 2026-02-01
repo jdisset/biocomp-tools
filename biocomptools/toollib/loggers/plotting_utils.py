@@ -337,7 +337,7 @@ def _plot_nrmse_bars(
 
     # Add value labels on bars
     for bars, values in all_bars:
-        for bar, val in zip(bars, values):
+        for bar, val in zip(bars, values, strict=True):
             if not np.isnan(val):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
@@ -360,7 +360,7 @@ def _plot_nrmse_bars(
     STAGGER_OFFSET = 0.07
 
     trans = blended_transform_factory(ax.transData, ax.transAxes)
-    for idx, (pos, group_name) in enumerate(zip(group_positions, groups_to_plot)):
+    for idx, (pos, group_name) in enumerate(zip(group_positions, groups_to_plot, strict=True)):
         stag_level = idx % N_STAGGER_LEVELS
         y_offset_ax = -STAGGER_OFFSET * (stag_level + 1)
         TSIZE = 6
@@ -678,7 +678,7 @@ def _plot_rmse_bars(
     # Add value labels on bars
     if show_values:
         for bars, values in all_bars:
-            for bar, val in zip(bars, values):
+            for bar, val in zip(bars, values, strict=True):
                 if not np.isnan(val):
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
@@ -701,7 +701,7 @@ def _plot_rmse_bars(
     STAGGER_OFFSET = 0.07
 
     trans = blended_transform_factory(ax.transData, ax.transAxes)
-    for idx, (pos, group_name) in enumerate(zip(group_positions, groups_to_plot)):
+    for idx, (pos, group_name) in enumerate(zip(group_positions, groups_to_plot, strict=True)):
         stag_level = idx % N_STAGGER_LEVELS
         y_offset_ax = -STAGGER_OFFSET * (stag_level + 1)
         TSIZE = 6

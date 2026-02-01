@@ -7,27 +7,22 @@ TRAINING_OUTPUT_PATH = CURRENT_DIR / '__training_output'
 os.environ['BIOCOMP_TRAINING_OUTPUT_PATH'] = str(TRAINING_OUTPUT_PATH)
 os.environ['BIOCOMP_CACHE_DIR'] = str(CURRENT_DIR / '__temp_cache')
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
 # print current backend for matplotlib:
 print("Current matplotlib backend:", plt.get_backend())
 
-import time
-import json
-from biocomptools.toollib.networkselector import CleanupFilter, build_data_manager
-from biocomp.library import load_lib
-import biocomptools.toollib.models as md
-from biocomptools.toollib.common import config
-from biocomptools.run_training import TrainingProgram
-from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES
-from sqlmodel import Session
-from biocomp.train import generate_batches, start
-from biocomp.train import TrainingConfig, init_stack
-from biocomp.datautils import DataManager
-import biocomp.datautils as du
-import biocomp as bc
-import jax
-import dracon as dr
+from biocomptools.toollib.networkselector import CleanupFilter  # noqa: E402
+import biocomptools.toollib.models as md  # noqa: E402
+from biocomptools.run_training import TrainingProgram  # noqa: E402
+from biocomptools.optimtools import make_context_from_types, DEFAULT_TYPES  # noqa: E402
+from biocomp.train import generate_batches  # noqa: E402
+from biocomp.train import TrainingConfig  # noqa: E402
+from biocomp.datautils import DataManager  # noqa: E402
+import biocomp.datautils as du  # noqa: E402
+import biocomp as bc  # noqa: E402
+import jax  # noqa: E402
+import dracon as dr  # noqa: E402
 
 
 TEST_TRAINING_FILE = CURRENT_DIR / 'jobs/test_training.yaml'
@@ -206,7 +201,7 @@ xbatches, ybatches = generate_batches(
 #     stack.total_nb_of_outputs,
 # )
 
-ybatches.shape
+_ = ybatches.shape  # noqa: F841
 
 #
 
@@ -251,8 +246,8 @@ direct_xbatches, direct_ybatches = dman.get_batches(
     training_config.n_batches, training_config.batch_size, rng_key
 )
 cv, entropy = flatness_metrics(np.histogram(direct_xbatches.flatten(), bins=100, density=True)[0])
-entropy
-cv
+_ = entropy  # noqa: F841
+_ = cv  # noqa: F841
 
 xb, yb = dman._get_batches_numpy(n_batches, batch_size, rng_key, True)
 xb_hist = np.histogram(xb.flatten(), bins=100, density=True)
@@ -285,10 +280,10 @@ plt.show()
 
 ##
 
-I = 12
-xt = dman._X[I]
-yt = dman._Y[I]
-density = dman._densities[I]
+net_idx = 12
+xt = dman._X[net_idx]
+yt = dman._Y[net_idx]
+density = dman._densities[net_idx]
 dthreshold = 0.025
 # dthreshold = 1
 
@@ -310,14 +305,14 @@ ax.set_title('Distribution of xtj from sample_batches_jax')
 ##
 # TODO: write dman.get_dependent_output_mask()
 
-ni = dman._networks[I]
+ni = dman._networks[net_idx]
 
-ni.name
-ni.get_inverted_input_positions()
-ni.get_output_proteins()
-ni.get_dependent_output_proteins()
-ni.get_dependent_output_positions()
-ni.get_dependent_output_mask()
+_ = ni.name  # noqa: F841
+_ = ni.get_inverted_input_positions()  # noqa: F841
+_ = ni.get_output_proteins()  # noqa: F841
+_ = ni.get_dependent_output_proteins()  # noqa: F841
+_ = ni.get_dependent_output_positions()  # noqa: F841
+_ = ni.get_dependent_output_mask()  # noqa: F841
 
 all_dependent_outputs = dman.get_dependent_output_mask()
 all_dependent_outputs.mean()
