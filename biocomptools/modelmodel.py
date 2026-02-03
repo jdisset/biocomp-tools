@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, ConfigDict, BeforeValidator, Field
 from dracon.utils import ser_debug
-from typing import Optional, List, Union, Tuple, Callable, Type, TypeVar, Literal
+from typing import Callable, TypeVar, Literal, Annotated
 import numpy as np
 from pathlib import Path
 import pickle
 import biocomp as bc
 import xxhash
-from typing import Annotated
 import biocomp.compute as cmp
 from biocomp.datautils import DataRescaler
 import biocomp.parameters as pr
@@ -86,7 +87,7 @@ class NodeSpec(BaseModel):
 
     network_id: int
     node_id: int
-    extra_info: Optional[dict] = None
+    extra_info: dict[str, object] | None = None
 
 
 M = TypeVar('M', bound='BiocompModel')
@@ -153,7 +154,7 @@ class BiocompModel(ArbitraryModel):
             logger.info(f"Saved {self.__class__.__name__} to {filename}")
 
     @classmethod
-    def load_h5(cls: Type[M], filename: str) -> M:
+    def load_h5(cls: type[M], filename: str) -> M:
         """Loads a BiocompModel from an HDF5 file."""
         import h5py
         import json
@@ -225,11 +226,11 @@ class NetworkModel(BaseModel):
 
     max_points_per_batch: int = 10000
 
-    _stack: Optional[cmp.ComputeStack] = None
-    _params: Optional[pr.ParameterTree] = None
-    _batch_apply: Optional[Callable] = None
-    _batch_apply_cpu: Optional[Callable] = None
-    _batch_apply_gpu: Optional[Callable] = None
+    _stack: cmp.ComputeStack | None = None
+    _params: pr.ParameterTree | None = None
+    _batch_apply: Callable[..., object] | None = None
+    _batch_apply_cpu: Callable[..., object] | None = None
+    _batch_apply_gpu: Callable[..., object] | None = None
 
     def model_post_init(self, *args, **kwargs):
         """initialize model after validation"""
@@ -455,16 +456,16 @@ class NetworkModel(BaseModel):
     def predict_unscaled(
         self,
         X: np.ndarray,
-        key=None,
-        max_points_per_batch=None,
+        key: object = None,
+        max_points_per_batch: int | None = None,
         disable_variational: bool = True,
-        z_value: Union[str, float] = 'uniform',
-        with_shared_params: Optional[pr.ParameterTree] = None,
-        with_local_params: Optional[pr.ParameterTree] = None,
-        collect_in_indices: Optional[np.ndarray] = None,
-        collect_out_indices: Optional[np.ndarray] = None,
+        z_value: str | float = 'uniform',
+        with_shared_params: pr.ParameterTree | None = None,
+        with_local_params: pr.ParameterTree | None = None,
+        collect_in_indices: np.ndarray | None = None,
+        collect_out_indices: np.ndarray | None = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, tuple[np.ndarray | None, np.ndarray | None]]:
         """Predict from RAW space input, returning RAW space output.
 
         This is a convenience wrapper that handles rescaling automatically:
@@ -503,16 +504,16 @@ class NetworkModel(BaseModel):
     def predict(
         self,
         X: np.ndarray,
-        key=None,
-        max_points_per_batch=None,
+        key: object = None,
+        max_points_per_batch: int | None = None,
         disable_variational: bool = True,
-        z_value: Union[str, float] = 'uniform',
-        with_shared_params: Optional[pr.ParameterTree] = None,
-        with_local_params: Optional[pr.ParameterTree] = None,
-        collect_in_indices: Optional[np.ndarray] = None,
-        collect_out_indices: Optional[np.ndarray] = None,
+        z_value: str | float = 'uniform',
+        with_shared_params: pr.ParameterTree | None = None,
+        with_local_params: pr.ParameterTree | None = None,
+        collect_in_indices: np.ndarray | None = None,
+        collect_out_indices: np.ndarray | None = None,
         device: Literal['cpu', 'gpu'] = 'cpu',
-    ):
+    ) -> tuple[np.ndarray, tuple[np.ndarray | None, np.ndarray | None]]:
         """Predict from LATENT space input, returning LATENT space output.
 
         The model internally operates in latent space (normalized 0-1 range).
@@ -668,8 +669,8 @@ class NetworkModel(BaseModel):
 
     def prepare_collection_indices(
         self,
-        collection_points: Optional[List[NodeSpec]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        collection_points: list[NodeSpec] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         prepare indices for collection points
 
@@ -698,7 +699,7 @@ class NetworkModel(BaseModel):
         )
 
     def split_outputs_per_network(
-        self, yhat: np.ndarray, max_samples: Optional[int] = None
+        self, yhat: np.ndarray, max_samples: int | None = None
     ) -> list[np.ndarray]:
         # TODO: when we use different collection points than the regular output,
         # we can't simply split by network_output_indices. we need to figure out the

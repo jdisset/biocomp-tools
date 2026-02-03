@@ -25,7 +25,7 @@ from biocomp.design import (
     compute_baseline_loss,
     set_design_debug_output_dir,
 )
-from biocomp.designdebug import save_debug_state, is_design_debug_enabled
+from biocomp.tracing import save_debug_state, is_design_debug_enabled
 from biocomp.paramintrospect import format_committed_network_params_rich
 from biocomp.network import Network, recipe_to_networks
 from biocomp.graphengine import GraphState
@@ -369,15 +369,24 @@ class DesignProgram(BaseOptimizationProgram):
         assert self._model is not None
         logger.debug(f"Starting optimization with {len(logger_callbacks)} logger callbacks")
 
-        final_params, loss_history, step_history = start(
-            dmanager=self._dmanager,
-            dconf=self.design_conf,
-            model=self._model,
-            loggers=logger_callbacks,
-            logger_objects=logger_objects,
-            async_handler=async_handler,
-            lock_ratios=self.lock_ratios,
-        )
+        if self.design_conf.hard_pruning_enabled:
+            from biocomp.design_pruning import run_with_hard_pruning
+
+            final_params, loss_history, step_history, self._dmanager = run_with_hard_pruning(
+                self._dmanager, self.design_conf, self._model,
+                loggers=logger_callbacks, logger_objects=logger_objects,
+                async_handler=async_handler, lock_ratios=self.lock_ratios,
+            )
+        else:
+            final_params, loss_history, step_history = start(
+                dmanager=self._dmanager,
+                dconf=self.design_conf,
+                model=self._model,
+                loggers=logger_callbacks,
+                logger_objects=logger_objects,
+                async_handler=async_handler,
+                lock_ratios=self.lock_ratios,
+            )
 
         logger.info(
             f"Optimization completed. Final loss: {loss_history[-1]:.4f}"

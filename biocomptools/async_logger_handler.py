@@ -21,13 +21,15 @@ Architecture:
                                     Logger._aggregate(results)
 """
 
+from __future__ import annotations
+
 import time
 import tempfile
 import shutil
 import queue
 import atexit
 from pathlib import Path
-from typing import List, Tuple, Callable, Any, Dict, Optional
+from typing import Callable, TYPE_CHECKING, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 from threading import Thread, Lock
 from dataclasses import dataclass, field
@@ -38,6 +40,9 @@ import dill
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 from biocomptools.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from biocomptools.toollib.loggers.logger import Logger
 
 logger = get_logger(__name__)
 
@@ -54,9 +59,9 @@ class CallbackResult:
     """Result from a stateless callback execution."""
     logger_name: str
     step: int
-    metrics: Dict[str, Any] = field(default_factory=dict)
-    artifacts: Dict[str, bytes] = field(default_factory=dict)  # Serialized outputs
-    error: Optional[str] = None
+    metrics: dict[str, object] = field(default_factory=dict)
+    artifacts: dict[str, bytes] = field(default_factory=dict)  # Serialized outputs
+    error: str | None = None
     duration_ms: float = 0.0
 
 
@@ -64,7 +69,7 @@ class CallbackResult:
 class PendingResult:
     """For ordered aggregation via heapq."""
     step: int
-    results: List[CallbackResult] = field(compare=False)
+    results: list[CallbackResult] = field(compare=False)
 
 
 def _execute_callback_in_process(
@@ -115,7 +120,7 @@ class StatelessCallbackWrapper:
     Instead of mutating logger._history, returns data to be aggregated.
     """
 
-    def __init__(self, logger_obj: Any, original_callback: Callable):
+    def __init__(self, logger_obj: "Logger", original_callback: Callable[..., object]):
         self.logger_name = type(logger_obj).__name__
         self.original_callback = original_callback
         self._logger_ref = logger_obj  # Kept for inline mode
@@ -136,39 +141,41 @@ class AsyncLoggerHandler(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    logger_callbacks: List[Tuple[int, Callable, Any]]
+    logger_callbacks: list[tuple[int, Callable[..., object], "Logger"]]
     n_thread_workers: int = Field(default=4, gt=0, le=16)
     n_process_workers: int = Field(default=2, gt=0, le=8)
-    logger_objects: List[Any] = Field(default_factory=list)
-    async_store_location: Optional[Path] = None
-    base_dir: Optional[Path] = None
+    logger_objects: list["Logger"] = Field(default_factory=list)
+    async_store_location: Path | None = None
+    base_dir: Path | None = None
     keep_history_on_disk: bool = False
     save_all_steps: bool = False
     batch_size: int = Field(default=4, gt=0, le=32, description="Steps to batch process")
 
     # Callback mode overrides (logger class name -> mode)
-    callback_modes: Dict[str, CallbackMode] = Field(default_factory=dict)
+    callback_modes: dict[str, CallbackMode] = Field(default_factory=dict)
 
     # Internal state (excluded from serialization)
-    tmpdir: Path = Field(exclude=True, default=None)
+    # Note: Some types use Any because they're runtime-initialized threading primitives
+    # that can't be properly type-annotated (Lock is a function, not a class)
+    tmpdir: Path | None = Field(exclude=True, default=None)
     cleanup_tmpdir: bool = Field(exclude=True, default=True)
-    step_queue: Any = Field(exclude=True, default=None)
-    results_queue: Any = Field(exclude=True, default=None)
+    step_queue: Any = Field(exclude=True, default=None)  # queue.Queue[int | None]
+    results_queue: Any = Field(exclude=True, default=None)  # queue.Queue[CallbackResult]
     should_stop: bool = Field(exclude=True, default=False)
-    thread_executor: Any = Field(exclude=True, default=None)
-    process_executor: Any = Field(exclude=True, default=None)
-    consumer_thread: Any = Field(exclude=True, default=None)
-    aggregator_thread: Any = Field(exclude=True, default=None)
-    initialization_futures: List[Any] = Field(exclude=True, default_factory=list)
-    finalization_futures: List[Any] = Field(exclude=True, default_factory=list)
-    aggregation_lock: Any = Field(exclude=True, default=None)
+    thread_executor: ThreadPoolExecutor | None = Field(exclude=True, default=None)
+    process_executor: ProcessPoolExecutor | None = Field(exclude=True, default=None)
+    consumer_thread: Thread | None = Field(exclude=True, default=None)
+    aggregator_thread: Thread | None = Field(exclude=True, default=None)
+    initialization_futures: list[Future[Any]] = Field(exclude=True, default_factory=list)
+    finalization_futures: list[Future[Any]] = Field(exclude=True, default_factory=list)
+    aggregation_lock: Any = Field(exclude=True, default=None)  # Lock instance
     next_step_to_aggregate: int = Field(exclude=True, default=1)
-    pending_results: List = Field(exclude=True, default_factory=list)  # heapq
-    loggers_by_name: Dict[str, Any] = Field(exclude=True, default_factory=dict)
+    pending_results: list[PendingResult] = Field(exclude=True, default_factory=list)
+    loggers_by_name: dict[str, "Logger"] = Field(exclude=True, default_factory=dict)
 
     @model_validator(mode='before')
     @classmethod
-    def handle_n_workers_compat(cls, data):
+    def handle_n_workers_compat(cls, data: object) -> object:
         """Backwards compatibility: distribute n_workers to thread/process workers."""
         if isinstance(data, dict) and 'n_workers' in data:
             n = data.pop('n_workers')
@@ -179,7 +186,7 @@ class AsyncLoggerHandler(BaseModel):
 
     @field_validator('async_store_location', 'base_dir', mode='before')
     @classmethod
-    def convert_paths(cls, v):
+    def convert_paths(cls, v: object) -> Path | None:
         return Path(v) if v is not None else None
 
     def model_post_init(self, __context):
@@ -263,7 +270,7 @@ class AsyncLoggerHandler(BaseModel):
         self.aggregator_thread = Thread(target=self._aggregator_loop, daemon=True)
         self.aggregator_thread.start()
 
-    def _save_step_data(self, step: int, data: dict, event_type: str = "regular") -> Path:
+    def _save_step_data(self, step: int, data: dict[str, object], event_type: str = "regular") -> Path:
         """Serialize step data to disk."""
         step_file = self.tmpdir / (
             f"step_{step:06d}.pkl"
@@ -275,7 +282,7 @@ class AsyncLoggerHandler(BaseModel):
             dill.dump(data, f)
         return step_file
 
-    def _load_step_data(self, step_file: Path) -> dict:
+    def _load_step_data(self, step_file: Path) -> dict[str, object]:
         """Load step data from disk."""
         with open(step_file, 'rb') as f:
             return dill.load(f)
@@ -285,7 +292,7 @@ class AsyncLoggerHandler(BaseModel):
         if not self.keep_history_on_disk:
             step_file.unlink(missing_ok=True)
 
-    def _should_run_callback(self, period: Optional[int], step: int, event_type: str) -> bool:
+    def _should_run_callback(self, period: int | None, step: int, event_type: str) -> bool:
         """Determine if callback should run for this step/event."""
         if event_type == 'start':
             return period == 0 and step == 0
@@ -318,9 +325,9 @@ class AsyncLoggerHandler(BaseModel):
             logger.debug(f"Processing batch of {len(batch)} steps: {batch}")
             self._process_batch(batch)
 
-    def _process_batch(self, steps: List[int]):
+    def _process_batch(self, steps: list[int]) -> None:
         """Process a batch of steps, dispatching to appropriate executors."""
-        futures: List[Tuple[int, str, Future, CallbackMode]] = []
+        futures: list[tuple[int, str, Future[object], CallbackMode]] = []
 
         for step in steps:
             step_file = self.tmpdir / f"step_{step:06d}.pkl"
@@ -392,8 +399,8 @@ class AsyncLoggerHandler(BaseModel):
                 ))
 
     def _execute_callback_thread(
-        self, callback: Callable, logger_name: str, data: dict
-    ) -> Dict[str, Any]:
+        self, callback: Callable[..., object], logger_name: str, data: dict[str, object]
+    ) -> dict[str, object]:
         """Execute callback in thread pool."""
         start = time.perf_counter()
         try:
@@ -410,10 +417,10 @@ class AsyncLoggerHandler(BaseModel):
             logger.error(f"{logger_name} failed: {e}")
             raise
 
-    def _aggregator_loop(self):
+    def _aggregator_loop(self) -> None:
         """Aggregator thread: collect results and aggregate in order."""
         # Group results by step
-        step_results: Dict[int, List[CallbackResult]] = {}
+        step_results: dict[int, list[CallbackResult]] = {}
 
         while not self.should_stop or not self.results_queue.empty():
             try:
@@ -434,8 +441,8 @@ class AsyncLoggerHandler(BaseModel):
         self._try_aggregate_ordered(step_results, force=True)
 
     def _try_aggregate_ordered(
-        self, step_results: Dict[int, List[CallbackResult]], force: bool = False
-    ):
+        self, step_results: dict[int, list[CallbackResult]], force: bool = False
+    ) -> None:
         """Aggregate results in step order."""
         with self.aggregation_lock:
             while True:
@@ -473,9 +480,9 @@ class AsyncLoggerHandler(BaseModel):
 
                 self.next_step_to_aggregate = next_step + 1
 
-    def create_callback(self):
+    def create_callback(self) -> Callable[..., None]:
         """Create callback for training loop to call on each step."""
-        def async_callback(step, training_config, step_history=None, stack=None):
+        def async_callback(step: int, training_config: object, step_history: dict[str, object] | None = None, stack: object = None) -> None:
             # Check if any logger needs this step
             triggering = []
             for period, _, logger_obj in self.logger_callbacks:
@@ -503,7 +510,7 @@ class AsyncLoggerHandler(BaseModel):
 
         return async_callback
 
-    def process_start_loggers(self, training_config, stack):
+    def process_start_loggers(self, training_config: object, stack: object) -> None:
         """Process start-only loggers (period=0)."""
         logger.info("Processing start loggers...")
         for period, callback, logger_obj in self.logger_callbacks:
@@ -515,7 +522,7 @@ class AsyncLoggerHandler(BaseModel):
                 except Exception as e:
                     logger.error(f"Start logger {name} failed: {e}")
 
-    def process_end_loggers(self, step, training_config, step_history, stack):
+    def process_end_loggers(self, step: int, training_config: object, step_history: dict[str, object], stack: object) -> None:
         """Process end-only loggers (period=-1 or None)."""
         logger.info("Processing end loggers...")
 
@@ -528,12 +535,12 @@ class AsyncLoggerHandler(BaseModel):
                 except Exception as e:
                     logger.error(f"End logger {name} failed: {e}")
 
-    def initialize_loggers_async(self, training_program):
+    def initialize_loggers_async(self, training_program: object) -> None:
         """Initialize all loggers in parallel."""
         if not self.logger_objects:
             return
 
-        def init_logger(logger_obj):
+        def init_logger(logger_obj: "Logger") -> None:
             name = type(logger_obj).__name__
             try:
                 logger_obj.initialize(training_program)
@@ -547,7 +554,7 @@ class AsyncLoggerHandler(BaseModel):
         ]
         logger.info(f"Started async initialization of {len(self.initialization_futures)} loggers")
 
-    def wait_for_initialization(self):
+    def wait_for_initialization(self) -> None:
         """Block until all loggers initialized."""
         if not self.initialization_futures:
             return
@@ -562,12 +569,12 @@ class AsyncLoggerHandler(BaseModel):
         self.initialization_futures.clear()
         logger.info("All loggers initialized")
 
-    def finalize_loggers_async(self):
+    def finalize_loggers_async(self) -> None:
         """Finalize all loggers in parallel."""
         if not self.logger_objects:
             return
 
-        def finalize_logger(logger_obj):
+        def finalize_logger(logger_obj: "Logger") -> None:
             name = type(logger_obj).__name__
             try:
                 logger_obj.finalize()
@@ -580,7 +587,7 @@ class AsyncLoggerHandler(BaseModel):
             for obj in self.logger_objects
         ]
 
-    def wait_for_finalization(self):
+    def wait_for_finalization(self) -> None:
         """Block until all loggers finalized."""
         if not self.finalization_futures:
             return
@@ -595,7 +602,7 @@ class AsyncLoggerHandler(BaseModel):
         self.finalization_futures.clear()
         logger.info("All loggers finalized")
 
-    def shutdown(self, timeout: float = 30.0):
+    def shutdown(self, timeout: float = 30.0) -> None:
         """Graceful shutdown with timeout."""
         logger.info("Shutting down AsyncLoggerHandler...")
 
@@ -630,7 +637,7 @@ class AsyncLoggerHandler(BaseModel):
         self.cleanup()
         logger.info("AsyncLoggerHandler shutdown complete")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up temporary files."""
         if self.tmpdir and self.tmpdir.exists() and self.cleanup_tmpdir:
             try:
@@ -641,7 +648,7 @@ class AsyncLoggerHandler(BaseModel):
         elif self.keep_history_on_disk and self.tmpdir and self.tmpdir.exists():
             logger.info(f"Keeping step history at: {self.tmpdir}")
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, object]:
         """Get handler statistics for debugging."""
         return {
             'queue_size': self.step_queue.qsize() if self.step_queue else 0,
@@ -659,26 +666,33 @@ class AggregatingLoggerMixin:
 
     Usage:
         class MyLogger(Logger, AggregatingLoggerMixin):
-            def _aggregate(self, step: int, metrics: Dict[str, Any]):
+            def _aggregate(self, step: int, metrics: dict[str, object]):
                 self._history.append({'step': step, **metrics})
     """
 
-    aggregation_lock: Lock = None
+    aggregation_lock: Lock | None = None
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         cls.aggregation_lock = Lock()
 
-    def _aggregate(self, step: int, metrics: Dict[str, Any]):
+    def _aggregate(self, step: int, metrics: dict[str, object]) -> None:
         """Override this to aggregate results from parallel callbacks.
 
         Thread-safe via aggregation_lock.
         """
         raise NotImplementedError("Subclasses must implement _aggregate")
 
-    def _safe_aggregate(self, step: int, metrics: Dict[str, Any]):
+    def _safe_aggregate(self, step: int, metrics: dict[str, object]) -> None:
         """Thread-safe wrapper around _aggregate."""
         if self.aggregation_lock is None:
             self.aggregation_lock = Lock()
         with self.aggregation_lock:
             self._aggregate(step, metrics)
+
+
+def _rebuild_models() -> None:
+    from biocomptools.toollib.loggers.logger import Logger
+    AsyncLoggerHandler.model_rebuild(_types_namespace={"Logger": Logger})
+
+_rebuild_models()

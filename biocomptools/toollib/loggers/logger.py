@@ -1,9 +1,8 @@
 ## {{{                          --     imports     --
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, List, Tuple, Callable, Union, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 from pydantic import BaseModel, ConfigDict
-from typing import Dict, Any, Optional
 
 if TYPE_CHECKING:
     from biocomptools.logger_history import HistoryView, LoggerContext
@@ -35,17 +34,17 @@ class Logger(BaseModel):
     )
 
     # legacy attributes (still supported)
-    periods: Union[int, List[int]] = 1
+    periods: int | list[int] = 1
     async_ok: bool = True
     parallel_ok: bool = False
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, object] = {}
 
     # new declarative attributes
     frequency: int = 1  # steps between callbacks (alias for periods when int)
-    history_window: Optional[int] = None  # number of steps to keep (None = all)
+    history_window: int | None = None  # number of steps to keep (None = all)
     history_mode: Literal["window", "since_last", "all"] = "window"
-    required_metrics: List[str] = []
-    required_arrays: List[str] = []
+    required_metrics: list[str] = []
+    required_arrays: list[str] = []
     call_at_start: bool = False
     call_at_end: bool = False
 
@@ -60,11 +59,11 @@ class Logger(BaseModel):
             cls.on_batch is not Logger.on_batch or cls.on_end is not Logger.on_end
         )
 
-    def initialize(self, training_program):
+    def initialize(self, training_program: object) -> None:
         """Optional initialization before training starts."""
         pass
 
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
+    def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
         """Return a list of (period, callback_function) tuples for the training loop.
 
         Legacy pattern - override this for custom callback behavior.
@@ -97,15 +96,15 @@ class Logger(BaseModel):
         """
         pass
 
-    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_metrics(self, replicate: int | None = None) -> dict[str, object] | None:
         """Return a dictionary of the latest metrics from this logger."""
         return None
 
-    def finalize(self):
+    def finalize(self) -> None:
         """Optional cleanup after training ends."""
         pass
 
-    def find_myself(self, training_program=None) -> int:
+    def find_myself(self, training_program: object = None) -> int:
         """Find this logger's index in the training program's logger list.
 
         Useful for generating unique names when multiple loggers of the same
@@ -121,9 +120,9 @@ class Logger(BaseModel):
 
 
 class FunctionLogger(Logger):
-    functions: List[Callable] = []
+    functions: list[Callable[..., object]] = []
 
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
+    def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
         if isinstance(self.periods, int):
             self.periods = [self.periods]
         assert isinstance(self.periods, list)

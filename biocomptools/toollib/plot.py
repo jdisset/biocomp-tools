@@ -11,7 +11,7 @@ from dracon.utils import dict_like
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from biocomptools.logging_config import get_logger
 from biocomptools.trainutils import make_json_ready
-from biocomp.designdebug import is_plot_debug_enabled, save_debug_state
+from biocomp.tracing import is_plot_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}

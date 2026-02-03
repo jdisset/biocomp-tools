@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import with_loader_criteria
 from sqlmodel import select, Session, col
-from typing import Any, Dict, List, Optional, Union, Literal
+from typing import Literal
 from enum import Enum
 from itertools import groupby
 from biocomptools.toollib.models import (
@@ -35,7 +37,7 @@ class LossCriteria(BaseModel):
     operator: LossOperator
     value: float
 
-    def matches(self, loss: Optional[float]) -> bool:
+    def matches(self, loss: float | None) -> bool:
         """Check if a loss value matches this criteria."""
         if loss is None:
             return False
@@ -62,7 +64,7 @@ class TrainingSetCriteria(BaseModel):
     mode: Literal["exact", "includes"] = "includes"
 
     @property
-    def _resolved_pairs(self) -> List[NetworkDataPair]:
+    def _resolved_pairs(self) -> list[NetworkDataPair]:
         """Get resolved NetworkDataPair objects from the NetworkSet."""
         if not hasattr(self, '_cached_pairs'):
             # run selectors if not already done
@@ -71,8 +73,8 @@ class TrainingSetCriteria(BaseModel):
         return self._cached_pairs
 
     def _get_dataset_pairs(
-        self, dataset: Optional[DataSet], session: Session
-    ) -> List[NetworkDataPair]:
+        self, dataset: DataSet | None, session: Session
+    ) -> list[NetworkDataPair]:
         """Get NetworkDataPair objects associated with a DataSet."""
         if dataset is None:
             return []
@@ -93,7 +95,7 @@ class TrainingSetCriteria(BaseModel):
 
         return session.exec(query).all()
 
-    def matches(self, dataset: Optional[DataSet], session: Session) -> bool:
+    def matches(self, dataset: DataSet | None, session: Session) -> bool:
         """Check if a model's training dataset matches this criteria."""
         model_pairs = self._get_dataset_pairs(dataset, session)
         required_pairs = set(self._resolved_pairs)
@@ -149,23 +151,23 @@ class ModelSelector(BaseModel):
         )
     """
 
-    name: Optional[Union[str, Regex, iRegex]] = None
-    run_name: Optional[Union[str, Regex, iRegex]] = None
-    experiment_name: Optional[Union[str, Regex, iRegex]] = None
+    name: str | Regex | iRegex | None = None
+    run_name: str | Regex | iRegex | None = None
+    experiment_name: str | Regex | iRegex | None = None
 
     # loss criteria - multiple ways to specify
-    loss: Optional[LossCriteria] = None
-    loss_less_than: Optional[float] = None
-    loss_greater_than: Optional[float] = None
+    loss: LossCriteria | None = None
+    loss_less_than: float | None = None
+    loss_greater_than: float | None = None
     pick_best_loss: bool = False
 
     # training set criteria
-    training_set: Optional[TrainingSetCriteria] = None
-    trained_on_exact: Optional[NetworkSet] = None
-    trained_on_includes: Optional[NetworkSet] = None
+    training_set: TrainingSetCriteria | None = None
+    trained_on_exact: NetworkSet | None = None
+    trained_on_includes: NetworkSet | None = None
 
     # grouping and selection
-    group_by: Optional[Union[str, List[str]]] = None
+    group_by: str | list[str] | None = None
     pick_best_per_group: bool = False
 
     @property
@@ -227,8 +229,8 @@ class ModelSelector(BaseModel):
         return self
 
     def get_models(
-        self, session=None, load_metrics_criteria: Optional[Dict[str, Any]] = None
-    ) -> List[TrainedModel]:
+        self, session: Session | None = None, load_metrics_criteria: dict[str, object] | None = None
+    ) -> list[TrainedModel]:
         sess = session or self.db_session
         close_session_locally = session is None
 
@@ -305,7 +307,7 @@ class ModelSelector(BaseModel):
             if close_session_locally:
                 sess.close()
 
-    def _apply_grouping(self, models: List[TrainedModel]) -> List[TrainedModel]:
+    def _apply_grouping(self, models: list[TrainedModel]) -> list[TrainedModel]:
         """Apply grouping logic to models."""
         if not self.group_by:
             return models
@@ -401,7 +403,7 @@ class ModelSelector(BaseModel):
         logger.debug(f"After grouping: {len(result_models)} models selected")
         return result_models
 
-    def get_model(self, session=None, raise_if_multiple: bool = True) -> TrainedModel:
+    def get_model(self, session: Session | None = None, raise_if_multiple: bool = True) -> TrainedModel:
         from pathlib import Path
         from biocomptools.toollib.models import create_trained_model_from_file
 
@@ -431,11 +433,11 @@ class ModelSelector(BaseModel):
     @classmethod
     def best_per_training_set(
         cls,
-        name: Optional[Union[str, Regex, iRegex]] = None,
-        run_name: Optional[Union[str, Regex, iRegex]] = None,
-        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
-        **kwargs,
-    ) -> "ModelSelector":
+        name: str | Regex | iRegex | None = None,
+        run_name: str | Regex | iRegex | None = None,
+        experiment_name: str | Regex | iRegex | None = None,
+        **kwargs: object,
+    ) -> ModelSelector:
         """
         Create a selector that returns the best model for each unique training set.
 
@@ -455,12 +457,12 @@ class ModelSelector(BaseModel):
     @classmethod
     def best_per_field(
         cls,
-        field: Union[str, List[str]],
-        name: Optional[Union[str, Regex, iRegex]] = None,
-        run_name: Optional[Union[str, Regex, iRegex]] = None,
-        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
-        **kwargs,
-    ) -> "ModelSelector":
+        field: str | list[str],
+        name: str | Regex | iRegex | None = None,
+        run_name: str | Regex | iRegex | None = None,
+        experiment_name: str | Regex | iRegex | None = None,
+        **kwargs: object,
+    ) -> ModelSelector:
         """
         Create a selector that returns the best model for each unique value of the specified field(s).
 
@@ -484,11 +486,11 @@ class ModelSelector(BaseModel):
     @classmethod
     def all_matching(
         cls,
-        name: Optional[Union[str, Regex, iRegex]] = None,
-        run_name: Optional[Union[str, Regex, iRegex]] = None,
-        experiment_name: Optional[Union[str, Regex, iRegex]] = None,
-        **kwargs,
-    ) -> "ModelSelector":
+        name: str | Regex | iRegex | None = None,
+        run_name: str | Regex | iRegex | None = None,
+        experiment_name: str | Regex | iRegex | None = None,
+        **kwargs: object,
+    ) -> ModelSelector:
         """
         Create a selector that returns all models matching the criteria.
 
@@ -512,7 +514,7 @@ class ModelSet(BaseModel):
     Can contain ModelSelectors or individual model references.
     """
 
-    content: List[Union[TrainedModel, ModelSelector, "ModelSet"]] = []
+    content: list[TrainedModel | ModelSelector | ModelSet] = []
 
     @property
     def _engine(self):
@@ -535,7 +537,7 @@ class ModelSet(BaseModel):
 
     @field_validator('content', mode='before')
     @classmethod
-    def route_content(cls, v: Any, info):
+    def route_content(cls, v: object, info: object) -> list[TrainedModel | ModelSelector | ModelSet]:
         """Route content items to appropriate types."""
         logger.debug(f"Routing ModelSet content: {v}")
 
@@ -544,7 +546,7 @@ class ModelSet(BaseModel):
         elif not isinstance(v, list):
             raise TypeError(f"ModelSet content must be a list, got {type(v)}")
 
-        def route_item(item: Any) -> Union[TrainedModel, ModelSelector, "ModelSet"]:
+        def route_item(item: object) -> TrainedModel | ModelSelector | ModelSet:
             if isinstance(item, (TrainedModel, ModelSelector, cls)):
                 return item
             elif isinstance(item, dict):
@@ -559,7 +561,7 @@ class ModelSet(BaseModel):
 
         return [route_item(item) for item in v]
 
-    def run_selectors(self, session=None):
+    def run_selectors(self, session: Session | None = None) -> None:
         """Resolve all ModelSelectors to TrainedModel instances."""
         sess = session or self.db_session
         close_session = session is None
@@ -599,7 +601,7 @@ class ModelSet(BaseModel):
         if close_session:
             sess.close()
 
-    def get_models(self, session=None) -> List[TrainedModel]:
+    def get_models(self, session: Session | None = None) -> list[TrainedModel]:
         """Get all TrainedModel instances in this set."""
         # ensure selectors are run
         if any(isinstance(item, (ModelSelector, ModelSet)) for item in self.content):

@@ -4,14 +4,20 @@ Data structures for design evaluation metrics. Metric computation is handled by
 DesignEvaluator in design_eval.py - this module only defines data structures.
 """
 
+from __future__ import annotations
+
 import json
 import numpy as np
 from pathlib import Path
-from typing import Any
 from dataclasses import dataclass, field, asdict
+from typing import TYPE_CHECKING
 
 from biocomp.metric_utils import RegressionStats, DistributionStats
 from biocomptools.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from biocomp.network import Network
+    import biocomp.parameters as pr
 
 logger = get_logger(__name__)
 
@@ -173,42 +179,73 @@ def compute_design_metrics(
     )
 
 
-def extract_recipe_summary(network: Any, params: Any = None) -> dict:
-    """Extract recipe information from a network."""
-    summary: dict = {
+def extract_recipe_summary(network: "Network", params: "pr.ParameterTree | None" = None) -> dict[str, object]:
+    """Extract recipe information from a network.
+
+    Returns a summary dict with network_name, uorfs list, ratios dict, and parts list.
+    On extraction failure, logs a warning and returns partial results.
+    """
+    summary: dict[str, object] = {
         'network_name': getattr(network, 'name', 'unknown'),
         'uorfs': [],
         'ratios': {},
         'parts': [],
     }
-    try:
-        if hasattr(network, 'graph'):
-            for nid, ndata in network.graph.nodes.items():
-                extra = ndata.get('extra', {})
-                if 'uorf' in str(ndata.get('type', '')).lower():
-                    summary['uorfs'].append(
-                        {'node_id': str(nid), 'value': extra.get('part_name', 'unknown')}
-                    )
-                if ndata.get('type') == 'aggregation':
-                    members_data = extra.get('members', {})
-                    if isinstance(members_data, dict) and members_data:
-                        ratio_vals = [
-                            members_data[m].get("ratio", 1.0)
-                            if isinstance(members_data[m], dict)
-                            else 1.0
-                            for m in sorted(members_data.keys())
-                        ]
-                        summary['ratios'][extra.get('cotx_group', 'unknown')] = ratio_vals
-        if (
-            hasattr(network, 'source_recipe')
-            and network.source_recipe
-            and hasattr(network.source_recipe, 'content')
-        ):
-            for cotx in network.source_recipe.content:
+
+    uorfs: list[dict[str, str] | str] = []
+    ratios: dict[str, list[float]] = {}
+
+    if hasattr(network, 'graph') and network.graph is not None:
+        for nid, ndata in network.graph.nodes.items():
+            if not isinstance(ndata, dict):
+                continue
+
+            node_type = ndata.get('type', '')
+            extra = ndata.get('extra')
+            if extra is None:
+                extra = {}
+
+            if not isinstance(extra, dict):
+                logger.warning(f"Node {nid} has non-dict extra field: {type(extra)}")
+                continue
+
+            # Extract uORF info
+            if 'uorf' in str(node_type).lower():
+                part_name = extra.get('part_name')
+                if part_name is None:
+                    logger.debug(f"Node {nid} is uorf type but missing part_name")
+                    part_name = 'unknown'
+                uorfs.append({'node_id': str(nid), 'value': str(part_name)})
+
+            # Extract aggregation ratios
+            if node_type == 'aggregation':
+                members_data = extra.get('members')
+                cotx_group = extra.get('cotx_group')
+
+                if members_data is not None and isinstance(members_data, dict) and members_data:
+                    ratio_vals: list[float] = []
+                    for m in sorted(members_data.keys()):
+                        member = members_data[m]
+                        if isinstance(member, dict):
+                            ratio_vals.append(float(member.get("ratio", 1.0)))
+                        else:
+                            ratio_vals.append(1.0)
+
+                    if cotx_group is None:
+                        logger.debug(f"Node {nid} aggregation missing cotx_group")
+                        cotx_group = 'unknown'
+                    ratios[str(cotx_group)] = ratio_vals
+
+    # Extract from source_recipe if available
+    if hasattr(network, 'source_recipe') and network.source_recipe is not None:
+        source_recipe = network.source_recipe
+        if hasattr(source_recipe, 'content') and source_recipe.content is not None:
+            for cotx in source_recipe.content:
                 for tu in getattr(cotx, 'units', []):
                     for slot in getattr(tu, 'slots', []):
                         if 'uORF' in str(slot):
-                            summary['uorfs'].append(str(slot))
-    except Exception as e:
-        logger.warning(f"Failed to extract recipe summary: {e}")
+                            uorfs.append(str(slot))
+
+    summary['uorfs'] = uorfs
+    summary['ratios'] = ratios
     return summary

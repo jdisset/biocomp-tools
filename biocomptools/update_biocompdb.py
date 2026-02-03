@@ -64,8 +64,18 @@ RICH_PROGRESS_COLUMNS = [
 ]
 
 
-def convert_metric_value(value: Any) -> Optional[float]:
-    """Convert a metric value to float, converting NaN/inf to None."""
+def convert_metric_value(value: object) -> float | None:
+    """Convert a metric value to float for database storage.
+
+    Returns None (stored as SQL NULL) for:
+    - None input
+    - NaN or inf values (database-unfriendly)
+    - Values that cannot be converted to float
+
+    This is intentionally permissive since metrics come from various sources
+    (model metadata, logger outputs, figure parsing) and we prefer storing
+    NULL over failing the entire database update.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
