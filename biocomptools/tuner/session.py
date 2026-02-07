@@ -13,6 +13,7 @@ from biocomp.design_targets import TargetUnion
 from biocomp.designloss import (
     compute_grid_losses,
     GridLossResult,
+    GridLossWeights,
     ratio_spread_penalty,
     soft_tucount_penalty,
 )
@@ -29,13 +30,7 @@ class TunerConfig:
     """Configuration for TunerSession loss weights and grid settings."""
 
     grid_resolution: tuple[int, int] = (32, 32)
-    w_sinkhorn: float = 1.0
-    w_lncc: float = 0.5
-    w_mse: float = 1.0
-    w_simse: float = 1.0
-    eps_sinkhorn: float = 0.1
-    n_sinkhorn_iters: int = 50
-    lncc_kernel: int = 7
+    weights: GridLossWeights = field(default_factory=lambda: GridLossWeights(w_mse=1.0, w_simse=1.0))
 
 
 @dataclass
@@ -77,6 +72,8 @@ class TunerSession:
         network: Network,
         target: TargetUnion,
         grid_resolution: tuple[int, int] = (32, 32),
+        weights: GridLossWeights | None = None,
+        # backward-compatible kwargs (used if weights is None)
         w_sinkhorn: float = 1.0,
         w_lncc: float = 0.5,
         w_mse: float = 1.0,
@@ -88,13 +85,13 @@ class TunerSession:
         self.network = network
         self.target = target
         self.grid_resolution = grid_resolution
-        self.w_sinkhorn = w_sinkhorn
-        self.w_lncc = w_lncc
-        self.w_mse = w_mse
-        self.w_simse = w_simse
-        self.eps_sinkhorn = eps_sinkhorn
-        self.n_sinkhorn_iters = n_sinkhorn_iters
-        self.lncc_kernel = lncc_kernel
+        if weights is not None:
+            self.weights = weights
+        else:
+            self.weights = GridLossWeights(
+                w_sinkhorn=w_sinkhorn, w_lncc=w_lncc, w_mse=w_mse, w_simse=w_simse,
+                eps_sinkhorn=eps_sinkhorn, n_sinkhorn_iters=n_sinkhorn_iters, lncc_kernel=lncc_kernel,
+            )
 
         self.network_model: Optional[NetworkModel] = None
         self.X_lattice: Optional[np.ndarray] = None
@@ -257,24 +254,15 @@ class TunerSession:
     def _compute_losses(
         self, Y_pred: np.ndarray, Y_target: np.ndarray, include_contributions: bool = False
     ) -> tuple[dict[str, float], Optional[GridLossResult]]:
-        """Compute losses using shared compute_grid_losses function.
-
-        Uses the same loss computation as design mode for consistency.
-        """
+        """Compute losses using shared compute_grid_losses function."""
         result = compute_grid_losses(
             jnp.array(Y_pred, dtype=jnp.float32),
             jnp.array(Y_target, dtype=jnp.float32),
-            w_sinkhorn=self.w_sinkhorn,
-            w_lncc=self.w_lncc,
-            w_mse=self.w_mse,
-            w_simse=self.w_simse,
-            eps_sinkhorn=self.eps_sinkhorn,
-            n_sinkhorn_iters=self.n_sinkhorn_iters,
-            lncc_kernel=self.lncc_kernel,
+            weights=self.weights,
             return_contributions=include_contributions,
         )
         logger.debug(
-            f"Losses: w_mse={self.w_mse}, mse={result.mse}, simse={result.simse}, total={result.total}"
+            f"Losses: w_mse={self.weights.w_mse}, mse={result.mse}, simse={result.simse}, total={result.total}"
         )
         return result.to_dict(), result if include_contributions else None
 

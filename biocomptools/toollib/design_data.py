@@ -7,7 +7,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any
 
-from biocomp.design import DataTarget
+from biocomp.design_targets import DataTarget
 from biocomp.plotutils import PlotData
 
 

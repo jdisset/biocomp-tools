@@ -27,15 +27,13 @@ from dracon.deferred import DeferredNode
 from biocomp.design import (
     DesignManager,
     DesignConfig,
-    TargetUnion,
-    SamplingConfigUnion,
-    UniformSampling,
     initialize_params,
     get_ratio_paths_and_sources,
-    normalize_ratios_prune,
     normalize_ratio_source_arrays,
     sample_for_evaluation,
 )
+from biocomp.design_targets import TargetUnion, SamplingConfigUnion, UniformSampling
+from biocomp.ratio_utils import normalize_ratios_for_pruning as normalize_ratios_prune
 from biocomp.designloss import HYPEROPT_SCHEDULE_NAMESPACE
 from biocomp.recipe import Recipe
 from biocomp.tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX

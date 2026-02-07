@@ -12,7 +12,7 @@ from pydantic import BaseModel, model_validator
 
 from biocomp.plotutils import PlotData
 from biocomp.metric_utils import RegressionStats
-from biocomp.designloss import GridLossResult, compute_grid_losses
+from biocomp.designloss import GridLossResult, GridLossWeights, compute_grid_losses
 
 logger = logging.getLogger(__name__)
 
@@ -188,11 +188,7 @@ def compute_target_prediction(
     grid_losses = compute_grid_losses(
         jnp.array(Y_pred_grid),
         jnp.array(Y_target_grid_resized),
-        w_sinkhorn=1.0,
-        w_lncc=0.5,
-        w_mse=1.0,
-        w_simse=1.0,
-        w_spectral=1.0,
+        weights=GridLossWeights(w_mse=1.0, w_simse=1.0, w_spectral=1.0),
     )
 
     logger.info(

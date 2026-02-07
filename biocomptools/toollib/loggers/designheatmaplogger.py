@@ -8,10 +8,8 @@ from pydantic import ConfigDict, Field
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
-from biocomp.designutils import (
-    side_by_side_txt_plot,
-    build_design_stack,
-)
+from biocomp.designloss import GridLossWeights
+from biocomp.designutils import side_by_side_txt_plot
 
 logger = get_logger(__name__)
 
@@ -176,28 +174,9 @@ class DesignHeatmapLogger(Logger):
                     batches_per_step = getattr(dc, 'batches_per_step', 1)
                     self._total_steps = dc.n_epochs * max(1, dc.n_batches_per_epoch // batches_per_step)
 
-                # Extract loss weights from loss_function.kwargs (primary source)
                 if hasattr(dc, 'loss_function'):
-                    lf = dc.loss_function
-                    if hasattr(lf, 'kwargs') and lf.kwargs:
-                        for k, v in lf.kwargs.items():
-                            if k.startswith('w_'):
-                                self._loss_weights[k] = v
-
-                # Also check direct attributes as fallback
-                for attr in [
-                    'w_sinkhorn',
-                    'w_lncc',
-                    'w_rmse',
-                    'w_mse',
-                    'w_simse',
-                    'w_spectral',
-                    'w_gradient',
-                    'w_contrast',
-                    'w_zncc',
-                ]:
-                    if attr not in self._loss_weights and hasattr(dc, attr):
-                        self._loss_weights[attr] = getattr(dc, attr)
+                    glw = GridLossWeights.from_design_config(dc)
+                    self._loss_weights = glw.to_dict()
 
         if self._dmanager and self._model:
             try:
@@ -206,8 +185,8 @@ class DesignHeatmapLogger(Logger):
                     if self._design_conf
                     else True
                 )
-                self._stack = build_design_stack(
-                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                self._stack = self._dmanager.build_stack(
+                    self._model, auto_lock_topology_tus=auto_lock
                 )
             except Exception as e:
                 logger.warning(f"Failed to build stack for introspection: {e}")
@@ -248,8 +227,8 @@ class DesignHeatmapLogger(Logger):
                     if self._design_conf
                     else True
                 )
-                stack = build_design_stack(
-                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                stack = self._dmanager.build_stack(
+                    self._model, auto_lock_topology_tus=auto_lock
                 )
             specific_params = tree_get(params, (rep_idx, target_idx))
             committed_networks = stack.commit(specific_params)
@@ -405,8 +384,8 @@ class DesignHeatmapLogger(Logger):
                     if self._design_conf
                     else True
                 )
-                stack = build_design_stack(
-                    self._dmanager, self._model, auto_lock_topology_tus=auto_lock
+                stack = self._dmanager.build_stack(
+                    self._model, auto_lock_topology_tus=auto_lock
                 )
                 fingerprint = compute_fingerprint_from_params(
                     stack=stack,
@@ -681,7 +660,7 @@ class DesignHeatmapLogger(Logger):
             if self._design_conf
             else True
         )
-        stack = build_design_stack(self._dmanager, self._model, auto_lock_topology_tus=auto_lock)
+        stack = self._dmanager.build_stack(self._model, auto_lock_topology_tus=auto_lock)
 
         logger.info(f"Reproduction pickle: Committing {len(needed_pairs)} (rep, target) pairs...")
         for rep_id, tid in sorted(needed_pairs):

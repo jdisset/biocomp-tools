@@ -3,18 +3,30 @@
 from __future__ import annotations
 
 import numpy as np
+import jax.numpy as jnp
 from pathlib import Path
 from typing import Callable, Any, TYPE_CHECKING
 from pydantic import ConfigDict
 import csv
 
+from biocomp.design import get_topk_replicate_network_pairs
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.design_results import (
     DesignResultsManager,
     compute_design_metrics,
     NREMetrics,
 )
-from biocomptools.toollib.design_eval import DesignEvaluator, DesignInput, is_valid_network
+from biocomptools.toollib.design_eval import is_valid_network
+from biocomptools.toollib.design_pipeline import (
+    CommitRequest,
+    build_design_result,
+    evaluate_design_inputs,
+    invoke_design_summary_plot,
+    make_design_input,
+    precommit_pairs,
+    resolve_commit_requests,
+    save_network_recipe_yaml,
+)
 from biocomptools.toollib.design_data import prepare_target_data
 from biocomptools.logging_config import get_logger
 
@@ -60,67 +72,55 @@ class DesignSummaryLogger(Logger):
             self._all_metrics = []
             logger.info(f"DesignSummaryLogger initialized: {design_dir}")
 
-    def _get_top_candidates(
-        self, all_losses: np.ndarray, target_id: int, n: int
-    ) -> list[tuple[int, int, float]]:
-        all_losses = np.asarray(all_losses)
-        if all_losses.ndim == 2:
-            all_losses = all_losses[None, :, :]
-        elif all_losses.ndim == 4:
-            all_losses = np.mean(all_losses, axis=1)
-
-        n_networks = all_losses.shape[-1]
-        target_losses = all_losses[:, target_id, :].ravel()
-        top_indices = np.argsort(target_losses)[:n]
-
-        return [
-            (int(i // n_networks), int(i % n_networks), float(target_losses[i]))
-            for i in top_indices
-        ]
-
-    def _get_or_build_stack(self, stack: Any = None) -> Any | None:
+    def _get_or_build_stack(self, stack: Any = None) -> Any:
         if stack is not None:
             self._cached_stack = stack
             return stack
         if self._cached_stack is not None:
             return self._cached_stack
-        if self.dmanager is not None and self.model is not None:
-            try:
-                from biocomp.designutils import build_design_stack
-
-                auto_lock = (
-                    getattr(self.design_conf, 'auto_lock_topology_tus', True)
-                    if self.design_conf
-                    else True
-                )
-                self._cached_stack = build_design_stack(
-                    self.dmanager, self.model, auto_lock_topology_tus=auto_lock
-                )
-                return self._cached_stack
-            except Exception as e:
-                logger.warning(f"Failed to build stack: {e}")
-        return None
+        assert self.dmanager is not None, "dmanager required to build stack"
+        assert self.model is not None, "model required to build stack"
+        auto_lock = (
+            getattr(self.design_conf, 'auto_lock_topology_tus', True)
+            if self.design_conf
+            else True
+        )
+        self._cached_stack = self.dmanager.build_stack(
+            self.model, auto_lock_topology_tus=auto_lock
+        )
+        return self._cached_stack
 
     def _generate_summaries(
         self, step: int, params: Any, stack: Any, all_losses: np.ndarray, is_final: bool = False
     ):
         stack = self._get_or_build_stack(stack)
-        if self._results_manager is None or stack is None:
-            logger.warning("Results manager or stack not available")
-            return
+        assert self._results_manager is not None, "results manager required for summaries"
+        assert stack is not None, "stack required for summaries"
 
         targets = self.targets or (self.dmanager.targets if self.dmanager else [])
         all_losses = np.asarray(all_losses)
         if all_losses.ndim == 4:
             all_losses = np.mean(all_losses, axis=1)
         n_targets = all_losses.shape[-2] if all_losses.ndim >= 2 else 1
+        assert self.dmanager is not None, "dmanager required for SSOT top-k selector"
+        assert self.design_conf is not None, "design_conf required for SSOT top-k selector"
+        losses_for_topk = jnp.asarray(all_losses)
+        topk_by_target = get_topk_replicate_network_pairs(
+            losses=losses_for_topk,
+            dmanager=self.dmanager,
+            dconf=self.design_conf,
+            k=self.topk_per_target,
+        )
 
         # collect all candidates first for batching
         all_candidates = []
         for target_id in range(min(n_targets, len(targets))):
             target = targets[target_id]
             target_name = getattr(target, 'name', f'target_{target_id}')
-            candidates = self._get_top_candidates(all_losses, target_id, self.topk_per_target)
+            assert target_id < len(topk_by_target), (
+                f"target index {target_id} out of bounds for topk results {len(topk_by_target)}"
+            )
+            candidates = topk_by_target[target_id]
             self._results_manager.save_rankings(
                 target_name, candidates, step=None if is_final else step
             )
@@ -150,63 +150,72 @@ class DesignSummaryLogger(Logger):
 
     def _batch_process_candidates(self, candidates: list[dict]):
         """Batch process all design candidates with single evaluation call."""
-        import jax
-        from biocomptools.toollib.hashutils import pronounceable_hash48
+        assert candidates, "at least one candidate required"
+        assert self.model is not None, "model required for batch candidate processing"
 
-        if not candidates or self.model is None:
-            return
+        params = candidates[0]['params']
+        stack = candidates[0]['stack']
+        assert all(c['params'] is params for c in candidates), "all candidates must share same params"
+        assert all(c['stack'] is stack for c in candidates), "all candidates must share same stack"
 
-        # commit networks for all candidates
+        pairs = {(c['rep_id'], c['target_id']) for c in candidates}
+        commit_cache, commit_failures = precommit_pairs(params, stack, pairs, fail_fast=True)
+        assert not commit_failures, f"commit failures not allowed: {commit_failures}"
+
+        commit_requests = [
+            CommitRequest(
+                rep_id=c['rep_id'],
+                target_id=c['target_id'],
+                net_id=c['net_id'],
+                context={'candidate': c},
+            )
+            for c in candidates
+        ]
+        commit_results = resolve_commit_requests(commit_requests, commit_cache)
         committed_info = []
-        for c in candidates:
-            try:
-                rep_id, target_id = c['rep_id'], c['target_id']
-                specific_params = jax.tree.map(
-                    lambda x, r=rep_id, t=target_id: x[r, t], c['params']
-                )
-                committed = c['stack'].commit(specific_params)
-                network = committed[c['net_id']]
-                committed_info.append({**c, 'network': network, 'valid': is_valid_network(network)})
-            except Exception as e:
-                logger.warning(
-                    f"Failed to commit network for {c['target_name']} rank {c['rank']}: {e}"
-                )
-                committed_info.append({**c, 'network': None, 'valid': False})
+        for result in commit_results:
+            info = result.request.context['candidate']
+            assert result.error is None, (
+                f"commit resolution failed for {info['target_name']} rank {info['rank']}: {result.error}"
+            )
+            network = result.network
+            assert network is not None, "resolved committed network is None"
+            committed_info.append(
+                {
+                    **info,
+                    'network': network,
+                    'valid': bool(is_valid_network(network)),
+                }
+            )
 
         # build DesignInput list for valid networks
         design_inputs = []
         input_to_candidate = {}
+        assert self._results_manager is not None, "results manager required for rank output"
         for i, info in enumerate(committed_info):
             if not info['valid']:
                 continue
-            recipe_hash = pronounceable_hash48(
-                f"{info['target_name']}_{info['rank']}_{info['rep_id']}".encode()
-            )
             rank_dir = self._results_manager.get_rank_dir(
                 info['target_name'], info['rank'], step=None if info['is_final'] else info['step']
             )
-            inp = DesignInput(
+            inp = make_design_input(
                 network=info['network'],
                 target=info['target'],
                 target_name=info['target_name'],
                 rank=info['rank'],
                 replicate=info['rep_id'],
-                scaffold_network_name=getattr(info['network'], 'name', f"net_{info['net_id']}"),
+                net_id=info['net_id'],
                 loss=info['loss'],
-                recipe_hash=recipe_hash,
                 run_name=self._run_name,
                 design_dir=str(rank_dir),
             )
             design_inputs.append(inp)
             input_to_candidate[len(design_inputs) - 1] = (i, info, rank_dir)
 
-        if not design_inputs:
-            logger.warning("No valid networks to evaluate")
-            return
+        assert design_inputs, "no valid networks to evaluate"
 
         # batch evaluate all designs
-        evaluator = DesignEvaluator(self.model, max_evals=self.max_evals)
-        evaluated = evaluator.evaluate_designs(design_inputs)
+        evaluated = evaluate_design_inputs(self.model, design_inputs, max_evals=self.max_evals)
 
         # process results
         for idx, ev in enumerate(evaluated):
@@ -215,9 +224,6 @@ class DesignSummaryLogger(Logger):
 
     def _save_single_result(self, ev: EvaluatedDesign, info: dict, rank_dir: Path):
         """Save a single evaluated design result."""
-        from biocomptools.toollib.figuremakers.designutils import DesignResult
-        from biocomptools.plot import PlotJob
-
         if not ev.is_valid:
             return
 
@@ -228,21 +234,17 @@ class DesignSummaryLogger(Logger):
         # get prediction data for metrics
         td = prepare_target_data(target, max_samples=self.max_evals, seed=self.eval_seed)
         y_true = td.Y if td.Y is not None else np.zeros(td.n_samples)
-        y_pred = ev.pred_data.yval if len(ev.pred_data.yval) > 0 else np.zeros_like(y_true)
+        yval = ev.pred_data.yval
+        y_pred = np.asarray(yval) if yval is not None and len(yval) > 0 else np.zeros_like(y_true)
 
         # compute fingerprint for committed network
-        fingerprint = None
-        try:
-            from biocomp.fingerprint import compute_fingerprint
-            from biocomptools.modelmodel import NetworkModel
+        from biocomp.fingerprint import compute_fingerprint
+        from biocomptools.modelmodel import NetworkModel
 
-            network_model = NetworkModel(model=self.model, network=network)
-            fingerprint = compute_fingerprint(network_model)
-            logger.debug(f"  [{inp.target_name} rank {inp.rank}] Fingerprint: {fingerprint}")
-        except Exception as e:
-            logger.warning(
-                f"Failed to compute fingerprint for {inp.target_name} rank {inp.rank}: {e}"
-            )
+        assert self.model is not None, "model required for fingerprint computation"
+        network_model = NetworkModel(model=self.model, network=network)
+        fingerprint = compute_fingerprint(network_model)
+        logger.debug(f"  [{inp.target_name} rank {inp.rank}] Fingerprint: {fingerprint}")
 
         # create NRE metrics
         nre_metrics = (
@@ -286,46 +288,11 @@ class DesignSummaryLogger(Logger):
         )
 
         # generate plot via PlotJob
-        result = DesignResult(
-            network=network,
-            target=target,
-            target_name=inp.target_name,
-            rank=inp.rank,
-            replicate=inp.replicate,
-            scaffold_network_name=inp.scaffold_network_name,
-            loss=inp.loss,
-            recipe_hash=inp.recipe_hash,
-            run_name=inp.run_name,
-            model=self.model,
-            gt_data=ev.gt_data,
-            pred_data=ev.pred_data,
-            lattice_data=ev.lattice_data,
-            lattice_grid=ev.lattice_grid,
-            lattice_extent=ev.lattice_extent,
-            lattice_resolution=ev.lattice_resolution,
-            design_nre=ev.design_nre,
-            baseline_nre=ev.baseline_nre,
-            exp_x_data=ev.exp_x_data,
-            fingerprint=fingerprint,
-        )
-        try:
-            PlotJob.invoke(
-                'biocomp-jobs/plot/auto_figures/autofig_design_summary.yaml',
-                result=result,
-                output_dir=str(rank_dir),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to generate design plot: {e}")
+        result = build_design_result(ev, model=self.model, fingerprint=fingerprint)
+        invoke_design_summary_plot(result, output_dir=rank_dir)
 
     def _save_recipe(self, network: Any, output_path: Path):
-        try:
-            import dracon
-
-            with open(output_path, 'w') as f:
-                f.write(dracon.dump(network.to_recipe()))
-        except Exception as e:
-            logger.warning(f"Failed to save recipe: {e}")
-            output_path.write_text(f"# Recipe extraction failed: {e}\n")
+        save_network_recipe_yaml(network, output_path)
 
     def _save_evaluation_data(
         self,
@@ -406,11 +373,7 @@ class DesignSummaryLogger(Logger):
             all_losses, params = step_history.get('all_losses'), step_history.get('latest_params')
             if all_losses is None or params is None:
                 return
-            try:
-                self._generate_summaries(step, params, stack, all_losses, is_final=False)
-            except Exception as e:
-                logger.error(f"Summary generation failed at step {step}: {e}")
-                logger.exception(e)
+            self._generate_summaries(step, params, stack, all_losses, is_final=False)
 
         callbacks = [(self.log_period, periodic_callback)]
         if self.log_at_end:
@@ -424,11 +387,7 @@ class DesignSummaryLogger(Logger):
                 )
                 if all_losses is None or params is None:
                     return
-                try:
-                    self._generate_summaries(step, params, stack, all_losses, is_final=True)
-                except Exception as e:
-                    logger.error(f"Final summary generation failed: {e}")
-                    logger.exception(e)
+                self._generate_summaries(step, params, stack, all_losses, is_final=True)
 
             callbacks.append((-1, final_callback))
         return callbacks

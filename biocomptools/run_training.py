@@ -109,15 +109,14 @@ class TrainingProgram(BaseOptimizationProgram):
             }
         )
 
-    async def execute_optimization(self, logger_callbacks, async_handler, logger_objects=None):
+    async def execute_optimization(self, dispatch):
         from biocomp.train import start
 
         all_params, all_losses, step_history = start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
-            loggers=logger_callbacks,
-            async_handler=async_handler,
+            dispatch=dispatch,
         )
 
         return all_params, all_losses, step_history

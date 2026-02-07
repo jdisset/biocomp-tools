@@ -3,6 +3,7 @@
 import numpy as np
 
 from biocomptools.tuner import TunerConfig, ParamDescriptor
+from biocomp.designloss import GridLossWeights
 from biocomptools.tuner.param_schema import (
     is_ratio_param,
     is_embedding_param,
@@ -71,15 +72,19 @@ class TestTunerConfig:
     def test_default_config(self):
         config = TunerConfig()
         assert config.grid_resolution == (32, 32)
-        assert config.w_sinkhorn == 1.0
-        assert config.w_lncc == 0.5
+        assert config.weights.w_sinkhorn == 1.0
+        assert config.weights.w_lncc == 0.5
+        assert config.weights.w_mse == 1.0
+        assert config.weights.w_simse == 1.0
 
     def test_custom_config(self):
         config = TunerConfig(
             grid_resolution=(64, 64),
-            w_sinkhorn=0.5,
-            w_lncc=0.3,
-            w_mse=0.2,
+            weights=GridLossWeights(
+                w_sinkhorn=0.5,
+                w_lncc=0.3,
+                w_mse=0.2,
+            ),
         )
         assert config.grid_resolution == (64, 64)
-        assert config.w_sinkhorn == 0.5
+        assert config.weights.w_sinkhorn == 0.5

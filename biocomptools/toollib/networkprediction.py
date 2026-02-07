@@ -36,6 +36,27 @@ logger = get_logger(__name__)
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 
 
+def _stats_task_dump(
+    *,
+    task: Dict[str, Any],
+    idx: int,
+    n_networks: int,
+    yhats: List[NdArray] | None,
+    xvals: List[NdArray] | None,
+    input_order: Any,
+    collection_points: Any,
+) -> Dict[str, Any]:
+    return {
+        'n_networks': n_networks,
+        'shapes_yhats': [yh.shape for yh in yhats] if yhats is not None else None,
+        'shapes_x': [x.shape for x in xvals] if xvals is not None else None,
+        'input_order': input_order,
+        'collection_points': collection_points,
+        'task_i': idx,
+        'task': task,
+    }
+
+
 def reconstruct_from_flat(flat_values, shapes):
     """reconstruct a list of arrays from flat values and shapes"""
     result = []
@@ -554,12 +575,11 @@ class NetworkPrediction(GridStatsFields, DataSource):
             expected_inputs = net.nb_inputs
             actual_inputs = x.shape[1] if x.ndim > 1 else 1
             if actual_inputs > expected_inputs:
-                logger.warning(
+                raise ValueError(
                     f"Network {i} ({net.name}): predict_at has {actual_inputs} columns but "
-                    f"network expects {expected_inputs} inputs. Truncating to first {expected_inputs} columns. "
-                    f"(This typically happens when force_single_output=True reshapes the data for plotting.)"
+                    f"network expects {expected_inputs} inputs. "
+                    "Explicitly provide correctly shaped inputs instead of relying on truncation."
                 )
-                fixed_predict_at.append(x[:, :expected_inputs])
             elif actual_inputs < expected_inputs:
                 raise ValueError(
                     f"Network {i} ({net.name}): predict_at has {actual_inputs} columns but "
@@ -941,23 +961,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 }
             )
 
-        all_stats = [None] * len(self.network_model.network)
-
-        def get_info_dump(task, i):
-            return {
-                'n_networks': len(self.network_model.network),
-                'shapes_yhats': [yh.shape for yh in self._yhats],
-                'shapes_x': [x.shape for x in self._x],
-                'input_order': self.input_order,
-                'collection_points': self.collection_points,
-                'task_network_idx': task['network_idx'],
-                'task_network_name': task['network_info'].get('network_name', f"Network_{i}"),
-                'task_yhat_shape': task['yhat'].shape,
-                'task_gt_shape': None if task['gt'] is None else task['gt'].shape,
-                'task_x_shape': task['x'].shape,
-                'task_output_pos': task['dependent_output_pos'],
-                'task_nb_points_in_eval': task['nb_points_in_eval'],
-            }
+        all_stats: List[Dict[str, Any] | None] = [None] * len(self.network_model.network)
 
         def process_and_log_stats(idx, task, result):
             all_stats[idx] = result
@@ -978,13 +982,6 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 latent_x = rescaler.fwd(task['x'])
                 self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
 
-        def handle_exception(idx, task, e):
-            net_name = task['network_info'].get('network_name', f"Network_{idx}")
-            logger.error(f"Error calculating stats for network {net_name}: {e}")
-            logger.error(f"Task info: {get_info_dump(task, idx)}")
-            logger.exception(e)
-            all_stats[idx] = {'error': str(e)}
-
         if self.n_stats_workers > 1 and len(tasks) > 1:
             logger.info(
                 f"Calculating network stats in parallel with {self.n_stats_workers} workers."
@@ -1000,9 +997,13 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     task = tasks[idx]
                     try:
                         result = future.result()
-                        process_and_log_stats(idx, task, result)
                     except Exception as e:
-                        handle_exception(idx, task, e)
+                        net_name = task['network_info'].get('network_name', f"Network_{idx}")
+                        raise RuntimeError(
+                            f"Error calculating stats for network {net_name}: {e}; "
+                            f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                        ) from e
+                    process_and_log_stats(idx, task, result)
 
         else:
             if len(tasks) > 0:
@@ -1014,11 +1015,15 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 idx = task['network_idx']
                 try:
                     result = _calculate_single_network_stats(**task)
-                    process_and_log_stats(idx, task, result)
                 except Exception as e:
-                    handle_exception(idx, task, e)
-
-        return all_stats
+                    net_name = task['network_info'].get('network_name', f"Network_{idx}")
+                    raise RuntimeError(
+                        f"Error calculating stats for network {net_name}: {e}; "
+                        f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                    ) from e
+                process_and_log_stats(idx, task, result)
+        assert all(s is not None for s in all_stats), "all network stats must be populated"
+        return [s for s in all_stats if s is not None]
 
     def compute_stats_from_outputs(self, network_outputs: List[NdArray]) -> List[Dict[str, Any]]:
         """Compute stats from externally-provided network outputs (e.g., from batched predictions).
@@ -1077,7 +1082,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
             )
 
         # Process tasks (parallel if n_stats_workers > 1)
-        all_stats = [None] * len(tasks)
+        all_stats: List[Dict[str, Any] | None] = [None] * len(tasks)
         show_progress = self.verbose and len(tasks) > 3
 
         if self.n_stats_workers > 1 and len(tasks) > 1:
@@ -1095,12 +1100,15 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     )
                 for future in futures_iter:
                     idx = future_to_idx[future]
+                    task = tasks[idx]
                     try:
                         all_stats[idx] = future.result()
                     except Exception as e:
-                        net_name = tasks[idx]['network_info'].get('network_name', f'Network_{idx}')
-                        logger.warning(f"Stats computation failed for network {net_name}: {e}")
-                        all_stats[idx] = {'network_name': net_name, 'error': str(e)}
+                        net_name = task['network_info'].get('network_name', f'Network_{idx}')
+                        raise RuntimeError(
+                            f"Stats computation failed for network {net_name}: {e}; "
+                            f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                        ) from e
         else:
             from tqdm import tqdm
 
@@ -1113,9 +1121,12 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     all_stats[idx] = _calculate_single_network_stats(**task)
                 except Exception as e:
                     net_name = task['network_info'].get('network_name', f'Network_{idx}')
-                    logger.warning(f"Stats computation failed for network {net_name}: {e}")
-                    all_stats[idx] = {'network_name': net_name, 'error': str(e)}
-        return all_stats
+                    raise RuntimeError(
+                        f"Stats computation failed for network {net_name}: {e}; "
+                        f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                    ) from e
+        assert all(s is not None for s in all_stats), "all output stats must be populated"
+        return [s for s in all_stats if s is not None]
 
     def get_network_stats(
         self,
@@ -1161,11 +1172,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
     def save_csv(self):
         """save prediction statistics to a CSV file"""
-        try:
-            import pandas as pd
-        except ImportError:
-            logger.error("pandas is required to save prediction statistics to CSV")
-            return
+        import pandas as pd
 
         stats = self.get_network_stats()
         df = pd.DataFrame(stats)
@@ -1177,13 +1184,11 @@ class NetworkPrediction(GridStatsFields, DataSource):
         if self.verbose:
             logger.debug(f"prediction statistics DataFrame:\n{df.to_string()}")
 
-        try:
-            save_to = Path(self.save_csv_to)
-            save_to.parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(save_to, index=False)
-            logger.info(f"saved prediction statistics to {save_to}")
-        except Exception as e:
-            logger.error(f"failed to save CSV to {self.save_csv_to}: {e}")
+        assert self.save_csv_to is not None, "save_csv_to must be set before saving CSV"
+        save_to = Path(self.save_csv_to)
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(save_to, index=False)
+        logger.info(f"saved prediction statistics to {save_to}")
 
     def _normalize_input_order(self) -> List[Optional[List[InputOrderElement]]]:
         """normalize input_order to ensure it's consistent across networks"""

@@ -95,16 +95,29 @@ class TestDesignSummaryLogger:
         assert logger.log_period == 100 and logger.topk_per_target == 3
 
     def test_top_candidates_extraction(self):
-        from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
-        logger = DesignSummaryLogger()
+        import jax.numpy as jnp
+        from types import SimpleNamespace
+        from biocomp.design import get_topk_replicate_network_pairs
+
         all_losses = np.array([
             [[0.5, 0.3, 0.8], [0.2, 0.4, 0.1]],
             [[0.6, 0.1, 0.7], [0.3, 0.5, 0.2]],
         ])
-        candidates = logger._get_top_candidates(all_losses, target_id=0, n=2)
-        assert candidates[0] == (1, 1, 0.1) and candidates[1] == (0, 1, 0.3)
-        candidates = logger._get_top_candidates(all_losses, target_id=1, n=2)
-        assert candidates[0] == (0, 2, 0.1) and candidates[1] == (0, 0, 0.2)
+        dmanager = SimpleNamespace(
+            n_targets=all_losses.shape[1],
+            networks=[object() for _ in range(all_losses.shape[2])],
+        )
+        dconf = SimpleNamespace(n_replicates=all_losses.shape[0])
+        topk = get_topk_replicate_network_pairs(
+            losses=jnp.asarray(all_losses),
+            dmanager=dmanager,
+            dconf=dconf,
+            k=2,
+        )
+        assert topk[0][0] == (1, 1, pytest.approx(0.1))
+        assert topk[0][1] == (0, 1, pytest.approx(0.3))
+        assert topk[1][0] == (0, 2, pytest.approx(0.1))
+        assert topk[1][1] == (0, 0, pytest.approx(0.2))
 
 
 class TestReproducibility:

@@ -32,7 +32,8 @@ from dracon.commandline import make_program, Arg
 from biocomp.train import TrainingConfig
 from biocomp.compute import ComputeConfig
 from biocomp.datautils import DataConfig
-from biocomp.design import DesignManager, DesignConfig, Target, SVGTarget, DataTarget
+from biocomp.design import DesignManager, DesignConfig
+from biocomp.design_targets import SVGTarget, DataTarget
 from biocomp.network import Network
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot
 
@@ -129,9 +130,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         pass
 
     @abstractmethod
-    async def execute_optimization(
-        self, logger_callbacks, async_handler, logger_objects=None
-    ) -> Any:
+    async def execute_optimization(self, dispatch) -> Any:
         pass
 
     @abstractmethod
@@ -194,6 +193,8 @@ class BaseOptimizationProgram(BaseModel, ABC):
         self._metadata.update(self.metadata)
 
     async def run(self):
+        from biocomptools.logger_dispatch import LoggerDispatcher
+
         output_dir = self._save_dir / self.get_output_subdir()
         output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -205,19 +206,6 @@ class BaseOptimizationProgram(BaseModel, ABC):
         logger.debug(
             f"Initializing {len(self.loggers)} loggers of types {[type(lg) for lg in self.loggers]}"
         )
-
-        # At this point all loggers should be constructed (not deferred)
-        sync_loggers = [lg for lg in self.loggers if isinstance(lg, Logger) and not lg.async_ok]
-        async_loggers = [lg for lg in self.loggers if isinstance(lg, Logger) and lg.async_ok]
-        # new pattern loggers need to go through async_handler regardless of async_ok
-        new_pattern_loggers = [
-            lg
-            for lg in self.loggers
-            if isinstance(lg, Logger) and getattr(lg, '_uses_new_pattern', False)
-        ]
-
-        for logger_obj in sync_loggers:
-            logger_obj.initialize(self)
 
         self._yamldump = dr.dump(self)
         self._modeldump = self.model_dump()
@@ -231,115 +219,26 @@ class BaseOptimizationProgram(BaseModel, ABC):
         log_file = output_dir / 'output.log.txt'
         log_file.parent.mkdir(exist_ok=True, parents=True)
 
-        all_callbacks = []
-        for logger_obj in self.loggers:
-            if isinstance(logger_obj, Logger):
-                callbacks = logger_obj.get_callbacks(self)
-                all_callbacks.extend(
-                    [(period, callback, logger_obj) for period, callback in callbacks]
-                )
-
-        sync_callbacks = [
-            (period, callback)
-            for period, callback, logger_obj in all_callbacks
-            if not logger_obj.async_ok
-        ]
-        sync_logger_objects = [
-            logger_obj for period, callback, logger_obj in all_callbacks if not logger_obj.async_ok
-        ]
-        async_callbacks = [
-            (period, callback, logger_obj)
-            for period, callback, logger_obj in all_callbacks
-            if logger_obj.async_ok
-        ]
-
-        logger_callbacks = sync_callbacks.copy()
-
-        async_handler = None
-        # include new_pattern_loggers in the check - they need the handler for dispatch
-        needs_async_handler = (
-            async_callbacks
-            or self.save_all_steps
-            or self.keep_history_on_disk
-            or new_pattern_loggers
-        )
-        if self.async_logging and needs_async_handler:
-            # merge async_loggers with new_pattern_loggers (dedupe)
-            all_handler_loggers = list(
-                {id(lg): lg for lg in async_loggers + new_pattern_loggers}.values()
-            )
-            async_handler = self._setup_async_handler(async_callbacks, all_handler_loggers)
-            logger_callbacks.append((1, async_handler.create_callback()))
-
-            save_info = ", saving all steps" if self.save_all_steps else ""
-            if async_callbacks:
-                logger.info(
-                    f"Async logging: {len(sync_callbacks)} sync, {len(async_callbacks)} async (ThreadPool{save_info})"
-                )
-            else:
-                logger.info(f"Step history recording enabled{save_info}")
-        elif self.async_logging:
-            logger.info("Async logging enabled but no async-capable loggers found")
-        else:
-            logger_callbacks = [(period, callback) for period, callback, _ in all_callbacks]
-            sync_logger_objects = [logger_obj for _, _, logger_obj in all_callbacks]
-
-        result = await self.execute_optimization(
-            logger_callbacks, async_handler, sync_logger_objects
+        dispatch = LoggerDispatcher(
+            self.loggers,
+            training_program=self,
+            async_logging=self.async_logging,
+            async_store_location=self.async_store_location,
+            base_dir=self._save_dir,
+            keep_history_on_disk=self.keep_history_on_disk,
+            save_all_steps=self.save_all_steps,
+            n_workers=self.n_workers,
         )
 
-        if self.async_logging and async_handler:
-            self._shutdown_async_handler(async_handler, result, sync_callbacks)
+        result = await self.execute_optimization(dispatch)
+
+        dispatch.shutdown(result)
 
         self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         self.save_outputs(*result if isinstance(result, tuple) else [result])
 
-        for logger_obj in self.loggers:
-            if isinstance(logger_obj, Logger):
-                logger_obj.finalize()
-
-    def _setup_async_handler(self, async_callbacks, async_loggers):
-        from biocomptools.async_logger_handler import AsyncLoggerHandler
-
-        async_handler = AsyncLoggerHandler(
-            logger_callbacks=async_callbacks,
-            n_workers=self.n_workers,
-            logger_objects=async_loggers,
-            async_store_location=self.async_store_location,
-            base_dir=self._save_dir,
-            keep_history_on_disk=self.keep_history_on_disk,
-            save_all_steps=self.save_all_steps,
-        )
-
-        async_handler.initialize_loggers_async(self)
-        async_handler.wait_for_initialization()
-
-        return async_handler
-
-    def _shutdown_async_handler(self, async_handler, result, sync_callbacks=None):
-        step_history = result[-1] if isinstance(result, tuple) and len(result) > 2 else None
-        losses = result[1] if isinstance(result, tuple) and len(result) > 1 else []
-        final_step = len(losses) if losses else 0
-        training_config = getattr(self, 'training_conf', getattr(self, 'design_conf', None))
-
-        async_handler.process_end_loggers(
-            step=final_step,
-            training_config=training_config,
-            step_history=step_history,
-            stack=None,
-        )
-
-        if sync_callbacks:
-            for period, callback in sync_callbacks:
-                if period is None or period == -1:
-                    try:
-                        callback(final_step, training_config, step_history=step_history, stack=None)
-                    except Exception as e:
-                        logger.error(f"Sync logger final callback failed: {e}")
-                        logger.exception(e)
-
-        async_handler.shutdown()
+        dispatch.finalize(self.loggers)
 
     def save_metadata(self, save_dir: Path):
         with open(save_dir / 'metadata.json', 'w') as f:
@@ -400,7 +299,6 @@ DEFAULT_TYPES = list(
             DataConfig,
             DesignConfig,
             DesignManager,
-            Target,
             SVGTarget,
             DataTarget,
             Network,

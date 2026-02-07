@@ -336,7 +336,7 @@ class DataTargetSource(BaseModel):
 
     @model_validator(mode="after")
     def _build_targets(self):
-        from biocomp.design import DataTarget
+        from biocomp.design_targets import DataTarget
 
         self._resolved_model = _resolve_model(self.model)
 

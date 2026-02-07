@@ -4,15 +4,13 @@ Single source of truth for all design evaluation. All networks are batched into
 ONE NetworkModel to avoid repeated JIT compilation (~25s savings per batch).
 """
 
-import warnings
 import numpy as np
 import time
-import traceback
 from dataclasses import dataclass
 from typing import Any
 
 from biocomp.plotutils import PlotData
-from biocomp.design import DataTarget
+from biocomp.design_targets import DataTarget
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.design_data import prepare_target_data
 
@@ -65,7 +63,7 @@ class EvaluatedDesign:
 class DesignEvaluator:
     """Batched design evaluation - single source of truth for predictions and NRE."""
 
-    def __init__(self, model: Any, max_evals: int = 50000, fail_fast: bool = False):
+    def __init__(self, model: Any, max_evals: int = 50000, fail_fast: bool = True):
         assert model is not None, "model required for evaluation"
         self.model = model
         self.max_evals = max_evals
@@ -85,14 +83,7 @@ class DesignEvaluator:
         if not valid_inputs:
             return [self._make_invalid_result(inp) for inp in inputs]
 
-        try:
-            precomputed, baseline_cache = self._batch_compute(valid_inputs)
-        except Exception as e:
-            if self.fail_fast:
-                raise
-            logger.warning(f"Batch compute failed ({e}), falling back to one-by-one evaluation")
-            precomputed, baseline_cache, failed_indices = self._batch_compute_safe(valid_inputs)
-            invalid_indices.update(failed_indices)
+        precomputed, baseline_cache = self._batch_compute(valid_inputs)
 
         results = []
         for i, inp in enumerate(inputs):
@@ -106,18 +97,10 @@ class DesignEvaluator:
                 pred_data = precomputed[key]['pred_data']
                 design_nre = precomputed[key]['design_nre']
                 exp_x_data = precomputed[key].get('exp_x_data')
-                if exp_x_data is None:
-                    logger.warning(
-                        f"exp_x_data missing for {inp.target_name} "
-                        + f"(key in precomputed: {list(precomputed[key].keys())}), using empty fallback"
-                    )
-                    n_in = getattr(inp.network, 'nb_inputs', 2)
-                    exp_x_data = PlotData(
-                        xval=np.zeros((0, n_in)),
-                        yval=np.zeros(0),
-                        input_names=[f'X{j + 1}' for j in range(n_in)],
-                        output_name='Y',
-                    )
+                assert exp_x_data is not None, (
+                    f"exp_x_data missing for {inp.target_name} "
+                    + f"(key has: {list(precomputed[key].keys())})"
+                )
                 baseline_nre = self._get_baseline_nre(inp.target, baseline_cache)
                 gt_data = self._compute_gt_data(inp)
                 lattice_data, lattice_grid, lattice_extent, lattice_resolution = (
@@ -196,112 +179,32 @@ class DesignEvaluator:
         n_inputs = networks[0].nb_inputs
         assert n_inputs > 0, f"network has no inputs: {networks[0]}"
         logger.debug(f"Computing exp_x predictions for {n} networks, n_inputs={n_inputs}")
-        try:
-            exp_x_samples = sample_latent(150000, n_inputs, seed=42)
-            logger.debug(f"exp_x_samples shape: {exp_x_samples.shape}")
-            exp_predictor = NetworkPrediction(
-                predict_at=[exp_x_samples] * n,
-                network_model=network_model,
-                already_latent=True,
-                device='gpu',
-                verbose=False,
-                skip_input_reorder=True,
+        exp_x_samples = sample_latent(150000, n_inputs, seed=42)
+        logger.debug(f"exp_x_samples shape: {exp_x_samples.shape}")
+        exp_predictor = NetworkPrediction(
+            predict_at=[exp_x_samples] * n,
+            network_model=network_model,
+            already_latent=True,
+            device='gpu',
+            verbose=False,
+            skip_input_reorder=True,
+        )
+        exp_preds = exp_predictor.get_data(rescale_latent=True)
+        assert len(exp_preds) == n, f"exp_x prediction count {len(exp_preds)} != {n}"
+        for i, exp_pred in enumerate(exp_preds):
+            exp_x_data = PlotData(
+                xval=exp_pred.x,
+                yval=exp_pred.y,
+                input_names=[f'X{j + 1}' for j in range(exp_pred.x.shape[1])],
+                output_name='Y',
             )
-            exp_preds = exp_predictor.get_data(rescale_latent=True)
-            assert len(exp_preds) == n, f"exp_x prediction count {len(exp_preds)} != {n}"
-            for i, exp_pred in enumerate(exp_preds):
-                exp_x_data = PlotData(
-                    xval=exp_pred.x,
-                    yval=exp_pred.y,
-                    input_names=[f'X{j + 1}' for j in range(exp_pred.x.shape[1])],
-                    output_name='Y',
-                )
-                precomputed[keys[i]]['exp_x_data'] = exp_x_data
-            logger.debug(f"Added exp_x_data for {len(exp_preds)} networks")
-        except Exception as e:
-            logger.error(f"exp_x computation failed in _batch_compute: {e}")
-            raise
+            precomputed[keys[i]]['exp_x_data'] = exp_x_data
+        logger.debug(f"Added exp_x_data for {len(exp_preds)} networks")
 
         logger.info(f"Batched {n} predictions (incl. exp X) in {time.time() - start:.2f}s")
 
         baseline_cache = self._batch_compute_baselines(valid_inputs)
         return precomputed, baseline_cache
-
-    def _batch_compute_safe(
-        self, valid_inputs: list[tuple[int, DesignInput]]
-    ) -> tuple[dict[tuple, dict], dict[int, float | None], set[int]]:
-        """Fallback: compute predictions one by one, catching errors per network."""
-        from biocomptools.modelmodel import NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction
-
-        precomputed = {}
-        failed_indices = set()
-
-        for i, inp in valid_inputs:
-            key = (inp.target_name, id(inp.network))
-            try:
-                td = prepare_target_data(inp.target, max_samples=self.max_evals, seed=42)
-                network_model = NetworkModel(model=self.model, network=inp.network)
-                has_gt = td.reshape_Y_for_prediction() is not None
-
-                predictor = NetworkPrediction(
-                    predict_at=[td.X],
-                    ground_truth=[td.reshape_Y_for_prediction()] if has_gt else None,
-                    max_evals=self.max_evals,
-                    network_model=network_model,
-                    already_latent=True,
-                    enable_gridstats=has_gt,
-                    device='gpu',
-                    verbose=False,
-                    skip_input_reorder=True,
-                    shuffle_inputs=True,
-                )
-                preds = predictor.get_data(rescale_latent=True)
-                stats = predictor.get_network_stats() if has_gt else None
-
-                pred = preds[0]
-                pred_data = PlotData(
-                    xval=pred.x,
-                    yval=pred.y,
-                    input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
-                    output_name='Y',
-                )
-                nre = stats[0].get('noise_relative_error') if stats else None
-                precomputed[key] = {'pred_data': pred_data, 'design_nre': nre}
-
-                from biocomptools.toollib.typical_experimental_distribution import sample_latent
-
-                n_inputs = inp.network.nb_inputs
-                logger.debug(f"[safe] Computing exp_x for network {i}, n_inputs={n_inputs}")
-                exp_x_samples = sample_latent(150000, n_inputs, seed=42)
-                exp_predictor = NetworkPrediction(
-                    predict_at=[exp_x_samples],
-                    network_model=network_model,
-                    already_latent=True,
-                    device='gpu',
-                    verbose=False,
-                    skip_input_reorder=True,
-                )
-                exp_preds = exp_predictor.get_data(rescale_latent=True)
-                exp_x_data = PlotData(
-                    xval=exp_preds[0].x,
-                    yval=exp_preds[0].y,
-                    input_names=[f'X{j + 1}' for j in range(exp_preds[0].x.shape[1])],
-                    output_name='Y',
-                )
-                precomputed[key]['exp_x_data'] = exp_x_data
-                logger.debug(f"[safe] Added exp_x_data for network {i}")
-            except Exception as e:
-                logger.warning(f"Failed to evaluate design {i}: {e}")
-                failed_indices.add(i)
-
-        baseline_cache = {}
-        try:
-            baseline_cache = self._batch_compute_baselines(valid_inputs)
-        except Exception as e:
-            logger.warning(f"Failed to compute baselines: {e}")
-
-        return precomputed, baseline_cache, failed_indices
 
     def _batch_compute_baselines(
         self, valid_inputs: list[tuple[int, DesignInput]]
@@ -329,35 +232,30 @@ class DesignEvaluator:
         logger.info(f"Computing baseline NRE for {n} original networks...")
         start = time.time()
 
-        try:
-            network_model = NetworkModel(model=self.model, network=networks)
-            predict_at, ground_truth = [], []
-            for _net, target in zip(networks, targets, strict=True):
-                td = prepare_target_data(target, max_samples=self.max_evals, seed=42)
-                predict_at.append(td.X)
-                ground_truth.append(td.reshape_Y_for_prediction())
+        network_model = NetworkModel(model=self.model, network=networks)
+        predict_at, ground_truth = [], []
+        for _net, target in zip(networks, targets, strict=True):
+            td = prepare_target_data(target, max_samples=self.max_evals, seed=42)
+            predict_at.append(td.X)
+            ground_truth.append(td.reshape_Y_for_prediction())
 
-            predictor = NetworkPrediction(
-                predict_at=predict_at,
-                ground_truth=ground_truth,
-                max_evals=self.max_evals,
-                network_model=network_model,
-                already_latent=True,
-                enable_gridstats=True,
-                device='gpu',
-                verbose=False,
-                skip_input_reorder=True,  # baseline: preserve positional axis mapping
-            )
-            stats = predictor.get_network_stats()
-            assert stats and len(stats) == n
+        predictor = NetworkPrediction(
+            predict_at=predict_at,
+            ground_truth=ground_truth,
+            max_evals=self.max_evals,
+            network_model=network_model,
+            already_latent=True,
+            enable_gridstats=True,
+            device='gpu',
+            verbose=False,
+            skip_input_reorder=True,  # baseline: preserve positional axis mapping
+        )
+        stats = predictor.get_network_stats()
+        assert stats and len(stats) == n
 
-            result = {items[i][0]: stats[i].get('noise_relative_error') for i in range(n)}
-            logger.info(f"Baseline NRE computed in {time.time() - start:.2f}s")
-            return result
-        except Exception as e:
-            logger.warning(f"Baseline NRE computation failed: {e}")
-            logger.debug(traceback.format_exc())
-            return {}
+        result = {items[i][0]: stats[i].get('noise_relative_error') for i in range(n)}
+        logger.info(f"Baseline NRE computed in {time.time() - start:.2f}s")
+        return result
 
     def _get_baseline_nre(self, target: Any, cache: dict[int, float | None]) -> float | None:
         if not isinstance(target, DataTarget) or target.original_network is None:
@@ -421,43 +319,3 @@ class DesignEvaluator:
             exp_x_data=empty,
             is_valid=False,
         )
-
-
-# Legacy API for backward compatibility
-def _is_valid_network(network: Any) -> bool:
-    return is_valid_network(network)
-
-
-def precompute_for_design_results(
-    model: Any, design_results: list[dict], max_evals: int = 50000
-) -> tuple[dict[tuple, dict], dict[int, float | None]]:
-    """Legacy function - use DesignEvaluator.evaluate_designs() instead."""
-    warnings.warn(
-        "precompute_for_design_results() is deprecated, use DesignEvaluator.evaluate_designs()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    evaluator = DesignEvaluator(model, max_evals)
-
-    inputs = [
-        DesignInput(
-            network=r['network'],
-            target=r['target'],
-            target_name=r['target_name'],
-            rank=r.get('rank', 0),
-            replicate=r.get('replicate', 0),
-            scaffold_network_name=r.get('network_name', ''),
-            loss=r.get('loss', 0.0),
-            recipe_hash=r.get('recipe_hash', ''),
-            run_name=r.get('run_name', ''),
-            design_dir=r.get('design_dir', ''),
-        )
-        for r in design_results
-    ]
-
-    valid = [(i, inp) for i, inp in enumerate(inputs) if is_valid_network(inp.network)]
-    if not valid:
-        return {}, {}
-
-    precomputed, baseline_cache = evaluator._batch_compute(valid)
-    return precomputed, baseline_cache

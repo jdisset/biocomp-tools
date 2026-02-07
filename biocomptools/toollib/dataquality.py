@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from biocomptools.toollib.networkprediction import _calculate_grid_stats
+from biocomptools.toollib.networkprediction import _compute_split_half_nrmse
 from biocomp.metric_utils import DEFAULT_GRIDSTATS_PARAMS
 
 
@@ -16,7 +16,7 @@ def compute_split_half_nrmse(
     seed: int = 42,
 ) -> Dict[str, Any]:
     """
-    Compute intrinsic noise floor via bootstrapped symmetric split-half nRMSE.
+    Compute intrinsic noise floor via the SSOT split-half implementation.
 
     This estimates the theoretical lower bound of prediction error - no model can
     reliably achieve a score lower than this.
@@ -29,41 +29,25 @@ def compute_split_half_nrmse(
         seed: Random seed for reproducibility
 
     Returns:
-        Dict with 'split_half_nrmse', 'std', 'n_bootstraps', 'n_points'
+        Dict with 'split_half_nrmse', 'std', 'n_bootstraps', 'n_points'.
+        `std` is `NaN` because the canonical implementation currently returns
+        a single aggregated split-half estimate.
     """
     params = params or DEFAULT_GRIDSTATS_PARAMS
-    rng = np.random.RandomState(seed)
-
     y = y.reshape(-1, 1) if y.ndim == 1 else y
     n_points = len(x)
-
-    if n_points < 100:
-        return {'split_half_nrmse': np.nan, 'std': np.nan, 'n_bootstraps': 0, 'n_points': n_points}
-
-    scores = []
-    for _ in range(n_bootstraps):
-        perm = rng.permutation(n_points)
-        mid = n_points // 2
-        idx_a, idx_b = perm[:mid], perm[mid:2*mid]
-
-        x_a, y_a = x[idx_a], y[idx_a]
-        x_b, y_b = x[idx_b], y[idx_b]
-
-        # Symmetric evaluation: A->B and B->A
-        stats_ab = _calculate_grid_stats(y_a, y_b, x_b, params)
-        stats_ba = _calculate_grid_stats(y_b, y_a, x_a, params)
-
-        score = (stats_ab['grid_nrmse'] + stats_ba['grid_nrmse']) / 2.0
-        if np.isfinite(score):
-            scores.append(score)
-
-    if not scores:
-        return {'split_half_nrmse': np.nan, 'std': np.nan, 'n_bootstraps': 0, 'n_points': n_points}
+    score = _compute_split_half_nrmse(
+        latent_x=x,
+        latent_gt=y,
+        params=params,
+        n_bootstraps=n_bootstraps,
+        seed=seed,
+    )
 
     return {
-        'split_half_nrmse': float(np.mean(scores)),
-        'std': float(np.std(scores)),
-        'n_bootstraps': len(scores),
+        'split_half_nrmse': float(score),
+        'std': np.nan,
+        'n_bootstraps': n_bootstraps if np.isfinite(score) else 0,
         'n_points': n_points,
     }
 

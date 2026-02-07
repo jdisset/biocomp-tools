@@ -11,7 +11,7 @@ import matplotlib.axes
 from matplotlib.patches import FancyBboxPatch
 
 from biocomp.plotutils import PlotData
-from biocomp.design import DataTarget
+from biocomp.design_targets import DataTarget
 
 if TYPE_CHECKING:
     from biocomptools.toollib.design_eval import EvaluatedDesign

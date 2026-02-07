@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dracon.commandline import Arg, dracon_program
 from dracon.diagnostics import DraconError, handle_dracon_error
 
-from biocomp.design_targets import DataTarget, SVGTarget, Target, TargetUnion
+from biocomp.design_targets import DataTarget, SVGTarget, TargetUnion
 from biocomp.network import Network, recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomptools.logging_config import get_logger, setup_logging
@@ -30,7 +30,7 @@ from .session import TunerSession
 
 logger = get_logger(__name__)
 
-TUNER_TYPES = [Recipe, Network, SVGTarget, DataTarget, Target, BiocompModel, ModelSelector]
+TUNER_TYPES = [Recipe, Network, SVGTarget, DataTarget, BiocompModel, ModelSelector]
 
 
 @dracon_program(
