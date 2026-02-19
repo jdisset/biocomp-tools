@@ -36,6 +36,7 @@ plot_config:
               k: 100
               min_points: 5
               radius: 0.10
+
           heatmap_params:
             opacity: ${float(opacity)}
             show_image: True

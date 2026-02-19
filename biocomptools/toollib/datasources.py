@@ -218,7 +218,7 @@ class FileSource(DataSource):
 
     def _load_networks(self):
         import dracon
-        from biocomp.recipe import Recipe
+        from biocomp.recipe import Recipe, dict_to_recipe
         from biocomp.network import recipe_to_networks
 
         recipe_path = Path(self.recipe_file).expanduser().resolve()
@@ -230,7 +230,8 @@ class FileSource(DataSource):
             content = content[idx:]
 
         recipe_data = dracon.loads(content)
-        recipe = Recipe.model_validate(recipe_data)
+        is_legacy = any('sources' in c for c in recipe_data.get('content', []))
+        recipe = dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
         self._networks = recipe_to_networks(recipe, lib=self._lib)
 
     def _data_from_network(self, network: bc.network.Network) -> Optional[PlotData]:

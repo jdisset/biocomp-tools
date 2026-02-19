@@ -187,13 +187,13 @@ def run_figure(f, **kw) -> FigureResult:
         if not f.is_txt_output:
             plt.close('all')
         t1 = time.time()
-        opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path
+        opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path or "(no file output)"
         logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
     except Exception as e:
         logger.error(f"Error running figure: {e}")
         logger.exception(e)
         raise
-    opath = getattr(f.figure_spec, '_output_path_override', None) or str(f.figure_spec.output_path)
+    opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path or "(no file output)"
     return FigureResult(
         path=str(opath),
         figure_spec=f.figure_spec,

@@ -127,7 +127,7 @@ callstack_params:
               ha: left
               va: center
           slice:
-            offset: [85, 0]
+            offset: [32, 0]
             props:
               fontsize: 7
               color: ${colors_grey}
@@ -160,7 +160,7 @@ callstack_params:
             [
               {
                 direction: [1, 0, 0],
-                length: 80,
+                length: 28,
                 props:
                   {
                     color: "${colors_grey}",

@@ -257,7 +257,7 @@ class Figure(BaseModel):
                 continue
 
     def run(self, overwrite: bool = True, finalize: bool = True):
-        if not overwrite and self.figure_spec.output_path.exists():
+        if not overwrite and self.figure_spec.output_path and self.figure_spec.output_path.exists():
             logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
             return
 
@@ -358,6 +358,8 @@ class Figure(BaseModel):
         from pathlib import Path as PathLib
 
         output_path = self.figure_spec.output_path
+        if output_path is None:
+            return
         if not str(output_path).endswith('.txt'):
             output_path = PathLib(str(output_path).rsplit('.', 1)[0] + '.txt')
 
@@ -376,7 +378,7 @@ class Figure(BaseModel):
 
         data = {}
         meta = {
-            "output_path": str(self.figure_spec.output_path),
+            "output_path": str(self.figure_spec.output_path or ""),
             "output_dir": str(self.figure_spec.output_dir),
             "output_file": str(self.figure_spec.output_file),
             "n_tasks": len(self._ptasks) if self._ptasks else 0,
