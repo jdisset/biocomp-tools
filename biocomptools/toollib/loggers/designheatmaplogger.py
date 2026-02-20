@@ -6,6 +6,8 @@ from typing import Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.design_pipeline import CommitCache, precommit_pairs
+from biocomptools.toollib.design_selection import normalize_losses_for_ranking
 from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
 from biocomp.designloss import GridLossWeights
@@ -60,6 +62,39 @@ def _extract_at_indices(arr: Any, rid: int, tid: int, nid: int) -> float:
     return float(np.mean(arr))
 
 
+def _extract_single_dependent_prediction(
+    y_pred: Any,
+    dependent_mask: Any | None,
+) -> np.ndarray:
+    """Extract a single dependent output series from model prediction."""
+    arr = np.asarray(y_pred, dtype=np.float32)
+
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim != 2:
+        raise ValueError(f"Unexpected prediction shape {arr.shape}; expected 1D or 2D")
+
+    # Already single-output
+    if arr.shape[1] == 1:
+        return arr[:, 0]
+
+    if dependent_mask is None:
+        raise ValueError(
+            f"Prediction has {arr.shape[1]} outputs but no dependent mask available"
+        )
+    dep = np.asarray(dependent_mask, dtype=bool).reshape(-1)
+    if dep.size != arr.shape[1]:
+        raise ValueError(
+            f"Prediction output dim mismatch: y_pred has {arr.shape[1]} outputs, "
+            f"dependent_mask has {dep.size}"
+        )
+
+    dep_idx = np.flatnonzero(dep)
+    if dep_idx.size != 1:
+        raise ValueError(f"Expected exactly one dependent output, got {dep_idx.size}")
+    return arr[:, int(dep_idx[0])]
+
+
 class DesignHeatmapLogger(Logger):
     """Logger that prints rich ASCII heatmaps of target vs prediction side-by-side.
 
@@ -105,6 +140,13 @@ class DesignHeatmapLogger(Logger):
         default=True,
         description="Compute fresh predictions from latest_params (ensures display matches fingerprint)",
     )
+    allow_stale_final_fallback: bool = Field(
+        default=False,
+        description=(
+            "If True, FINAL RESULT can fall back to stale yhatdep when fresh committed prediction "
+            "fails. Default False to avoid silently masking pipeline problems."
+        ),
+    )
     fingerprint_only_at_end: bool = Field(
         default=True,
         description="Only compute fingerprint at final step (saves time during training)",
@@ -127,6 +169,9 @@ class DesignHeatmapLogger(Logger):
     _output_dir: str | None = None
     _last_step_history: dict | None = None
     _model_path: str | None = None
+    _training_program: Any = None
+    _last_fresh_prediction_error: str | None = None
+    _committed_networks_cache: dict[tuple[int, int, int, int], list[Any]] = {}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -143,9 +188,87 @@ class DesignHeatmapLogger(Logger):
         self._output_dir = None
         self._last_step_history = None
         self._model_path = None
+        self._training_program = None
+        self._last_fresh_prediction_error = None
+        self._committed_networks_cache = {}
+
+    def _get_live_dmanager(self):
+        tp = self._training_program
+        if tp is not None and hasattr(tp, "_dmanager") and tp._dmanager is not None:
+            return tp._dmanager
+        return self._dmanager
+
+    def _get_live_model(self):
+        tp = self._training_program
+        if tp is not None and hasattr(tp, "_model") and tp._model is not None:
+            return tp._model
+        return self._model
+
+    def _get_shared_commit_cache(self) -> CommitCache | None:
+        tp = self._training_program
+        if tp is not None:
+            return getattr(tp, '_commit_cache', None)
+        return None
+
+    def _build_fresh_stack(self):
+        # Prefer the shared post-optimization stack (avoids redundant build)
+        tp = self._training_program
+        if tp is not None:
+            post_stack = getattr(tp, '_post_stack', None)
+            if post_stack is not None:
+                return post_stack
+        dmanager = self._get_live_dmanager()
+        model = self._get_live_model()
+        if dmanager is None or model is None:
+            return None
+        auto_lock = (
+            getattr(self._design_conf, 'auto_lock_topology_tus', True) if self._design_conf else True
+        )
+        return dmanager.build_stack(model, auto_lock_topology_tus=auto_lock)
+
+    def _get_committed_networks(
+        self,
+        params,
+        rep_idx: int,
+        target_idx: int,
+        stack=None,
+    ) -> list[Any] | None:
+        """Get committed networks for a (replicate, target) pair with cache reuse."""
+        from biocomp.jaxutils import tree_get
+
+        if stack is None:
+            stack = self._build_fresh_stack()
+            if stack is None:
+                return None
+
+        cache_key = (id(params), id(stack), rep_idx, target_idx)
+        cached = self._committed_networks_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        shared_cache = self._get_shared_commit_cache()
+        if shared_cache is not None:
+            cached = shared_cache.get(rep_idx, target_idx, stack)
+            if cached is not None:
+                self._committed_networks_cache[cache_key] = cached
+                return cached
+
+        specific_params = tree_get(params, (rep_idx, target_idx))
+        committed_networks = stack.commit(specific_params)
+        self._committed_networks_cache[cache_key] = committed_networks
+
+        if shared_cache is not None:
+            try:
+                shared_cache.put(rep_idx, target_idx, committed_networks, stack)
+            except AssertionError:
+                # Ignore stack-mismatch for foreign cache instances.
+                pass
+
+        return committed_networks
 
     def initialize(self, training_program=None):
         if training_program:
+            self._training_program = training_program
             if hasattr(training_program, '_model'):
                 self._model = training_program._model
             if hasattr(training_program, '_save_dir'):
@@ -180,14 +303,7 @@ class DesignHeatmapLogger(Logger):
 
         if self._dmanager and self._model:
             try:
-                auto_lock = (
-                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
-                    if self._design_conf
-                    else True
-                )
-                self._stack = self._dmanager.build_stack(
-                    self._model, auto_lock_topology_tus=auto_lock
-                )
+                self._stack = self._build_fresh_stack()
             except Exception as e:
                 logger.warning(f"Failed to build stack for introspection: {e}")
 
@@ -197,7 +313,9 @@ class DesignHeatmapLogger(Logger):
                 target = targets[self.target_idx]
                 try:
                     _, Y_grid = target.get_lattice(resolution=self._grid_resolution, seed=0)
-                    self._cached_target_grid = Y_grid
+                    xres, yres = self._grid_resolution
+                    # Match run_design summary path exactly.
+                    self._cached_target_grid = np.asarray(Y_grid).reshape(yres, xres)
                 except Exception as e:
                     logger.warning(f"Failed to cache target grid: {e}")
 
@@ -213,25 +331,23 @@ class DesignHeatmapLogger(Logger):
         Args:
             stack: Optional pre-built stack. If None, builds fresh (can be stale after hard-pruning).
         """
-        if self._model is None or self._dmanager is None or self._grid_resolution is None:
+        dmanager = self._get_live_dmanager()
+        model = self._get_live_model()
+        if model is None or dmanager is None or self._grid_resolution is None:
             return None
 
         try:
-            import jax
-            from biocomp.jaxutils import tree_get
+            self._last_fresh_prediction_error = None
             from biocomptools.modelmodel import NetworkModel
+            from biocomp.fingerprint import FINGERPRINT_SEED
 
             if stack is None:
-                auto_lock = (
-                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
-                    if self._design_conf
-                    else True
-                )
-                stack = self._dmanager.build_stack(
-                    self._model, auto_lock_topology_tus=auto_lock
-                )
-            specific_params = tree_get(params, (rep_idx, target_idx))
-            committed_networks = stack.commit(specific_params)
+                stack = self._build_fresh_stack()
+                if stack is None:
+                    return None
+            committed_networks = self._get_committed_networks(params, rep_idx, target_idx, stack)
+            if committed_networks is None:
+                return None
 
             if network_idx >= len(committed_networks):
                 return None
@@ -240,22 +356,28 @@ class DesignHeatmapLogger(Logger):
             if not committed_net.compute_graph.nodes:
                 return None
 
-            nm = NetworkModel(model=self._model, network=committed_net)
-            target = self._dmanager.targets[target_idx]
+            nm = NetworkModel(model=model, network=committed_net)
+            target = dmanager.targets[target_idx]
             X_lat, _ = target.get_lattice(resolution=self._grid_resolution, seed=0)
             X_lat = np.asarray(X_lat)
-
             Y_pred, _ = nm.predict(
                 X_lat,
-                key=jax.random.PRNGKey(42),
-                disable_variational=True,
+                key=FINGERPRINT_SEED,
                 z_value=0.0,
+                disable_variational=True,
+                device='gpu',
             )
-            Y_pred = np.asarray(Y_pred).flatten()
+            dep_mask = committed_net.get_dependent_output_mask()
+            Y_pred = _extract_single_dependent_prediction(Y_pred, dep_mask)
             xres, yres = self._grid_resolution
+            if Y_pred.size != xres * yres:
+                raise ValueError(
+                    f"Prediction has {Y_pred.size} values; expected grid size {xres * yres}"
+                )
             return Y_pred.reshape(yres, xres)
 
         except Exception as e:
+            self._last_fresh_prediction_error = str(e)
             logger.debug(
                 f"Fresh prediction failed (rid={rep_idx}, tid={target_idx}, nid={network_idx}): {e}"
             )
@@ -265,49 +387,67 @@ class DesignHeatmapLogger(Logger):
         self, step_history: dict, tid: int, n_replicates: int, n_networks: int
     ) -> list[tuple[int, int, float]]:
         """Get top k (replicate, network) pairs sorted by loss. Returns [(rep_idx, net_idx, loss), ...]."""
-        all_losses = step_history.get("all_losses")
-        if all_losses is None:
+        losses_3d = normalize_losses_for_ranking(step_history.get("all_losses"))
+        if losses_3d is None:
             return [(r, n, float('nan')) for r in range(n_replicates) for n in range(n_networks)][
                 : self.top_k
             ]
 
-        arr = np.asarray(all_losses)
+        losses_3d = np.asarray(losses_3d)
+        if losses_3d.shape[0] != n_replicates or losses_3d.shape[2] != n_networks:
+            return [(r, n, float('nan')) for r in range(n_replicates) for n in range(n_networks)][
+                : self.top_k
+            ]
+        tid_safe = min(tid, losses_3d.shape[1] - 1)
 
         # Build list of (rep_idx, net_idx, loss) for all designs
         designs: list[tuple[int, int, float]] = []
-
-        if arr.ndim == 0:
-            designs = [(0, 0, float(arr))]
-        elif arr.ndim == 1:
-            # Shape: (n_networks,) - single replicate
-            for nid in range(len(arr)):
-                designs.append((0, nid, float(arr[nid])))
-        elif arr.ndim == 2:
-            # Shape: (n_targets, n_networks) - single replicate
-            tid_safe = min(tid, arr.shape[0] - 1)
-            for nid in range(arr.shape[1]):
-                designs.append((0, nid, float(arr[tid_safe, nid])))
-        elif arr.ndim == 3:
-            # Shape: (n_replicates, n_targets, n_networks)
-            tid_safe = min(tid, arr.shape[1] - 1)
-            for rid in range(arr.shape[0]):
-                for nid in range(arr.shape[2]):
-                    designs.append((rid, nid, float(arr[rid, tid_safe, nid])))
-        elif arr.ndim == 4:
-            # Shape: (n_replicates, n_batches, n_targets, n_networks)
-            # Take last batch (most recent)
-            tid_safe = min(tid, arr.shape[2] - 1)
-            for rid in range(arr.shape[0]):
-                for nid in range(arr.shape[3]):
-                    loss = float(arr[rid, -1, tid_safe, nid])
-                    designs.append((rid, nid, loss))
-        else:
-            # Fallback: average extra dims
-            designs = [(0, 0, float(np.mean(arr)))]
+        for rid in range(n_replicates):
+            for nid in range(n_networks):
+                designs.append((rid, nid, float(losses_3d[rid, tid_safe, nid])))
 
         # Sort by loss (ascending) and take top k
         designs.sort(key=lambda x: x[2])
         return designs[: self.top_k]
+
+    def _get_tu_counts_from_introspection(
+        self,
+        params,
+        stack,
+        rid: int,
+        tid: int,
+        nid: int,
+    ) -> tuple[int, int] | None:
+        """Compute TU counts from the same introspection source as the TU table."""
+        try:
+            from biocomp.jaxutils import tree_get
+            from biocomp.paramintrospect import aggregate_by_tu, introspect_stack
+
+            specific_params = tree_get(params, (rid, tid))
+            infos = introspect_stack(stack, specific_params, nid)
+            tu_data = aggregate_by_tu(infos)
+
+            if self.params_view == "committed":
+                committed_networks = self._get_committed_networks(params, rid, tid, stack)
+                if committed_networks is None:
+                    return None
+                if nid >= len(committed_networks):
+                    return None
+                committed_tu_ids: set[str] = set()
+                committed_graph = committed_networks[nid].compute_graph
+                if committed_graph is not None:
+                    for node in committed_graph.nodes.values():
+                        if node.node_type == "source":
+                            tu_name = node.extra.get("name", "")
+                            if tu_name:
+                                committed_tu_ids.add(tu_name)
+                tu_data = {k: v for k, v in tu_data.items() if k in committed_tu_ids}
+
+            enabled = sum(1 for entries in tu_data.values() if any(tg.is_enabled for _, tg in entries))
+            total = len(tu_data)
+            return int(enabled), int(total)
+        except Exception:
+            return None
 
     def _render_single_design(
         self,
@@ -326,80 +466,121 @@ class DesignHeatmapLogger(Logger):
     ) -> list[str]:
         """Render heatmap and loss table for a single (replicate, network) design."""
         xres, yres = self._grid_resolution  # type: ignore
-        net_name = self._network_names[nid] if nid < len(self._network_names) else f"Net {nid}"
+        live_dmanager = self._get_live_dmanager()
+        network_names = self._network_names
+        if live_dmanager is not None and hasattr(live_dmanager, "networks"):
+            network_names = [n.name for n in live_dmanager.networks]
+            self._network_names = network_names
+        net_name = network_names[nid] if nid < len(network_names) else f"Net {nid}"
 
         Y_pred_grid = None
         params = step_history.get('latest_params')
-        if self.use_fresh_predictions and params is not None:
+        force_fresh_for_final = is_final and params is not None
+        use_fresh_prediction = (self.use_fresh_predictions or force_fresh_for_final) and (
+            params is not None
+        )
+        stale_final_prediction_fallback = False
+        if use_fresh_prediction:
             Y_pred_grid = self._compute_fresh_prediction(params, rid, tid, nid, stack=stack)
 
         if Y_pred_grid is None:
+            if is_final and use_fresh_prediction:
+                reason = self._last_fresh_prediction_error or "unknown"
+                logger.warning(
+                    "Final heatmap fresh committed prediction failed "
+                    "(rep=%d target=%d net=%d): %s",
+                    rid,
+                    tid,
+                    nid,
+                    reason,
+                )
+                if not self.allow_stale_final_fallback:
+                    width = self.xres * 2 + 13
+                    header = (
+                        f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, "
+                        "loss=nan)"
+                    )
+                    return [
+                        f"{'─' * width}",
+                        header,
+                        f"{'─' * width}",
+                        "[!] FINAL_RESULT_UNAVAILABLE: fresh committed prediction failed; "
+                        "refusing stale yhatdep fallback.",
+                        f"reason={reason}",
+                    ]
+                stale_final_prediction_fallback = True
             Y_pred_grid = yhatdep[rid, :, tid, nid].reshape(yres, xres)
 
-        tu_stats = step_history.get("tu_stats", {})
         tu_str = ""
-        if tu_stats:
-            # Use per-network counts for accurate display
-            enabled_per_net = tu_stats.get("enabled_count_per_network")
-            n_tus = tu_stats.get("n_tus", tu_stats.get("total_count", 1))
-            if enabled_per_net is not None:
-                arr = np.asarray(enabled_per_net)
-                if arr.ndim == 4:  # (n_replicates, n_batches, n_targets, n_networks)
-                    rid_safe = min(rid, arr.shape[0] - 1)
-                    tid_safe = min(tid, arr.shape[2] - 1)
-                    nid_safe = min(nid, arr.shape[3] - 1)
-                    enabled = float(arr[rid_safe, -1, tid_safe, nid_safe])
-                elif arr.ndim == 3:  # (n_replicates, n_targets, n_networks)
-                    rid_safe = min(rid, arr.shape[0] - 1)
-                    tid_safe = min(tid, arr.shape[1] - 1)
-                    nid_safe = min(nid, arr.shape[2] - 1)
-                    enabled = float(arr[rid_safe, tid_safe, nid_safe])
-                elif arr.ndim == 2:  # (n_targets, n_networks)
-                    enabled = float(arr[min(tid, arr.shape[0] - 1), min(nid, arr.shape[1] - 1)])
-                elif arr.ndim == 1:  # (n_networks,)
-                    enabled = float(arr[min(nid, len(arr) - 1)])
-                else:  # scalar (ndim == 0)
-                    enabled = float(arr)
-            else:
-                enabled = float(np.asarray(tu_stats.get("enabled_count", 0)))
-            n_tus_arr = np.asarray(n_tus)
-            if n_tus_arr.ndim == 0:
-                total = float(n_tus_arr)
-            elif n_tus_arr.ndim == 1:
-                total = float(n_tus_arr[min(nid, len(n_tus_arr) - 1)])
-            else:
-                total = float(n_tus_arr.flat[0])
+        introspect_stack = stack if stack is not None else (self._build_fresh_stack() or self._stack)
+        params = step_history.get('latest_params')
+        tu_counts = None
+        if params is not None and introspect_stack is not None:
+            tu_counts = self._get_tu_counts_from_introspection(params, introspect_stack, rid, tid, nid)
+
+        if tu_counts is not None:
+            enabled, total = tu_counts
             tu_pct = 100 * enabled / max(total, 1)
-            tu_str = f" │ TUs: {int(enabled)}/{int(total)} ({tu_pct:.0f}%)"
+            tu_str = f" │ TUs: {enabled}/{total} ({tu_pct:.0f}%)"
+        else:
+            tu_stats = step_history.get("tu_stats", {})
+            if tu_stats:
+                # Fallback when introspection is unavailable
+                enabled_per_net = tu_stats.get("enabled_count_per_network")
+                n_tus = tu_stats.get("n_tus", tu_stats.get("total_count", 1))
+                if enabled_per_net is not None:
+                    arr = np.asarray(enabled_per_net)
+                    if arr.ndim == 4:  # (n_replicates, n_batches, n_targets, n_networks)
+                        rid_safe = min(rid, arr.shape[0] - 1)
+                        tid_safe = min(tid, arr.shape[2] - 1)
+                        nid_safe = min(nid, arr.shape[3] - 1)
+                        enabled = float(arr[rid_safe, -1, tid_safe, nid_safe])
+                    elif arr.ndim == 3:  # (n_replicates, n_targets, n_networks)
+                        rid_safe = min(rid, arr.shape[0] - 1)
+                        tid_safe = min(tid, arr.shape[1] - 1)
+                        nid_safe = min(nid, arr.shape[2] - 1)
+                        enabled = float(arr[rid_safe, tid_safe, nid_safe])
+                    elif arr.ndim == 2:  # (n_targets, n_networks)
+                        enabled = float(arr[min(tid, arr.shape[0] - 1), min(nid, arr.shape[1] - 1)])
+                    elif arr.ndim == 1:  # (n_networks,)
+                        enabled = float(arr[min(nid, len(arr) - 1)])
+                    else:  # scalar (ndim == 0)
+                        enabled = float(arr)
+                else:
+                    enabled = float(np.asarray(tu_stats.get("enabled_count", 0)))
+                n_tus_arr = np.asarray(n_tus)
+                if n_tus_arr.ndim == 0:
+                    total = float(n_tus_arr)
+                elif n_tus_arr.ndim == 1:
+                    total = float(n_tus_arr[min(nid, len(n_tus_arr) - 1)])
+                else:
+                    total = float(n_tus_arr.flat[0])
+                tu_pct = 100 * enabled / max(total, 1)
+                tu_str = f" │ TUs: {int(enabled)}/{int(total)} ({tu_pct:.0f}%)"
 
         fp_str = ""
         compute_fp = is_final or not self.fingerprint_only_at_end
         params = step_history.get('latest_params')
-        if compute_fp and self._model and self._dmanager and params is not None:
+        live_model = self._get_live_model()
+        live_dmanager = self._get_live_dmanager()
+        if compute_fp and live_model and live_dmanager and params is not None:
             try:
-                from biocomp.fingerprint import compute_fingerprint_from_params
+                from biocomp.fingerprint import compute_fingerprint
+                from biocomptools.modelmodel import NetworkModel
 
-                auto_lock = (
-                    getattr(self._design_conf, 'auto_lock_topology_tus', True)
-                    if self._design_conf
-                    else True
-                )
-                stack = self._dmanager.build_stack(
-                    self._model, auto_lock_topology_tus=auto_lock
-                )
-                fingerprint = compute_fingerprint_from_params(
-                    stack=stack,
-                    params=params,
-                    model=self._model,
-                    rep_id=rid,
-                    target_id=tid,
-                    network_idx=nid,
-                )
+                fp_stack = stack if stack is not None else self._build_fresh_stack()
+                if fp_stack is None:
+                    raise RuntimeError("Unable to build stack for fingerprint")
+                committed_networks = self._get_committed_networks(params, rid, tid, fp_stack)
+                if committed_networks is None or nid >= len(committed_networks):
+                    raise RuntimeError("Committed network not available for fingerprint")
+                fp_nm = NetworkModel(model=live_model, network=committed_networks[nid])
+                fingerprint = compute_fingerprint(fp_nm)
                 fp_str = f" │ FP: {fingerprint}"
             except Exception as e:
                 logger.debug(f"Fingerprint computation failed: {e}")
 
-        header = f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, loss={loss:.4f}){tu_str}{fp_str}"
+        display_loss = float(loss)
 
         def _extract_scalar(val, rid, nid):
             """Extract scalar from potentially multi-dim array using (rid, nid) indices."""
@@ -431,12 +612,11 @@ class DesignHeatmapLogger(Logger):
 
         width = self.xres * 2 + 13
 
-        lines = [f"{'─' * width}", header, f"{'─' * width}"]
+        lines = []
 
         if Y_target_grid is not None:
-            Y_target_unflipped = np.flipud(Y_target_grid)
             txt_output, metrics = side_by_side_txt_plot(
-                Y_target_unflipped,
+                Y_target_grid,
                 Y_pred_grid,
                 height=self.yres,
                 width=self.xres,
@@ -446,13 +626,42 @@ class DesignHeatmapLogger(Logger):
                 show_axes=True,
                 compute_metrics=True,
             )
+            if is_final and use_fresh_prediction and "weighted_total" in metrics:
+                display_loss = float(metrics["weighted_total"])
+            header = (
+                f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, "
+                f"loss={display_loss:.4f}){tu_str}{fp_str}"
+            )
+            lines.extend([f"{'─' * width}", header, f"{'─' * width}"])
+            if stale_final_prediction_fallback:
+                reason = self._last_fresh_prediction_error or "unknown"
+                lines.append(
+                    "[!] FINAL_RESULT_FALLBACK: fresh committed prediction failed; "
+                    f"showing stale yhatdep for this panel. reason={reason}"
+                )
             lines.append(txt_output)
 
             if self.show_stats:
                 pred_range = metrics.get("pred_range", (0, 0))
                 corr = metrics.get("correlation", 0.0)
                 lines.append(f"Pred: [{pred_range[0]:.2f}, {pred_range[1]:.2f}] │ Corr: {corr:.4f}")
+                if (
+                    "contrast_target_gap" in metrics
+                    and "contrast_pred_gap" in metrics
+                    and "pred_q95_q05_gap" in metrics
+                ):
+                    lines.append(
+                        "Contrast: "
+                        f"target_gap={float(metrics['contrast_target_gap']):.4f} │ "
+                        f"pred_gap={float(metrics['contrast_pred_gap']):.4f} │ "
+                        f"pred_q95-p05={float(metrics['pred_q95_q05_gap']):.4f}"
+                    )
         else:
+            header = (
+                f" Rep {rid} {net_name} (rank {rank + 1}/{n_total_designs}, "
+                f"loss={display_loss:.4f}){tu_str}{fp_str}"
+            )
+            lines.extend([f"{'─' * width}", header, f"{'─' * width}"])
             Y_pred_flipped = np.flipud(Y_pred_grid)
             pred_heatmap = heatmap(
                 Y_pred_flipped,
@@ -497,7 +706,11 @@ class DesignHeatmapLogger(Logger):
                     console = Console(file=string_io, force_terminal=True, width=100)
 
                     if self.params_view == "committed":
-                        committed_networks = introspect_stack.commit(specific_params)
+                        committed_networks = self._get_committed_networks(
+                            params, rid, tid, introspect_stack
+                        )
+                        if committed_networks is None:
+                            raise RuntimeError("Unable to resolve committed networks")
                         if nid < len(committed_networks):
                             format_committed_network_params_rich(
                                 committed_networks[nid], introspect_stack, specific_params, nid, console
@@ -561,10 +774,11 @@ class DesignHeatmapLogger(Logger):
         if batch_size != xres * yres:
             return None
 
+        # Scope committed-network cache to this render call.
+        self._committed_networks_cache = {}
+
         tid = min(self.target_idx, n_targets - 1)
-        Y_target_grid = (
-            np.flipud(self._cached_target_grid) if self._cached_target_grid is not None else None
-        )
+        Y_target_grid = self._cached_target_grid
 
         n_total_designs = n_replicates * n_networks
         if self.network_idx is not None:
@@ -620,9 +834,11 @@ class DesignHeatmapLogger(Logger):
         import pickle
         from pathlib import Path
         from copy import deepcopy
-        from biocomp.jaxutils import tree_get, tree_to_np
+        from biocomp.jaxutils import tree_to_np
 
-        if self._dmanager is None or self._model is None:
+        dmanager = self._get_live_dmanager()
+        model = self._get_live_model()
+        if dmanager is None or model is None:
             logger.warning("Cannot save reproduction pickle: dmanager or model not available")
             return
 
@@ -654,28 +870,28 @@ class DesignHeatmapLogger(Logger):
             for tid in range(n_targets):
                 needed_pairs.add((rep_id, tid))
 
-        committed_networks: dict[tuple[int, int], list] = {}
-        auto_lock = (
-            getattr(self._design_conf, 'auto_lock_topology_tus', True)
-            if self._design_conf
-            else True
-        )
-        stack = self._dmanager.build_stack(self._model, auto_lock_topology_tus=auto_lock)
+        stack = self._build_fresh_stack()
+        if stack is None:
+            logger.warning("Cannot save reproduction pickle: failed to build stack")
+            return
+        shared_cache = self._get_shared_commit_cache()
 
         logger.info(f"Reproduction pickle: Committing {len(needed_pairs)} (rep, target) pairs...")
-        for rep_id, tid in sorted(needed_pairs):
-            try:
-                specific_params = tree_get(params, (rep_id, tid))
-                committed = stack.commit(specific_params)
-                committed_networks[(rep_id, tid)] = deepcopy(committed)
-            except Exception as e:
-                logger.warning(
-                    f"Reproduction pickle: Commit failed for (rep={rep_id}, tid={tid}): {e}"
-                )
-                committed_networks[(rep_id, tid)] = []
+        committed_networks_raw, commit_failures = precommit_pairs(
+            params, stack, needed_pairs,
+            fail_fast=False,
+            fill_failures_with=lambda _r, _t: [],
+            commit_cache=shared_cache,
+            parallel=True,
+        )
+        committed_networks: dict[tuple[int, int], list] = {
+            k: deepcopy(v) for k, v in committed_networks_raw.items()
+        }
+        for rep_id, tid, error in commit_failures:
+            logger.warning(f"Reproduction pickle: Commit failed for (rep={rep_id}, tid={tid}): {error}")
 
         target_grids = {}
-        for tid, target in enumerate(self._dmanager.targets):
+        for tid, target in enumerate(dmanager.targets):
             try:
                 _, Y_grid = target.get_lattice(resolution=self._grid_resolution, seed=0)
                 target_grids[tid] = np.asarray(Y_grid)
@@ -686,11 +902,11 @@ class DesignHeatmapLogger(Logger):
             "step": step,
             "latest_params": tree_to_np(params),
             "yhatdep": yhatdep,
-            "networks": deepcopy(self._dmanager.networks),
+            "networks": deepcopy(dmanager.networks),
             "committed_networks": committed_networks,
             "tu_id_to_idx": getattr(stack, "tu_id_to_idx", None),
             "grid_resolution": self._grid_resolution,
-            "targets": self._dmanager.targets,
+            "targets": dmanager.targets,
             "model_path": self._model_path,
             "model_signature": self._model.signature if hasattr(self._model, 'signature') else None,
             "top_designs": top_designs,

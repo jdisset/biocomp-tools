@@ -18,6 +18,7 @@ from biocomptools.toollib.design_results import (
 )
 from biocomptools.toollib.design_eval import is_valid_network
 from biocomptools.toollib.design_pipeline import (
+    CommitCache,
     CommitRequest,
     build_design_result,
     evaluate_design_inputs,
@@ -27,6 +28,7 @@ from biocomptools.toollib.design_pipeline import (
     resolve_commit_requests,
     save_network_recipe_yaml,
 )
+from biocomptools.toollib.design_selection import normalize_losses_for_ranking
 from biocomptools.toollib.design_data import prepare_target_data
 from biocomptools.logging_config import get_logger
 
@@ -61,9 +63,11 @@ class DesignSummaryLogger(Logger):
     _all_metrics: list[dict] = []
     _cached_stack: Any | None = None
     _run_name: str = ""
+    _training_program: Any | None = None
 
     def initialize(self, training_program=None):
         if training_program:
+            self._training_program = training_program
             if hasattr(training_program, 'design_conf'):
                 self.design_conf = training_program.design_conf
         if self.output_dir:
@@ -72,12 +76,25 @@ class DesignSummaryLogger(Logger):
             self._all_metrics = []
             logger.info(f"DesignSummaryLogger initialized: {design_dir}")
 
+    def _get_shared_commit_cache(self) -> CommitCache | None:
+        tp = self._training_program
+        if tp is not None:
+            return getattr(tp, '_commit_cache', None)
+        return None
+
     def _get_or_build_stack(self, stack: Any = None) -> Any:
         if stack is not None:
             self._cached_stack = stack
             return stack
         if self._cached_stack is not None:
             return self._cached_stack
+        # Try the shared post-optimization stack from the training program
+        tp = self._training_program
+        if tp is not None:
+            post_stack = getattr(tp, '_post_stack', None)
+            if post_stack is not None:
+                self._cached_stack = post_stack
+                return post_stack
         assert self.dmanager is not None, "dmanager required to build stack"
         assert self.model is not None, "model required to build stack"
         auto_lock = (
@@ -98,13 +115,23 @@ class DesignSummaryLogger(Logger):
         assert stack is not None, "stack required for summaries"
 
         targets = self.targets or (self.dmanager.targets if self.dmanager else [])
-        all_losses = np.asarray(all_losses)
-        if all_losses.ndim == 4:
-            all_losses = np.mean(all_losses, axis=1)
-        n_targets = all_losses.shape[-2] if all_losses.ndim >= 2 else 1
+        losses_3d = normalize_losses_for_ranking(all_losses)
+        assert losses_3d is not None, "all_losses missing or unsupported shape for ranking"
         assert self.dmanager is not None, "dmanager required for SSOT top-k selector"
         assert self.design_conf is not None, "design_conf required for SSOT top-k selector"
-        losses_for_topk = jnp.asarray(all_losses)
+        expected_shape = (
+            int(self.design_conf.n_replicates),
+            int(self.dmanager.n_targets),
+            int(len(self.dmanager.networks)),
+        )
+        if tuple(losses_3d.shape) != expected_shape:
+            raise ValueError(
+                "DesignSummaryLogger SSOT loss shape mismatch: "
+                f"expected {expected_shape}, got {tuple(losses_3d.shape)}"
+            )
+
+        losses_for_topk = jnp.asarray(losses_3d)
+        n_targets = losses_3d.shape[1]
         topk_by_target = get_topk_replicate_network_pairs(
             losses=losses_for_topk,
             dmanager=self.dmanager,
@@ -159,7 +186,11 @@ class DesignSummaryLogger(Logger):
         assert all(c['stack'] is stack for c in candidates), "all candidates must share same stack"
 
         pairs = {(c['rep_id'], c['target_id']) for c in candidates}
-        commit_cache, commit_failures = precommit_pairs(params, stack, pairs, fail_fast=True)
+        shared_cache = self._get_shared_commit_cache()
+        commit_cache, commit_failures = precommit_pairs(
+            params, stack, pairs, fail_fast=True,
+            commit_cache=shared_cache, parallel=True,
+        )
         assert not commit_failures, f"commit failures not allowed: {commit_failures}"
 
         commit_requests = [
@@ -217,12 +248,33 @@ class DesignSummaryLogger(Logger):
         # batch evaluate all designs
         evaluated = evaluate_design_inputs(self.model, design_inputs, max_evals=self.max_evals)
 
+        # batch compute fingerprints for valid evaluated designs
+        fingerprint_by_eval_idx: dict[int, str] = {}
+        valid_eval_indices = [idx for idx, ev in enumerate(evaluated) if ev.is_valid]
+        if valid_eval_indices:
+            from biocomp.fingerprint import compute_fingerprints
+            from biocomptools.modelmodel import NetworkModel
+
+            assert self.model is not None, "model required for fingerprint computation"
+            fingerprint_networks = [evaluated[idx].input.network for idx in valid_eval_indices]
+            fingerprint_model = NetworkModel(model=self.model, network=fingerprint_networks)
+            fingerprint_values = compute_fingerprints(fingerprint_model)
+            fingerprint_by_eval_idx = {
+                eval_idx: fingerprint_values[i] for i, eval_idx in enumerate(valid_eval_indices)
+            }
+
         # process results
         for idx, ev in enumerate(evaluated):
             i, info, rank_dir = input_to_candidate[idx]
-            self._save_single_result(ev, info, rank_dir)
+            self._save_single_result(ev, info, rank_dir, fingerprint=fingerprint_by_eval_idx.get(idx))
 
-    def _save_single_result(self, ev: EvaluatedDesign, info: dict, rank_dir: Path):
+    def _save_single_result(
+        self,
+        ev: EvaluatedDesign,
+        info: dict,
+        rank_dir: Path,
+        fingerprint: str | None = None,
+    ):
         """Save a single evaluated design result."""
         if not ev.is_valid:
             return
@@ -237,13 +289,15 @@ class DesignSummaryLogger(Logger):
         yval = ev.pred_data.yval
         y_pred = np.asarray(yval) if yval is not None and len(yval) > 0 else np.zeros_like(y_true)
 
-        # compute fingerprint for committed network
-        from biocomp.fingerprint import compute_fingerprint
-        from biocomptools.modelmodel import NetworkModel
+        # compute fingerprint for committed network (batched upstream when possible)
+        if fingerprint is None:
+            from biocomp.fingerprint import compute_fingerprint
+            from biocomptools.modelmodel import NetworkModel
 
-        assert self.model is not None, "model required for fingerprint computation"
-        network_model = NetworkModel(model=self.model, network=network)
-        fingerprint = compute_fingerprint(network_model)
+            assert self.model is not None, "model required for fingerprint computation"
+            network_model = NetworkModel(model=self.model, network=network)
+            fingerprint = compute_fingerprint(network_model)
+
         logger.debug(f"  [{inp.target_name} rank {inp.rank}] Fingerprint: {fingerprint}")
 
         # create NRE metrics

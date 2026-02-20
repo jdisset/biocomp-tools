@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +12,35 @@ from biocomp.jaxutils import tree_get
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+class CommitCache:
+    """Cache of committed networks, scoped to a specific stack instance.
+
+    Thread-safe. Keyed by (rep_id, target_id). Only returns cached
+    results when the caller's stack matches the one used to populate
+    the cache (identity check via `id(stack)`).
+    """
+
+    def __init__(self, stack: Any) -> None:
+        self._stack_id = id(stack)
+        self._cache: dict[tuple[int, int], list[Any]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, rep_id: int, target_id: int, stack: Any) -> list[Any] | None:
+        if id(stack) != self._stack_id:
+            return None
+        with self._lock:
+            return self._cache.get((rep_id, target_id))
+
+    def put(self, rep_id: int, target_id: int, networks: list[Any], stack: Any) -> None:
+        assert id(stack) == self._stack_id, "cannot cache results from a different stack"
+        with self._lock:
+            self._cache[(rep_id, target_id)] = networks
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
 
 
 @dataclass(frozen=True)
@@ -36,30 +68,91 @@ def precommit_pairs(
     on_before: Callable[[int, int, Any, Any], None] | None = None,
     on_after: Callable[[int, int, Any, Any, list[Any]], None] | None = None,
     on_error: Callable[[int, int, Any, Any, Exception], None] | None = None,
+    commit_cache: CommitCache | None = None,
+    parallel: bool = False,
+    max_workers: int = 4,
 ) -> tuple[dict[tuple[int, int], list[Any]], list[tuple[int, int, str]]]:
-    commit_cache: dict[tuple[int, int], list[Any]] = {}
+    local_cache: dict[tuple[int, int], list[Any]] = {}
     failures: list[tuple[int, int, str]] = []
 
-    for rep_id, target_id in sorted(pairs):
+    # Filter out pairs already in the shared cache
+    remaining = sorted(pairs)
+    if commit_cache is not None:
+        filtered = []
+        for rep_id, target_id in remaining:
+            cached = commit_cache.get(rep_id, target_id, stack)
+            if cached is not None:
+                local_cache[(rep_id, target_id)] = cached
+            else:
+                filtered.append((rep_id, target_id))
+        if filtered != remaining:
+            logger.info(
+                f"CommitCache hit: {len(remaining) - len(filtered)}/{len(remaining)} pairs cached, "
+                f"{len(filtered)} remaining"
+            )
+        remaining = filtered
+
+    if not remaining:
+        return local_cache, failures
+
+    def _commit_one(rep_id: int, target_id: int) -> tuple[int, int, list[Any] | None, str | None]:
         bparams = tree_get(full_params, (rep_id, target_id))
         assert bparams is not None, f"missing params for (rep={rep_id}, target={target_id})"
         if on_before is not None:
             on_before(rep_id, target_id, bparams, stack)
         try:
             committed_networks = stack.commit(bparams)
-            commit_cache[(rep_id, target_id)] = committed_networks
             if on_after is not None:
                 on_after(rep_id, target_id, bparams, stack, committed_networks)
+            return rep_id, target_id, committed_networks, None
         except Exception as exc:
             if on_error is not None:
                 on_error(rep_id, target_id, bparams, stack, exc)
-            error_msg = f"{type(exc).__name__}: {exc}"
-            failures.append((rep_id, target_id, error_msg))
-            if fill_failures_with is not None:
-                commit_cache[(rep_id, target_id)] = fill_failures_with(rep_id, target_id)
-            if fail_fast:
-                raise
-    return commit_cache, failures
+            return rep_id, target_id, None, f"{type(exc).__name__}: {exc}"
+
+    t0 = time.perf_counter()
+
+    if parallel and len(remaining) > 1:
+        workers = min(max_workers, len(remaining))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_commit_one, r, t): (r, t) for r, t in remaining
+            }
+            for future in as_completed(futures):
+                rep_id, target_id, networks, error = future.result()
+                if error is not None:
+                    failures.append((rep_id, target_id, error))
+                    if fill_failures_with is not None:
+                        local_cache[(rep_id, target_id)] = fill_failures_with(rep_id, target_id)
+                    if fail_fast:
+                        raise RuntimeError(error)
+                else:
+                    assert networks is not None
+                    local_cache[(rep_id, target_id)] = networks
+    else:
+        for rep_id, target_id in remaining:
+            _, _, networks, error = _commit_one(rep_id, target_id)
+            if error is not None:
+                failures.append((rep_id, target_id, error))
+                if fill_failures_with is not None:
+                    local_cache[(rep_id, target_id)] = fill_failures_with(rep_id, target_id)
+                if fail_fast:
+                    raise RuntimeError(error)
+            else:
+                assert networks is not None
+                local_cache[(rep_id, target_id)] = networks
+
+    elapsed = time.perf_counter() - t0
+    mode = f"parallel({min(max_workers, len(remaining))}w)" if parallel and len(remaining) > 1 else "serial"
+    logger.debug(f"Committed {len(remaining)} pairs in {elapsed:.2f}s ({mode})")
+
+    # Populate shared cache with freshly committed results
+    if commit_cache is not None:
+        for key, networks in local_cache.items():
+            if commit_cache.get(key[0], key[1], stack) is None:
+                commit_cache.put(key[0], key[1], networks, stack)
+
+    return local_cache, failures
 
 
 def resolve_commit_requests(
