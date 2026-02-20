@@ -39,6 +39,7 @@ import multiprocessing as mp
 import dill
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
+from biocomp.step_history import StepHistoryLike, StepHistorySnapshot, ensure_step_history_snapshot
 from biocomptools.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -87,10 +88,20 @@ def _execute_callback_in_process(
         start = time.perf_counter()
 
         # Execute callback - should return metrics dict, not mutate state
+        raw_step_history = data.get('step_history')
+        step_history = (
+            None
+            if raw_step_history is None
+            else ensure_step_history_snapshot(
+                raw_step_history,
+                context=f"async process callback step_history at step {data['step']}",
+            )
+        )
+
         result = callback_fn(
             data['step'],
             data['training_config'],
-            step_history=data.get('step_history'),
+            step_history=step_history,
             stack=data.get('stack'),
         )
 
@@ -186,7 +197,7 @@ class AsyncLoggerHandler(BaseModel):
 
     @field_validator('async_store_location', 'base_dir', mode='before')
     @classmethod
-    def convert_paths(cls, v: object) -> Path | None:
+    def convert_paths(cls, v: str | Path | None) -> Path | None:
         return Path(v) if v is not None else None
 
     def model_post_init(self, __context):
@@ -272,6 +283,7 @@ class AsyncLoggerHandler(BaseModel):
 
     def _save_step_data(self, step: int, data: dict[str, object], event_type: str = "regular") -> Path:
         """Serialize step data to disk."""
+        assert self.tmpdir is not None, "AsyncLoggerHandler.tmpdir must be initialized before saving step data"
         step_file = self.tmpdir / (
             f"step_{step:06d}.pkl"
             if event_type == "regular"
@@ -327,7 +339,10 @@ class AsyncLoggerHandler(BaseModel):
 
     def _process_batch(self, steps: list[int]) -> None:
         """Process a batch of steps, dispatching to appropriate executors."""
-        futures: list[tuple[int, str, Future[object], CallbackMode]] = []
+        assert self.thread_executor is not None, "Thread executor must be initialized"
+        assert self.process_executor is not None, "Process executor must be initialized"
+        assert self.tmpdir is not None, "AsyncLoggerHandler.tmpdir must be initialized"
+        futures: list[tuple[int, str, Future[Any], CallbackMode]] = []
 
         for step in steps:
             step_file = self.tmpdir / f"step_{step:06d}.pkl"
@@ -404,10 +419,19 @@ class AsyncLoggerHandler(BaseModel):
         """Execute callback in thread pool."""
         start = time.perf_counter()
         try:
+            raw_step_history = data.get('step_history')
+            step_history = (
+                None
+                if raw_step_history is None
+                else ensure_step_history_snapshot(
+                    raw_step_history,
+                    context=f"async thread callback step_history at step {data['step']}",
+                )
+            )
             result = callback(
                 data['step'],
                 data['training_config'],
-                step_history=data.get('step_history'),
+                step_history=step_history,
                 stack=data.get('stack'),
             )
             duration_ms = (time.perf_counter() - start) * 1000
@@ -482,7 +506,12 @@ class AsyncLoggerHandler(BaseModel):
 
     def create_callback(self) -> Callable[..., None]:
         """Create callback for training loop to call on each step."""
-        def async_callback(step: int, training_config: object, step_history: dict[str, object] | None = None, stack: object = None) -> None:
+        def async_callback(
+            step: int,
+            training_config: object,
+            step_history: StepHistoryLike | None = None,
+            stack: object = None,
+        ) -> None:
             # Check if any logger needs this step
             triggering = []
             for period, _, logger_obj in self.logger_callbacks:
@@ -495,18 +524,23 @@ class AsyncLoggerHandler(BaseModel):
 
             logger.debug(f"Step {step}: queueing for {triggering or 'all'}")
 
-            try:
-                data = {
-                    'step': step,
-                    'training_config': training_config,
-                    'step_history': step_history,
-                    'stack': stack,
-                    'timestamp': time.time(),
-                }
-                self._save_step_data(step, data)
-                self.step_queue.put(step)
-            except Exception as e:
-                logger.error(f"Failed to queue step {step}: {e}")
+            normalized_step_history = (
+                None
+                if step_history is None
+                else ensure_step_history_snapshot(
+                    step_history,
+                    context=f"async callback step_history at step {step}",
+                )
+            )
+            data = {
+                'step': step,
+                'training_config': training_config,
+                'step_history': normalized_step_history,
+                'stack': stack,
+                'timestamp': time.time(),
+            }
+            self._save_step_data(step, data)
+            self.step_queue.put(step)
 
         return async_callback
 
@@ -517,28 +551,43 @@ class AsyncLoggerHandler(BaseModel):
             if self._should_run_callback(period, 0, 'start'):
                 name = type(logger_obj).__name__
                 try:
-                    callback(0, training_config, step_history={}, stack=stack)
+                    callback(0, training_config, step_history=StepHistorySnapshot(data={}), stack=stack)
                     logger.debug(f"Start logger {name} completed")
                 except Exception as e:
                     logger.error(f"Start logger {name} failed: {e}")
+                    raise
 
-    def process_end_loggers(self, step: int, training_config: object, step_history: dict[str, object], stack: object) -> None:
+    def process_end_loggers(
+        self,
+        step: int,
+        training_config: object,
+        step_history: StepHistoryLike,
+        stack: object,
+    ) -> None:
         """Process end-only loggers (period=-1 or None)."""
         logger.info("Processing end loggers...")
+        normalized_step_history = ensure_step_history_snapshot(
+            step_history,
+            context=f"end step_history at step {step}",
+        )
 
         for period, callback, logger_obj in self.logger_callbacks:
             if self._should_run_callback(period, step, 'end'):
                 name = type(logger_obj).__name__
                 try:
-                    callback(step, training_config, step_history=step_history, stack=stack)
-                    logger.debug(f"End logger {name} completed")
+                    logger.info(f"Running end logger: {name}")
+                    t0 = time.time()
+                    callback(step, training_config, step_history=normalized_step_history, stack=stack)
+                    logger.info(f"End logger completed: {name} ({time.time() - t0:.2f}s)")
                 except Exception as e:
                     logger.error(f"End logger {name} failed: {e}")
+                    raise
 
     def initialize_loggers_async(self, training_program: object) -> None:
         """Initialize all loggers in parallel."""
         if not self.logger_objects:
             return
+        assert self.thread_executor is not None, "Thread executor must be initialized"
 
         def init_logger(logger_obj: "Logger") -> None:
             name = type(logger_obj).__name__
@@ -573,6 +622,7 @@ class AsyncLoggerHandler(BaseModel):
         """Finalize all loggers in parallel."""
         if not self.logger_objects:
             return
+        assert self.thread_executor is not None, "Thread executor must be initialized"
 
         def finalize_logger(logger_obj: "Logger") -> None:
             name = type(logger_obj).__name__

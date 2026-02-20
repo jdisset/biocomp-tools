@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from biocomp.logger_dispatch import LoggerDispatch
+from biocomp.step_history import StepHistoryLike, StepHistorySnapshot, ensure_step_history_snapshot
 from biocomptools.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -10,6 +11,33 @@ if TYPE_CHECKING:
     from biocomptools.async_logger_handler import AsyncLoggerHandler
 
 logger = get_logger(__name__)
+
+
+def _is_step_period(period: int | None, step: int) -> bool:
+    return period is not None and period > 0 and step % period == 0
+
+
+def _extract_final_step_history(result: object) -> StepHistorySnapshot:
+    if not isinstance(result, tuple) or len(result) <= 2:
+        raise TypeError(
+            "Optimization result invariant violated: expected a tuple with step_history at index 2."
+        )
+    try:
+        return ensure_step_history_snapshot(result[2], context="result[2] (step_history)")
+    except TypeError as exc:
+        raise TypeError(
+            "Optimization result invariant violated: expected result[2] (step_history) "
+            "to be mapping-like."
+        ) from exc
+
+
+def _extract_final_step_index(result: object) -> int:
+    if not isinstance(result, tuple) or len(result) <= 1:
+        return 0
+    losses = result[1]
+    if isinstance(losses, list):
+        return len(losses)
+    return 0
 
 
 class LoggerDispatcher(LoggerDispatch):
@@ -36,7 +64,7 @@ class LoggerDispatcher(LoggerDispatch):
 
         self._sync_callbacks: list[tuple[int, Callable]] = []
         self._sync_logger_objects: list[Logger] = []
-        self._async_handler: AsyncLoggerHandler | None = None
+        self._async_handler: "AsyncLoggerHandler | None" = None
 
         sync_loggers = [lg for lg in loggers if isinstance(lg, LoggerCls) and not lg.async_ok]
         async_loggers = [lg for lg in loggers if isinstance(lg, LoggerCls) and lg.async_ok]
@@ -120,12 +148,22 @@ class LoggerDispatcher(LoggerDispatch):
         if self._async_handler:
             self._async_handler.process_start_loggers(config, stack)
         else:
-            self._run_callbacks(0, config, {}, stack, lambda p, s: p == 0)
+            self._run_callbacks(
+                0,
+                config,
+                StepHistorySnapshot(data={}),
+                stack,
+                lambda p, s: p == 0,
+            )
 
-    def on_step(self, step: int, config: object, step_history: dict, stack: object) -> None:
-        self._run_callbacks(step, config, step_history, stack, lambda p, s: p > 0 and s % p == 0)
+    def on_step(
+        self, step: int, config: object, step_history: StepHistoryLike, stack: object
+    ) -> None:
+        self._run_callbacks(step, config, step_history, stack, _is_step_period)
 
-    def on_end(self, step: int, config: object, step_history: dict, stack: object) -> None:
+    def on_end(
+        self, step: int, config: object, step_history: StepHistoryLike, stack: object
+    ) -> None:
         if not self._async_handler:
             self._run_callbacks(
                 step, config, step_history, stack, lambda p, s: p is None or p == -1
@@ -147,30 +185,25 @@ class LoggerDispatcher(LoggerDispatch):
     def shutdown(self, result: object, sync_callbacks: list[tuple[int, Callable]] | None = None) -> None:
         """Shutdown async handler and run final sync callbacks."""
         if self._async_handler:
-            step_history = result[-1] if isinstance(result, tuple) and len(result) > 2 else None  # type: ignore[index]
-            losses = result[1] if isinstance(result, tuple) and len(result) > 1 else []  # type: ignore[index]
-            final_step = len(losses) if losses else 0
-
-            self._async_handler.process_end_loggers(
-                step=final_step,
-                training_config=None,
-                step_history=step_history,
-                stack=None,
-            )
-
             effective_sync = sync_callbacks if sync_callbacks is not None else [
                 (p, cb) for p, cb in self._sync_callbacks
                 if p is None or p == -1
             ]
-            for period, callback in effective_sync:
-                if period is None or period == -1:
-                    try:
-                        callback(final_step, None, step_history=step_history, stack=None)
-                    except Exception as e:
-                        logger.error(f"Sync logger final callback failed: {e}")
-                        logger.exception(e)
+            try:
+                step_history = _extract_final_step_history(result)
+                final_step = _extract_final_step_index(result)
+                self._async_handler.process_end_loggers(
+                    step=final_step,
+                    training_config=None,
+                    step_history=step_history,
+                    stack=None,
+                )
 
-            self._async_handler.shutdown()
+                for period, callback in effective_sync:
+                    if period is None or period == -1:
+                        callback(final_step, None, step_history=step_history, stack=None)
+            finally:
+                self._async_handler.shutdown()
 
     def finalize(self, loggers: list[Logger]) -> None:
         from biocomptools.toollib.loggers.logger import Logger as LoggerCls
@@ -180,21 +213,25 @@ class LoggerDispatcher(LoggerDispatch):
                 logger_obj.finalize()
 
     @property
-    def async_handler(self) -> AsyncLoggerHandler | None:
+    def async_handler(self) -> "AsyncLoggerHandler | None":
         return self._async_handler
 
     def _run_callbacks(
         self,
         step: int,
         config: object,
-        step_history: dict,
+        step_history: StepHistoryLike,
         stack: object,
         period_filter: Callable[[int | None, int], bool],
     ) -> None:
+        normalized_step_history = ensure_step_history_snapshot(
+            step_history,
+            context=f"step_history at step {step}",
+        )
         for period, callback in self._sync_callbacks:
             if period_filter(period, step):
                 try:
-                    callback(step, config, step_history=step_history, stack=stack)
+                    callback(step, config, step_history=normalized_step_history, stack=stack)
                 except Exception as e:
                     logger.error(f"Logger callback failed at step {step}: {e}")
                     logger.exception(e)
