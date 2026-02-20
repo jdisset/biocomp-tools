@@ -107,7 +107,29 @@ class BiocompModel(ArbitraryModel):
 
     def model_post_init(self, *argc, **kwargs):
         super().model_post_init(*argc, **kwargs)
+        self._migrate_ern_affinities()
         logger.debug(f"Initialized model '{self.signature}'")
+
+    def _migrate_ern_affinities(self):
+        """Migrate old shared/ERN_5p/affinities to shared/quantization/{values,logstdevs,counts}/affinity."""
+        old_path = "shared/ERN_5p/affinities"
+        new_values_path = "shared/quantization/values/affinity"
+        new_logstdevs_path = "shared/quantization/logstdevs/affinity"
+        new_counts_path = "shared/quantization/counts/affinity"
+        try:
+            old_values = self.shared_params[old_path]
+        except KeyError:
+            return
+        try:
+            self.shared_params[new_values_path]
+            return  # already migrated
+        except KeyError:
+            pass
+        import jax.numpy as jnp
+        logger.info("Migrating ERN affinities from shared/ERN_5p/affinities to shared/quantization/")
+        self.shared_params[new_values_path] = old_values
+        self.shared_params[new_logstdevs_path] = jnp.ones_like(old_values) * -3
+        self.shared_params.at(new_counts_path, np.ones(old_values.shape[0], dtype=np.int32), tags=["non_grad"])
 
     def save(self, path):
         """save model to file"""
@@ -127,6 +149,7 @@ class BiocompModel(ArbitraryModel):
         with open(path, 'rb') as f:
             m = pickle.load(f)
             assert isinstance(m, cls)
+            m._migrate_ern_affinities()
             logger.debug(f"loaded model with signature {m.signature}")
             return m
 
@@ -380,7 +403,7 @@ class NetworkModel(BaseModel):
                     start_time = time()
                     yhatdummy, _ = self._batch_apply_gpu(
                         dummy_params, dummy_x, dummy_z, dummy_keys
-                    ).block_until_ready()
+                    )
                     yhatdummy.block_until_ready()
                     gpu_compile_time = time() - start_time
                     logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")

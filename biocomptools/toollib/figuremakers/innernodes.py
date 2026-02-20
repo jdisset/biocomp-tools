@@ -223,7 +223,7 @@ class InnerNodesFigure(Figure):
         ]
         if not names:
             return []
-        vals = self._emb("shared/ERN_5p/affinities", names)
+        vals = self._emb("shared/quantization/values/affinity", names)
         nets = [
             n[0]
             for name in names
