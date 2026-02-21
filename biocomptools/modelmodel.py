@@ -30,12 +30,17 @@ def _hash_array(hasher, arr):
 def _model_hash(compute_config, rescaler, params: pr.ParameterTree) -> bytes:
     """Deterministic hash of model components (config JSON + sorted param paths/values)."""
     import json
+
     hasher = xxhash.xxh64()
     for model in (compute_config, rescaler):
-        hasher.update(json.dumps(model.model_dump(mode='json'), sort_keys=True, separators=(',', ':')).encode())
+        hasher.update(
+            json.dumps(
+                model.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode()
+        )
     for path, val in sorted(params.data.iter_leaves(), key=lambda x: str(x[0])):
         hasher.update(str(path).encode())
-        if isinstance(val, (np.ndarray,)) or hasattr(val, 'tobytes'):
+        if isinstance(val, (np.ndarray,)) or hasattr(val, "tobytes"):
             _hash_array(hasher, val)
         elif isinstance(val, (int, float)):
             hasher.update(np.array([val]).tobytes())
@@ -50,12 +55,12 @@ def load_params(maybe_path):
         return tree_to_np(maybe_path)
 
     if isinstance(maybe_path, str):
-        if maybe_path.startswith('mlflow-'):
+        if maybe_path.startswith("mlflow-"):
             raise NotImplementedError("mlflow loading not implemented")
         else:
             maybe_path = Path(maybe_path)
 
-    with open(maybe_path, 'rb') as f:
+    with open(maybe_path, "rb") as f:
         return tree_to_np(pickle.load(f))
 
 
@@ -64,7 +69,7 @@ def get_shared_params(params):
     if params is None:
         return None
 
-    shared, _ = params.filter_by_tag(['shared'])
+    shared, _ = params.filter_by_tag(["shared"])
     return shared
 
 
@@ -73,7 +78,7 @@ def get_nonshared_params(params):
     if params is None:
         return None
 
-    _, nonshared = params.filter_by_tag(['shared'])
+    _, nonshared = params.filter_by_tag(["shared"])
     return nonshared
 
 
@@ -90,7 +95,7 @@ class NodeSpec(BaseModel):
     extra_info: dict[str, object] | None = None
 
 
-M = TypeVar('M', bound='BiocompModel')
+M = TypeVar("M", bound="BiocompModel")
 
 
 class BiocompModel(ArbitraryModel):
@@ -126,27 +131,37 @@ class BiocompModel(ArbitraryModel):
         except KeyError:
             pass
         import jax.numpy as jnp
-        logger.info("Migrating ERN affinities from shared/ERN_5p/affinities to shared/quantization/")
+
+        logger.info(
+            "Migrating ERN affinities from shared/ERN_5p/affinities to shared/quantization/"
+        )
         self.shared_params[new_values_path] = old_values
+        self.shared_params.tag(new_values_path, ["shared"])
         self.shared_params[new_logstdevs_path] = jnp.ones_like(old_values) * -3
-        self.shared_params.at(new_counts_path, np.ones(old_values.shape[0], dtype=np.int32), tags=["non_grad"])
+        self.shared_params.tag(new_logstdevs_path, ["shared"])
+        self.shared_params.at(
+            new_counts_path,
+            np.ones(old_values.shape[0], dtype=np.int32),
+            tags=["non_grad", "shared"],
+        )
 
     def save(self, path):
         """save model to file"""
-        with open(path, 'wb') as f:
+        with open(path, "wb") as f:
             pickle.dump(self, f)
 
     @property
     def signature(self):
         import biocomptools.toollib.hashutils as bch
+
         digest = _model_hash(self.compute_config, self.rescaler, self.shared_params)
-        return bch.pronounceable_hash(64, int.from_bytes(digest, 'little'), nwords=3, join_with='-')
+        return bch.pronounceable_hash(64, int.from_bytes(digest, "little"), nwords=3, join_with="-")
 
     @classmethod
     def load(cls, path):
         """load model from file"""
         logger.debug(f"loading model from {path}")
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             m = pickle.load(f)
             assert isinstance(m, cls)
             m._migrate_ern_affinities()
@@ -158,20 +173,20 @@ class BiocompModel(ArbitraryModel):
         import h5py
         import json
 
-        with h5py.File(filename, 'w') as f:
-            f.attrs['__model_class__'] = f"{self.__class__.__module__}.{self.__class__.__name__}"
+        with h5py.File(filename, "w") as f:
+            f.attrs["__model_class__"] = f"{self.__class__.__module__}.{self.__class__.__name__}"
 
-            f.attrs['compute_config'] = json.dumps(self.compute_config.model_dump())
-            f.attrs['rescaler'] = self.rescaler.model_dump_json()
-            f.attrs['metadata'] = json.dumps(self.metadata)
+            f.attrs["compute_config"] = json.dumps(self.compute_config.model_dump())
+            f.attrs["rescaler"] = self.rescaler.model_dump_json()
+            f.attrs["metadata"] = json.dumps(self.metadata)
 
-            params_group = f.create_group('shared_params')
-            params_group.attrs['tagnames'] = self.shared_params.tagnames
+            params_group = f.create_group("shared_params")
+            params_group.attrs["tagnames"] = self.shared_params.tagnames
 
-            data_group = params_group.create_group('data')
+            data_group = params_group.create_group("data")
             pr.save_ptree_to_hdf5_group(self.shared_params.data, data_group)
 
-            tags_group = params_group.create_group('tags')
+            tags_group = params_group.create_group("tags")
             pr.save_ptree_to_hdf5_group(self.shared_params.tags, tags_group)
 
             logger.info(f"Saved {self.__class__.__name__} to {filename}")
@@ -183,22 +198,22 @@ class BiocompModel(ArbitraryModel):
         import json
         from pydantic import TypeAdapter
 
-        with h5py.File(filename, 'r') as f:
-            compute_config_data = json.loads(f.attrs['compute_config'])
+        with h5py.File(filename, "r") as f:
+            compute_config_data = json.loads(f.attrs["compute_config"])
             compute_config = cmp.ComputeConfig.model_validate(compute_config_data)
 
             # Pydantic v2's TypeAdapter is great for handling Unions like DataRescaler
             rescaler_adapter = TypeAdapter(DataRescaler)
-            rescaler = rescaler_adapter.validate_json(f.attrs['rescaler'])
+            rescaler = rescaler_adapter.validate_json(f.attrs["rescaler"])
 
-            metadata = json.loads(f.attrs['metadata'])
+            metadata = json.loads(f.attrs["metadata"])
 
             # 2. Load the ParameterTree
-            params_group = f['shared_params']
-            tagnames = list(params_group.attrs.get('tagnames', []))
+            params_group = f["shared_params"]
+            tagnames = list(params_group.attrs.get("tagnames", []))
 
-            data_tree = pr.load_ptree_from_hdf5_group(params_group['data'])
-            tags_tree = pr.load_ptree_from_hdf5_group(params_group['tags'])
+            data_tree = pr.load_ptree_from_hdf5_group(params_group["data"])
+            tags_tree = pr.load_ptree_from_hdf5_group(params_group["tags"])
 
             shared_params = pr.ParameterTree(data=data_tree, tags=tags_tree, tagnames=tagnames)
 
@@ -242,7 +257,7 @@ class NetworkModel(BaseModel):
     for prediction including node collection points
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid', validate_default=False)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", validate_default=False)
 
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: bc.Network | list[bc.Network]
@@ -296,9 +311,9 @@ class NetworkModel(BaseModel):
             batch_apply_fn = jax.vmap(self._stack.apply, in_axes=(None, 0, 0, 0))
 
             # JIT compile for both CPU and GPU devices
-            cpu_device = jax.devices('cpu')[0] if jax.devices('cpu') else None
+            cpu_device = jax.devices("cpu")[0] if jax.devices("cpu") else None
             try:
-                gpu_devices = jax.devices('gpu') if jax.devices('gpu') else []
+                gpu_devices = jax.devices("gpu") if jax.devices("gpu") else []
             except RuntimeError:
                 # No GPU backend available
                 gpu_devices = []
@@ -318,6 +333,7 @@ class NetworkModel(BaseModel):
 
         except Exception as e:
             import traceback
+
             logger.error(f"error building stack: {type(e).__name__}: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             raise e
@@ -401,9 +417,7 @@ class NetworkModel(BaseModel):
             if self._batch_apply_gpu is not self._batch_apply_cpu:
                 try:
                     start_time = time()
-                    yhatdummy, _ = self._batch_apply_gpu(
-                        dummy_params, dummy_x, dummy_z, dummy_keys
-                    )
+                    yhatdummy, _ = self._batch_apply_gpu(dummy_params, dummy_x, dummy_z, dummy_keys)
                     yhatdummy.block_until_ready()
                     gpu_compile_time = time() - start_time
                     logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")
@@ -413,10 +427,10 @@ class NetworkModel(BaseModel):
         except Exception as e:
             logger.warning(f"Precompilation failed: {e}")
 
-    def with_model(self, model: BiocompModel) -> 'NetworkModel':
+    def with_model(self, model: BiocompModel) -> "NetworkModel":
         """create a new network model with a different biocomp model"""
         logger.debug(f"creating new network model with model {model.signature=}")
-        new_model = self.model_copy(update={'model': model})
+        new_model = self.model_copy(update={"model": model})
         new_model.update_params()
 
         ser_err = ser_debug(new_model)
@@ -482,12 +496,12 @@ class NetworkModel(BaseModel):
         key: object = None,
         max_points_per_batch: int | None = None,
         disable_variational: bool = True,
-        z_value: str | float = 'uniform',
+        z_value: str | float = "uniform",
         with_shared_params: pr.ParameterTree | None = None,
         with_local_params: pr.ParameterTree | None = None,
         collect_in_indices: np.ndarray | None = None,
         collect_out_indices: np.ndarray | None = None,
-        device: Literal['cpu', 'gpu'] = 'cpu',
+        device: Literal["cpu", "gpu"] = "cpu",
     ) -> tuple[np.ndarray, tuple[np.ndarray | None, np.ndarray | None]]:
         """Predict from RAW space input, returning RAW space output.
 
@@ -530,12 +544,12 @@ class NetworkModel(BaseModel):
         key: object = None,
         max_points_per_batch: int | None = None,
         disable_variational: bool = True,
-        z_value: str | float = 'uniform',
+        z_value: str | float = "uniform",
         with_shared_params: pr.ParameterTree | None = None,
         with_local_params: pr.ParameterTree | None = None,
         collect_in_indices: np.ndarray | None = None,
         collect_out_indices: np.ndarray | None = None,
-        device: Literal['cpu', 'gpu'] = 'cpu',
+        device: Literal["cpu", "gpu"] = "cpu",
     ) -> tuple[np.ndarray, tuple[np.ndarray | None, np.ndarray | None]]:
         """Predict from LATENT space input, returning LATENT space output.
 
@@ -589,7 +603,7 @@ class NetworkModel(BaseModel):
 
         if disable_variational:
             logger.debug("disabling variational embeddings")
-            logstd = params['shared']['quantization']['logstdevs']
+            logstd = params["shared"]["quantization"]["logstdevs"]
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
 
@@ -614,7 +628,7 @@ class NetworkModel(BaseModel):
             X_padded = X
 
         # select the appropriate batch apply function based on device
-        if device == 'gpu' and self._batch_apply_gpu is not None:
+        if device == "gpu" and self._batch_apply_gpu is not None:
             batch_apply = self._batch_apply_gpu
             logger.debug("Using GPU for predictions")
         else:
@@ -631,7 +645,7 @@ class NetworkModel(BaseModel):
             end_idx = (i + 1) * effective_batch_size
             batch_size = effective_batch_size
 
-            if z_value == 'uniform':
+            if z_value == "uniform":
                 Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
             else:
                 Z_batch = jnp.ones((batch_size, num_z)) * z_value
@@ -733,7 +747,7 @@ class NetworkModel(BaseModel):
 
         return self._stack.split_stack_outputs_per_network(np.asarray(yhat), max_samples)
 
-    def visualize_stack(self, output_path='/tmp/stackviz.html'):
+    def visualize_stack(self, output_path="/tmp/stackviz.html"):
         """visualize the compute stack as html"""
         import biocomptools.toollib.stackviz as sv
 

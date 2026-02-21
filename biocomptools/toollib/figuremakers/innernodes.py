@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 logger = get_logger(__name__)
 
 
-CMAP = 'bc_blues'
+CMAP = "bc_blues"
 # CMAP = 'bc_reds'
 # CMAP = 'bc_greens'
 
@@ -106,7 +106,7 @@ class InnerNodesFigure(Figure):
     def _emb(self, path: str, names: list[str]) -> dict[str, float]:
         try:
             v: Any = self.model.shared_params
-            for k in path.split('/'):
+            for k in path.split("/"):
                 v = v[k]
             return {n: float(x[0]) for n, x in zip(names, v, strict=True)}
         except (KeyError, IndexError, TypeError):
@@ -152,11 +152,11 @@ class InnerNodesFigure(Figure):
         n = _norm(nt)
         if n == "inv_translation":
             return INV_TL_RANGE
-        lo, hi = float('inf'), float('-inf')
+        lo, hi = float("inf"), float("-inf")
         for p in NODE_PARENTS.get(n, []):
             if p in self._ranges:
                 lo, hi = min(lo, self._ranges[p][0]), max(hi, self._ranges[p][1])
-        if lo == float('inf'):
+        if lo == float("inf"):
             return DEFAULT_RANGE
         m = (hi - lo) * 0.02
         return (lo - m, hi + m)
@@ -373,7 +373,7 @@ class InnerNodesFigure(Figure):
     def _curve(self, ax, node, rng, cmap, col=None, lw=2):
         x = np.linspace(rng[0], rng[1], self.n_trendline_points)
         y = self._eval(node, x.reshape(-1, 1))
-        c = col or 'black'
+        c = col or "black"
         if self.show_distribution:
             np.random.seed(42)
             inp = np.random.uniform(rng[0], rng[1], (self.n_samples, 1))
@@ -397,8 +397,8 @@ class InnerNodesFigure(Figure):
                 ax.scatter(inp[:, 0], self._eval(n, inp), s=4, alpha=0.01, linewidth=0, color=col)
             self._curve(ax, n, rng, cmap, col=col, lw=1.5)
             ax.plot([], [], color=col, label=n.name, linewidth=2)
-        ax.set_title(title, fontweight='bold', fontsize=12)
-        ax.legend(title=leg, loc="upper left", fontsize='x-small', frameon=False)
+        ax.set_title(title, fontweight="bold", fontsize=12)
+        ax.legend(title=leg, loc="upper left", fontsize="x-small", frameon=False)
         ax.set(xlabel="Input", ylabel="Output")
         ax.set_box_aspect(1)
 
@@ -421,65 +421,65 @@ class InnerNodesFigure(Figure):
         im = ax.imshow(
             hm,
             extent=[xr[0], xr[-1], er[0], er[-1]],
-            origin='lower',
-            aspect='auto',
+            origin="lower",
+            aspect="auto",
             cmap=self._cmap(False),
         )
         if show_labels:
             for n in sn:
                 if n.emb_val is not None:
-                    ax.axhline(n.emb_val, color='black', linestyle='--', alpha=0.7, linewidth=1)
+                    ax.axhline(n.emb_val, color="black", linestyle="--", alpha=0.7, linewidth=1)
                     ax.text(
                         xr[-1] * 0.5,
                         n.emb_val,
                         n.name,
-                        color='black',
+                        color="black",
                         fontsize=9,
-                        ha='center',
-                        va='center',
-                        fontweight='bold',
+                        ha="center",
+                        va="center",
+                        fontweight="bold",
                     )
         ax.set(xlabel=xlabel, ylabel=ylabel)
-        ax.set_title(title, fontweight='bold', fontsize=12)
+        ax.set_title(title, fontweight="bold", fontsize=12)
         plt.colorbar(im, ax=ax, shrink=0.8, label="Output")
 
     def _ern_2d(self, sf, nodes):
         if not nodes:
             return
-        sf.suptitle("ERN Nodes", fontsize=16, fontweight='bold', y=1.05)
+        sf.suptitle("ERN Nodes", fontsize=16, fontweight="bold", y=1.05)
         rng = self._in_range("sequestron_ERN")
         x = np.linspace(rng[0], rng[1], 100)
         xx, yy = np.meshgrid(x, x)
         gi = np.column_stack([xx.ravel(), yy.ravel()])
         cm = self._cmap(False)
         ne = min(4, len(nodes))
-        axes = sf.subplots(1, ne + 1, width_ratios=[1] * ne + [0.05], gridspec_kw={'wspace': 0.3})
+        axes = sf.subplots(1, ne + 1, width_ratios=[1] * ne + [0.05], gridspec_kw={"wspace": 0.3})
         outs = [self._eval(n, gi) for n in nodes[:ne]]
         vmin, vmax = min(o.min() for o in outs), max(o.max() for o in outs)
         for i, (n, o) in enumerate(zip(nodes[:ne], outs, strict=True)):
             im = axes[i].imshow(
                 o.reshape(100, 100),
                 extent=[x[0], x[-1], x[0], x[-1]],
-                origin='lower',
-                aspect='equal',
+                origin="lower",
+                aspect="equal",
                 cmap=cm,
                 vmin=vmin,
                 vmax=vmax,
             )
             axes[i].set(xlabel="ERN Protein Amount", ylabel="mRNA Target Amount")
-            axes[i].set_title(f"ERN\n({n.name})", fontweight='bold', fontsize=12)
+            axes[i].set_title(f"ERN\n({n.name})", fontweight="bold", fontsize=12)
         plt.colorbar(im, cax=axes[-1]).set_label("Output")
 
     def _ern_1d(self, sf, nodes):
         if not nodes:
             return
-        sf.suptitle("ERN Repression Curves", fontsize=16, fontweight='bold', y=1.05)
-        axes = sf.subplots(1, 3, width_ratios=[1, 1, 1.1], gridspec_kw={'wspace': 0.3})
+        sf.suptitle("ERN Repression Curves", fontsize=16, fontweight="bold", y=1.05)
+        axes = sf.subplots(1, 3, width_ratios=[1, 1, 1.1], gridspec_kw={"wspace": 0.3})
         rng = self._in_range("sequestron_ERN")
         nr = np.linspace(rng[0], rng[1], 100)
         span = rng[1] - rng[0]
         ps = [rng[0] + 0.25 * span, rng[0] + 0.75 * span]
-        ls = ['-', '--']
+        ls = ["-", "--"]
         cm = self._cmap(True)
         cols = {n.name: cm(i / max(1, len(nodes) - 1)) for i, n in enumerate(nodes)}
         for ai, (yl, norm) in enumerate([("Output", False), ("Output / Baseline", True)]):
@@ -500,18 +500,18 @@ class InnerNodesFigure(Figure):
                         linestyle=ls[j],
                     )
             for j, p in enumerate(ps):
-                ax.plot([], [], color='gray', linestyle=ls[j], label=f'pos={p:.2f}')
+                ax.plot([], [], color="gray", linestyle=ls[j], label=f"pos={p:.2f}")
             if norm:
-                ax.axhline(1, color='gray', linestyle='--', alpha=0.5)
-                ax.axhline(0.5, color='gray', linestyle=':', alpha=0.3)
+                ax.axhline(1, color="gray", linestyle="--", alpha=0.5)
+                ax.axhline(0.5, color="gray", linestyle=":", alpha=0.3)
                 ax.set(ylim=(-0.05, 1.05))
             ax.set(xlabel="ERN Protein Amount", ylabel=yl)
             ax.set_title(
                 "Relative Repression" if norm else "Output vs ERN Protein",
-                fontweight='bold',
+                fontweight="bold",
                 fontsize=12,
             )
-            ax.legend(fontsize=8, loc='lower left' if norm else 'upper right')
+            ax.legend(fontsize=8, loc="lower left" if norm else "upper right")
             ax.grid(True, alpha=0.3)
         ph = sum(ps) / 2
         self._emb_heatmap(
@@ -528,11 +528,11 @@ class InnerNodesFigure(Figure):
         out = out or []
         if not any([basic, uorf, src, out]):
             return
-        sf.suptitle("Forward Nodes", fontsize=16, fontweight='bold', y=1.05)
+        sf.suptitle("Forward Nodes", fontsize=16, fontweight="bold", y=1.05)
         cm = self._cmap(True)
         hs, hu = len(src) > 1, bool(uorf)
         np_ = len(basic) + (1 if hs else 0) + (2 if hu else 0) + len(out)
-        axes = sf.subplots(1, np_, gridspec_kw={'wspace': 0.3})
+        axes = sf.subplots(1, np_, gridspec_kw={"wspace": 0.3})
         axes = [axes] if np_ == 1 else list(axes)
         ai = 0
         if hs:
@@ -544,7 +544,7 @@ class InnerNodesFigure(Figure):
             axes[ai].set_box_aspect(1)
             self._curve(axes[ai], n, self._in_range(n.node_type), cm)
             axes[ai].set(xlabel="Input", ylabel="Output")
-            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight='bold', fontsize=12)
+            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight="bold", fontsize=12)
             ai += 1
         if hu:
             self._multi_curve(
@@ -569,18 +569,18 @@ class InnerNodesFigure(Figure):
             axes[ai].set_box_aspect(1)
             self._curve(axes[ai], n, self._in_range("output"), cm)
             axes[ai].set(xlabel="Input", ylabel="Output")
-            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight='bold', fontsize=12)
+            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight="bold", fontsize=12)
             ai += 1
 
     def _inv_row(self, sf, inv, inv_uorf, inv_src):
         inv_src = inv_src or []
         if not inv and not inv_uorf and not inv_src:
             return
-        sf.suptitle("Inverse Nodes", fontsize=16, fontweight='bold', y=1.05)
+        sf.suptitle("Inverse Nodes", fontsize=16, fontweight="bold", y=1.05)
         cm = self._cmap(True)
         hs = len(inv_src) > 1
         np_ = len(inv) + (1 if inv_uorf else 0) + (1 if hs else 0)
-        axes = sf.subplots(1, np_, gridspec_kw={'wspace': 0.3})
+        axes = sf.subplots(1, np_, gridspec_kw={"wspace": 0.3})
         axes = [axes] if np_ == 1 else list(axes)
         ai = 0
         if inv_uorf:
@@ -592,7 +592,7 @@ class InnerNodesFigure(Figure):
             axes[ai].set_box_aspect(1)
             self._curve(axes[ai], n, self._in_range(n.node_type), cm)
             axes[ai].set(xlabel="Input", ylabel="Output")
-            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight='bold', fontsize=12)
+            axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight="bold", fontsize=12)
             ai += 1
         if hs:
             self._multi_curve(
@@ -642,7 +642,7 @@ class InnerNodesFigure(Figure):
             rows.append(("inv", (inv, inv_uorf, inv_src)))
         if not rows:
             fig = plt.figure(figsize=(10, 5))
-            fig.text(0.5, 0.5, "No data available", ha='center', va='center', fontsize=16)
+            fig.text(0.5, 0.5, "No data available", ha="center", va="center", fontsize=16)
             return fig
 
         fig = plt.figure(figsize=(20, 5 * len(rows)))
