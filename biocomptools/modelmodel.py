@@ -497,6 +497,9 @@ class NetworkModel(BaseModel):
         max_points_per_batch: int | None = None,
         disable_variational: bool = True,
         z_value: str | float = "uniform",
+        z_normal_mean: float = 0.5,
+        z_normal_std: float = 0.2,
+        z_normal_clip: bool = True,
         with_shared_params: pr.ParameterTree | None = None,
         with_local_params: pr.ParameterTree | None = None,
         collect_in_indices: np.ndarray | None = None,
@@ -529,6 +532,9 @@ class NetworkModel(BaseModel):
             max_points_per_batch=max_points_per_batch,
             disable_variational=disable_variational,
             z_value=z_value,
+            z_normal_mean=z_normal_mean,
+            z_normal_std=z_normal_std,
+            z_normal_clip=z_normal_clip,
             with_shared_params=with_shared_params,
             with_local_params=with_local_params,
             collect_in_indices=collect_in_indices,
@@ -545,6 +551,9 @@ class NetworkModel(BaseModel):
         max_points_per_batch: int | None = None,
         disable_variational: bool = True,
         z_value: str | float = "uniform",
+        z_normal_mean: float = 0.5,
+        z_normal_std: float = 0.2,
+        z_normal_clip: bool = True,
         with_shared_params: pr.ParameterTree | None = None,
         with_local_params: pr.ParameterTree | None = None,
         collect_in_indices: np.ndarray | None = None,
@@ -561,7 +570,10 @@ class NetworkModel(BaseModel):
             key: Random key for predictions (int or JAX PRNGKey)
             max_points_per_batch: Maximum number of output points per batch
             disable_variational: Whether to disable variational parameters
-            z_value: Value for z latents, either 'uniform' or a float
+            z_value: Value for z latents, either 'uniform', 'normal', or a float
+            z_normal_mean: Mean for normal z sampling when z_value='normal'
+            z_normal_std: Standard deviation for normal z sampling when z_value='normal'
+            z_normal_clip: Clip normal z samples to [0, 1] when z_value='normal'
             with_shared_params: Optional ParameterTree to override shared parameters
             with_local_params: Optional ParameterTree to override local parameters
             collect_in_indices: Indices for collecting node inputs (for inner node plots)
@@ -582,6 +594,10 @@ class NetworkModel(BaseModel):
             key = jax.random.PRNGKey(0)
         if isinstance(key, int):
             key = jax.random.PRNGKey(key)
+        if isinstance(z_value, str) and z_value not in {"uniform", "normal"}:
+            raise ValueError(
+                f"Unsupported z_value='{z_value}'. Expected 'uniform', 'normal', or float."
+            )
 
         # prepare parameters
         if with_shared_params is None and with_local_params is None:
@@ -647,6 +663,12 @@ class NetworkModel(BaseModel):
 
             if z_value == "uniform":
                 Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
+            elif z_value == "normal":
+                Z_batch = z_normal_mean + z_normal_std * jax.random.normal(
+                    batch_key, (batch_size, num_z)
+                )
+                if z_normal_clip:
+                    Z_batch = jnp.clip(Z_batch, 0.0, 1.0)
             else:
                 Z_batch = jnp.ones((batch_size, num_z)) * z_value
 

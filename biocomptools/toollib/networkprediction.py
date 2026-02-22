@@ -524,7 +524,10 @@ class NetworkPrediction(GridStatsFields, DataSource):
     seed: int = 0
     max_evals: int = 300000
     use_output_as_input: bool = False
-    z_value: Union[Literal['uniform'], float] = 'uniform'
+    z_value: Union[Literal['uniform', 'normal'], float] = 'uniform'
+    z_normal_mean: float = 0.5
+    z_normal_std: float = 0.2
+    z_normal_clip: bool = True
     disable_variational: bool = True
     device: Literal['cpu', 'gpu'] = 'cpu'  # device preference for predictions
 
@@ -708,7 +711,11 @@ class NetworkPrediction(GridStatsFields, DataSource):
         if self.verbose:
             logger.debug(f"computing predictions with model {self.network_model.signature}")
             logger.debug(
-                f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, z_value={self.z_value}, device={self.device}"
+                "prediction params: "
+                f"seed={self.seed}, disable_variational={self.disable_variational}, "
+                f"z_value={self.z_value}, z_normal_mean={self.z_normal_mean}, "
+                f"z_normal_std={self.z_normal_std}, z_normal_clip={self.z_normal_clip}, "
+                f"device={self.device}"
             )
             logger.debug(f"effective_max_evals: {effective_max_evals}")
 
@@ -733,6 +740,9 @@ class NetworkPrediction(GridStatsFields, DataSource):
             stacked_x,
             key=self.seed,
             z_value=self.z_value,
+            z_normal_mean=self.z_normal_mean,
+            z_normal_std=self.z_normal_std,
+            z_normal_clip=self.z_normal_clip,
             disable_variational=self.disable_variational,
             with_shared_params=with_shared_params,
             with_local_params=with_local_params,
