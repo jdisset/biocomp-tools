@@ -61,19 +61,44 @@ def ffill(arr, mask=None):
     return arr[np.arange(idx.shape[0])[:, None], idx]
 
 
-def get_latest_avg_loss(all_losses: list[ndArray], replicate_id: int, window: int = 64) -> float:
-    """Calculates the average loss over the last `window` for a specific replicate."""
-    if len(all_losses) == 0:
-        return np.nan
+def _losses_array_to_2d(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return np.empty((0, 0), dtype=float)
+    if arr.ndim == 0:
+        return arr.reshape(1, 1)
+    if arr.ndim == 1:
+        return arr[None, :]
+    if arr.ndim == 2:
+        if arr.shape[1] <= arr.shape[0]:
+            return np.moveaxis(arr, 1, 0)
+        return arr
 
-    # Check if losses are 1D or 2D and concatenate appropriately
-    first_loss = all_losses[0]
-    if len(first_loss.shape) == 1:
-        # 1D case: each loss array is shape (n_replicates,)
-        losses_array = np.stack(all_losses, axis=1)  # shape: (n_replicates, n_steps)
-    else:
-        # 2D case: each loss array is shape (n_replicates, n_batches_or_something)
-        losses_array = np.concatenate(all_losses, axis=1)
+    # common training shape: (n_steps, n_replicates, batches_per_step, ...)
+    arr = np.moveaxis(arr, 1, 0)
+    return arr.reshape(arr.shape[0], -1)
+
+
+def losses_to_2d(all_losses) -> np.ndarray:
+    arr = np.asarray(all_losses)
+    if arr.dtype != object:
+        return _losses_array_to_2d(arr)
+
+    flat_chunks = []
+    for item in all_losses:
+        item_2d = _losses_array_to_2d(np.asarray(item))
+        if item_2d.size:
+            flat_chunks.append(item_2d)
+    if not flat_chunks:
+        return np.empty((0, 0), dtype=float)
+    return np.concatenate(flat_chunks, axis=1)
+
+
+def get_latest_avg_loss(all_losses, replicate_id: int, window: int = 64) -> float:
+    """Calculates the average loss over the last `window` for a specific replicate."""
+    losses_array = losses_to_2d(all_losses)
+    if losses_array.size == 0:
+        return np.nan
 
     if replicate_id >= losses_array.shape[0]:
         return np.nan
@@ -86,16 +111,15 @@ def get_latest_avg_loss(all_losses: list[ndArray], replicate_id: int, window: in
 
 
 def get_best_smoothed_loss_replicate_id(
-    all_losses: list[ndArray],
+    all_losses,
     sigma: float = 12.0,
     max_window: int = 64,
 ) -> Tuple[int, np.ndarray, float]:
     """Determines the best replicate based on the average loss in the final window."""
-    assert isinstance(all_losses, list), "all_losses must be a list of ndarrays"
-    if not all_losses:
+    losses_array = losses_to_2d(all_losses)
+    if losses_array.size == 0:
         return -1, np.array([]), np.inf
 
-    losses_array = np.concatenate(all_losses, axis=1)
     n_replicates = losses_array.shape[0]
 
     end_vals = np.array(
@@ -108,13 +132,15 @@ def get_best_smoothed_loss_replicate_id(
     best_replicate_id = int(np.nanargmin(end_vals))
     best_loss_value = end_vals[best_replicate_id]
 
-    smoothed_losses = gaussian_filter1d(losses_array, sigma=sigma, mode='nearest')
+    smoothed_losses = gaussian_filter1d(losses_array, sigma=sigma, axis=1, mode='nearest')
 
     return best_replicate_id, smoothed_losses, best_loss_value
 
 
-def plot_loss(all_losses: list[ndArray]):
-    losses_array = np.concatenate(all_losses, axis=1)  # (n_replicates, batches_per_step)
+def plot_loss(all_losses):
+    losses_array = losses_to_2d(all_losses)  # (n_replicates, total_steps)
+    if losses_array.size == 0:
+        losses_array = np.zeros((1, 1), dtype=float)
 
     fig = plt.figure(figsize=(10, 5), dpi=300)
     gs = fig.add_gridspec(1, 2, width_ratios=[3, 1])
@@ -124,6 +150,8 @@ def plot_loss(all_losses: list[ndArray]):
     nan_mask = np.isnan(losses_array)
     ffill(losses_array)
     best_loss_id, smoothed_losses, _ = get_best_smoothed_loss_replicate_id(all_losses)
+    if smoothed_losses.ndim != 2 or smoothed_losses.shape != losses_array.shape:
+        smoothed_losses = losses_array.copy()
 
     yrange = np.nanmax(losses_array) - np.nanmin(losses_array)
 
@@ -177,9 +205,11 @@ def plot_loss(all_losses: list[ndArray]):
                 color=colormap(i % 20),
             )
 
-    ax.set_title(
-        f'Loss history. Best loss with replicate {best_loss_id}, ~ {smoothed_losses[best_loss_id, -1]:.4f}'
-    )
+    if best_loss_id >= 0 and best_loss_id < smoothed_losses.shape[0]:
+        best_loss_str = f'Best loss with replicate {best_loss_id}, ~ {smoothed_losses[best_loss_id, -1]:.4f}'
+    else:
+        best_loss_str = 'Best loss unavailable'
+    ax.set_title(f'Loss history. {best_loss_str}')
 
     try:
         labelLines(ax.get_lines(), zorder=2.5)

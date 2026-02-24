@@ -28,6 +28,46 @@ from pydantic import Field
 logger = get_logger(__name__)
 
 
+def _finite_fraction(tree) -> float:
+    from jax.tree_util import tree_leaves
+
+    total = 0
+    finite = 0
+    for leaf in tree_leaves(tree):
+        arr = np.asarray(leaf)
+        if not np.issubdtype(arr.dtype, np.number):
+            continue
+        total += arr.size
+        finite += int(np.isfinite(arr).sum())
+    if total == 0:
+        return 0.0
+    return finite / total
+
+
+def _extract_replicate_params(all_params, replicate_id: int):
+    from biocomp.jaxutils import tree_get
+
+    candidates = []
+    seen = set()
+    for idx in [replicate_id, (replicate_id,), (-1, replicate_id), (replicate_id, -1), (-1,)]:
+        try:
+            key = str(idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            cand = tree_get(all_params, idx)
+            score = _finite_fraction(cand)
+            candidates.append((score, idx, cand))
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+    score, idx, params = max(candidates, key=lambda x: x[0])
+    logger.debug(f"Selected params index {idx} with finite fraction {score:.4f}")
+    return params
+
+
 class TrainingProgram(BaseOptimizationProgram):
     training_conf: Annotated[TrainingConfig, Arg(help='Training config')] = Field(
         default_factory=lambda: TrainingConfig()
@@ -124,6 +164,22 @@ class TrainingProgram(BaseOptimizationProgram):
     def save_outputs(self, all_params, all_losses, step_history=None):
         save_dir = self._save_dir / self.get_output_subdir()
 
+        try:
+            from jax.tree_util import tree_leaves
+
+            leaves = tree_leaves(all_params)
+            if leaves:
+                arr = np.asarray(leaves[0])
+                logger.info(
+                    f"save_outputs: all_params leaf0 shape={arr.shape}, dtype={arr.dtype}"
+                )
+        except Exception:
+            logger.info(f"save_outputs: all_params type={type(all_params)}")
+        if "debug" in self._run_name:
+            import pickle
+
+            with open(save_dir / "debug_all_params.pkl", "wb") as f:
+                pickle.dump(all_params, f)
 
         self.save_best(all_params, all_losses, save_dir)
 
@@ -139,7 +195,10 @@ class TrainingProgram(BaseOptimizationProgram):
         if logger_metrics:
             self._metadata['logger_metrics_all_replicates'] = make_json_ready(logger_metrics)
 
-        self.save_loss_plot(all_losses, save_dir)
+        try:
+            self.save_loss_plot(all_losses, save_dir)
+        except Exception as e:
+            logger.error(f"Failed to save loss plot: {e}")
         self.save_metadata(save_dir)
 
     def get_replicate_model_func(self):
@@ -165,6 +224,17 @@ class TrainingProgram(BaseOptimizationProgram):
         model_factory = self.get_best_model_func()
         model = model_factory(all_params=all_params, all_losses=all_losses)
         if model is None:
+            logger.warning("Falling back to replicate 0 model export.")
+            model = create_replicate_model(
+                all_params=all_params,
+                all_losses=all_losses,
+                replicate_id=0,
+                compute_conf=self.compute_conf,
+                rescaler=self.data_conf.rescaler,
+                base_metadata=make_json_ready(self._metadata),
+                loggers=self.loggers,
+            )
+        if model is None:
             logger.error("!!!!!! No best model found !!!!!")
             return
         if name is None:
@@ -177,10 +247,14 @@ class TrainingProgram(BaseOptimizationProgram):
 def create_replicate_model(
     all_params, all_losses, replicate_id, compute_conf, rescaler, base_metadata, loggers
 ):
-    from biocomp.jaxutils import tree_get, tree_to_np
+    from biocomp.jaxutils import tree_to_np
     import pickle
 
-    params = tree_get(all_params, replicate_id)
+    params = _extract_replicate_params(all_params, replicate_id)
+    # Fallback for already-sliced parameter trees (no leading replicate axis).
+    if params is None and replicate_id == 0:
+        params = all_params
+        logger.debug("Falling back to full all_params for replicate-0 export.")
     if params is None:
         logger.warning(f"No parameters found for replicate {replicate_id}.")
         return None
@@ -235,8 +309,24 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
 
     best_model_id, _, _ = get_best_smoothed_loss_replicate_id(all_losses)
     if best_model_id == -1:
-        logger.warning("Could not determine best model.")
-        return None
+        n_replicates = 0
+        if hasattr(all_params, 'iter_leaves'):
+            try:
+                for _path, param in all_params.iter_leaves():
+                    if hasattr(param, 'shape') and len(param.shape) > 0:
+                        n_replicates = int(param.shape[0])
+                        break
+            except Exception as e:
+                logger.debug(f"Could not infer replicate count from params: {e}")
+
+        if n_replicates > 0:
+            logger.warning(
+                "Could not determine best model from losses. Falling back to replicate 0."
+            )
+            best_model_id = 0
+        else:
+            logger.warning("Could not determine best model.")
+            return None
 
     logger.debug(f"Best model is replicate number {best_model_id}")
     return model_factory(all_params=all_params, all_losses=all_losses, replicate_id=best_model_id)

@@ -140,3 +140,55 @@ def render_smooth_voxel_example(
 
     raise ValueError(f"Unknown mode={mode!r}; expected 'single' or 'split'.")
 
+
+def render_benchmark_distribution(
+    ax: Axes,
+    *,
+    item: Any,
+    bench: Any,
+    xlims: tuple[float, float] = (0.0, 0.7),
+    ylims: tuple[float, float] = (0.0, 0.7),
+    show_marginal_kde: bool = False,
+    tick_count: int = 5,
+    grid_resolution: int = 32,
+    draw_xlabel: bool = False,
+    draw_ylabel: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Render a split smooth voxel violin comparing measured vs predicted for a benchmark item.
+
+    Left violin = ground truth, right violin = model prediction.
+    Data is converted from raw to latent space via the model's rescaler.
+    """
+    rescaler = bench.loaded_model.rescaler
+
+    x_gt = np.asarray(item.gt_data.x, dtype=float)
+    y_gt = _to_single_output(item.gt_data.y)
+    x_pred = np.asarray(item.pred_data.x, dtype=float)
+    y_pred = _to_single_output(item.pred_data.y)
+
+    x_gt_lat = np.asarray(rescaler.fwd(x_gt), dtype=float)
+    y_gt_lat = np.asarray(rescaler.fwd(y_gt), dtype=float)
+    x_pred_lat = np.asarray(rescaler.fwd(x_pred), dtype=float)
+    y_pred_lat = np.asarray(rescaler.fwd(y_pred), dtype=float)
+
+    input_names, output_name = _network_labels_from_pdata(item.gt_data, x_gt)
+
+    return smooth_voxel_conditioned_violin(
+        X=(x_gt_lat, x_pred_lat),
+        Y=(y_gt_lat, y_pred_lat),
+        input_names=input_names,
+        output_name=output_name,
+        rescaler=rescaler,
+        ax=ax,
+        mode="split",
+        xlims=xlims,
+        ylims=ylims,
+        show_marginal_kde=show_marginal_kde,
+        tick_count=tick_count,
+        grid_resolution=grid_resolution,
+        draw_xlabel=draw_xlabel,
+        draw_ylabel=draw_ylabel,
+        **kwargs,
+    )
+
