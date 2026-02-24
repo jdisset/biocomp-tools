@@ -1,7 +1,7 @@
 """Benchmark summary utilities."""
 
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Literal, Optional, Any, Union
 import matplotlib.axes
 import numpy as np
 from matplotlib.patches import FancyBboxPatch, Patch
@@ -52,6 +52,13 @@ class BenchmarkData(GridStatsFields, BaseModel):
     device: str = 'gpu'
     max_evals: int = 250000
     # gridstats_* fields inherited from GridStatsFields mixin
+
+    # z_value controls the latent noise distribution for distributional models
+    z_value: Union[Literal['uniform', 'normal'], float] = 'uniform'
+    z_normal_mean: float = 0.5
+    z_normal_std: float = 0.2
+    z_normal_clip: bool = True
+    disable_variational: bool = True
 
     _model: Any = PrivateAttr(default=None)
     _items: list[BenchmarkItem] = PrivateAttr(default_factory=list)
@@ -115,8 +122,18 @@ class BenchmarkData(GridStatsFields, BaseModel):
         networks = [d.metadata['built_network'] for d in items_to_plot]
         network_model = NetworkModel(model=self._model, network=networks)
 
+        # d.x is in display order (alphabetical); NetworkPrediction expects network order.
+        # input_order maps network→display, so argsort inverts it back.
+        predict_at_network_order = []
+        for d in items_to_plot:
+            x_display = np.asarray(d.x)
+            io = d.metadata.get('input_order')
+            predict_at_network_order.append(
+                x_display[:, np.argsort(io)] if io is not None else x_display
+            )
+
         predictor = NetworkPrediction(
-            predict_at=[d.x for d in items_to_plot],
+            predict_at=predict_at_network_order,
             ground_truth=[d.y for d in items_to_plot],
             per_prediction_info=[d.metadata for d in items_to_plot],
             max_evals=self.max_evals,
@@ -129,6 +146,11 @@ class BenchmarkData(GridStatsFields, BaseModel):
             gridstats_k=self.gridstats_k,
             gridstats_radius=self.gridstats_radius,
             gridstats_min_points=self.gridstats_min_points,
+            z_value=self.z_value,
+            z_normal_mean=self.z_normal_mean,
+            z_normal_std=self.z_normal_std,
+            z_normal_clip=self.z_normal_clip,
+            disable_variational=self.disable_variational,
         )
 
         prediction_data = predictor.get_data()
@@ -294,6 +316,43 @@ class BenchmarkData(GridStatsFields, BaseModel):
     @property
     def powermean_nre(self) -> Optional[float]:
         return self._aggregate_stats.get('powermean_nre')
+
+    _MAX_AGGREGATE_POINTS: int = 50000
+
+    @property
+    def all_measured(self) -> np.ndarray:
+        """Flattened 1D array of all ground-truth y-values, subsampled if needed."""
+        m, _ = self._get_aggregate_arrays()
+        return m
+
+    @property
+    def all_predicted(self) -> np.ndarray:
+        """Flattened 1D array of all predicted y-values, subsampled if needed."""
+        _, p = self._get_aggregate_arrays()
+        return p
+
+    def _get_aggregate_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        measured_parts: list[np.ndarray] = []
+        predicted_parts: list[np.ndarray] = []
+        for item in self._items:
+            gt_y = item.gt_data.yval
+            pr_y = item.pred_data.yval
+            if gt_y is None or pr_y is None:
+                continue
+            gt_flat = np.asarray(gt_y).ravel()
+            pr_flat = np.asarray(pr_y).ravel()
+            n = min(len(gt_flat), len(pr_flat))
+            measured_parts.append(gt_flat[:n])
+            predicted_parts.append(pr_flat[:n])
+        if not measured_parts:
+            return np.array([]), np.array([])
+        measured = np.concatenate(measured_parts)
+        predicted = np.concatenate(predicted_parts)
+        if len(measured) > self._MAX_AGGREGATE_POINTS:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(measured), self._MAX_AGGREGATE_POINTS, replace=False)
+            measured, predicted = measured[idx], predicted[idx]
+        return measured, predicted
 
 
 def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwargs):
