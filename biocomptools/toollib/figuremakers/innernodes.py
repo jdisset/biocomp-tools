@@ -30,7 +30,8 @@ INV_TL_RANGE = (-0.1, 0.7)
 DEFAULT_RANGE = (0.01, 0.8)
 
 NODE_PARENTS: dict[str, list[str]] = {
-    "inv_translation": ["input"],
+    "inv_output": ["input"],
+    "inv_translation": ["inv_output"],
     "inv_transcription": ["inv_translation"],
     "inv_source": ["inv_transcription"],
     "source": ["aggregation", "inv_source"],
@@ -41,6 +42,7 @@ NODE_PARENTS: dict[str, list[str]] = {
 }
 
 TOPO_ORDER = [
+    ("inv_output", "inverse"),
     ("inv_translation", "inv_uorf"),
     ("inv_transcription", "inverse"),
     ("inv_source", "inverse"),
@@ -55,9 +57,10 @@ TOPO_ORDER = [
 
 FWD_LABELS = {"source": "plasmid → DNA", "transcription": "DNA → mRNA", "translation": "mRNA → PRT"}
 INV_LABELS = {
+    "inv_output": "Fluo → PRT",
     "inv_source": "DNA → plasmid",
     "inv_transcription": "mRNA → DNA",
-    "inv_translation": "Fluo → mRNA",
+    "inv_translation": "PRT → mRNA",
 }
 BASIC_RECIPE = [[["hEF1a", "eYFP"], ["hEF1a", "eBFP2"]]]
 
@@ -150,7 +153,7 @@ class InnerNodesFigure(Figure):
 
     def _in_range(self, nt: str) -> tuple[float, float]:
         n = _norm(nt)
-        if n == "inv_translation":
+        if n == "inv_output":
             return INV_TL_RANGE
         lo, hi = float("inf"), float("-inf")
         for p in NODE_PARENTS.get(n, []):
@@ -585,7 +588,7 @@ class InnerNodesFigure(Figure):
         ai = 0
         if inv_uorf:
             self._multi_curve(
-                axes[ai], inv_uorf, INV_TL_RANGE, cm, "Inv Translation\nFluo → mRNA", "uORFs"
+                axes[ai], inv_uorf, self._in_range("inv_translation"), cm, "Inv Translation\nPRT → mRNA", "uORFs"
             )
             ai += 1
         for n in inv:
