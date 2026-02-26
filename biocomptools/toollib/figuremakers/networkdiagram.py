@@ -13,6 +13,7 @@ from jeanplot.core.connector import Connection, OrthogonalCurve, SimpleBezierCur
 from jeanplot.core.svg import LineEndFlat
 from jeanplot.core.text import Text
 
+from biocomp.graphengine import is_inverse_node_type
 from biocomptools.toollib.plot import Figure
 from biocomptools.logging_config import get_logger
 
@@ -284,7 +285,7 @@ class NetworkDiagram(Container):
                 break
             if current.node_type in ("aggregation", "source"):
                 return current.extra.get("cotx_group")
-            if current.node_type.startswith("inv_"):
+            if is_inverse_node_type(current.node_type):
                 orig = current.is_inverse_of
                 if orig:
                     orig_node = self._graph.nodes.get(orig.node_id)
@@ -361,7 +362,7 @@ class NetworkDiagram(Container):
         if ntype not in NODE_CLASSES:
             return (
                 InvNode(**kw)
-                if ntype.startswith("inv_")
+                if is_inverse_node_type(ntype)
                 else ComputeNode(node_type=ntype, node_label="?", **kw)
             )
 
