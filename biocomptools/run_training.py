@@ -103,6 +103,7 @@ class TrainingProgram(BaseOptimizationProgram):
         context = super()._get_logger_context()
         context.update(
             {
+                'training_conf': self.training_conf,
                 'compute_conf': self.compute_conf,
                 'data_conf': self.data_conf,
                 'training_set': self.training_set,
