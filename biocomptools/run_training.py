@@ -80,6 +80,7 @@ class TrainingProgram(BaseOptimizationProgram):
     )
 
     use_jax_sampling: bool = True
+    uniform_weights: Annotated[bool, Arg(help='Override all dataset weights to 1.0')] = False
 
     _training_dman: Any = None
     _training_id: Optional[str] = None
@@ -120,6 +121,10 @@ class TrainingProgram(BaseOptimizationProgram):
             dataset=self.training_set,
         )
         self._training_dman.jax_sampling = self.use_jax_sampling
+        if self.uniform_weights:
+            n = len(self._training_dman.get_networks())
+            self._training_dman.set_weights([1.0] * n)
+            logger.info(f"Uniform weights: set all {n} network weights to 1.0")
 
     def enrich_metadata(self):
         self._build_dman()
