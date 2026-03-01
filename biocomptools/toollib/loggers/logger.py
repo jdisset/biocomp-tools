@@ -37,6 +37,7 @@ class Logger(BaseModel):
     periods: int | list[int] = 1
     async_ok: bool = True
     parallel_ok: bool = False
+    callback_mode: Literal["thread", "process"] = "thread"
     metadata: dict[str, object] = {}
 
     # new declarative attributes
@@ -58,6 +59,11 @@ class Logger(BaseModel):
         self._uses_new_pattern = (
             cls.on_batch is not Logger.on_batch or cls.on_end is not Logger.on_end
         )
+        # Sync periods → frequency for new-pattern loggers so YAML configs
+        # using `periods: 10` work seamlessly with new dispatch
+        if self._uses_new_pattern and isinstance(self.periods, int):
+            if self.frequency == 1 and self.periods != 1:
+                self.frequency = self.periods
 
     def initialize(self, training_program: object) -> None:
         """Optional initialization before training starts."""
@@ -112,7 +118,7 @@ class Logger(BaseModel):
         """
         if not training_program:
             return 0
-        loggers = getattr(training_program, 'loggers', [])
+        loggers = getattr(training_program, "loggers", [])
         for i, logger_obj in enumerate(loggers):
             if logger_obj is self:
                 return i
