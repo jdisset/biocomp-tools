@@ -366,7 +366,7 @@ class NetworkModel(BaseModel):
             raise e
 
     def _precompile_batch_apply(self):
-        """Precompile batch_apply functions with the correct batch size"""
+        """AOT-compile batch_apply functions and cache compiled executables."""
         if self._stack is None or self._params is None:
             logger.warning("Cannot precompile: stack or params not initialized")
             return
@@ -378,7 +378,6 @@ class NetworkModel(BaseModel):
 
             logger.info("Precompiling batch_apply functions...")
 
-            # calculate the actual batch size that will be used during prediction
             outputs_per_sample = int(self._stack.total_nb_of_outputs)
             effective_batch_size = max(1, self.max_points_per_batch // outputs_per_sample)
 
@@ -387,45 +386,83 @@ class NetworkModel(BaseModel):
                 f"(max_points={self.max_points_per_batch}, outputs_per_sample={outputs_per_sample})"
             )
 
-            # create dummy inputs for precompilation with correct batch size
             dummy_x = jnp.zeros((effective_batch_size, self._stack.total_nb_of_inputs))
             dummy_z = jnp.zeros(
                 (effective_batch_size, self._params["global/number_of_random_variables"])
             )
             dummy_key = jax.random.PRNGKey(0)
             dummy_keys = jax.random.split(dummy_key, effective_batch_size)
-
-            logger.debug(
-                f"Precompilation: dummy_keys shape: {dummy_keys.shape}, effective_batch_size: {effective_batch_size}"
-            )
-
-            # use the actual params that will be used during prediction
             dummy_params = self._params
 
-            # precompile CPU version
-            if self._batch_apply_cpu is not None:
-                try:
-                    start_time = time()
-                    yhatdummy, _ = self._batch_apply_cpu(dummy_params, dummy_x, dummy_z, dummy_keys)
-                    yhatdummy.block_until_ready()
-                    cpu_compile_time = time() - start_time
-                    logger.info(f"CPU batch_apply precompiled in {cpu_compile_time:.2f} seconds")
-                except Exception as e:
-                    logger.warning(f"Failed to precompile CPU batch_apply: {e}")
+            # try AOT compilation with caching, fall back to warm-up call
+            try:
+                from biocomp.compilation_cache import CompilationSignature, cached_compile
 
-            # precompile GPU version if different from CPU
-            if self._batch_apply_gpu is not self._batch_apply_cpu:
-                try:
+                stack_sig = CompilationSignature.for_stack(self._stack)
+                original_cpu_fn = self._batch_apply_cpu
+                original_gpu_fn = self._batch_apply_gpu
+
+                if original_cpu_fn is not None:
+                    cpu_sig = f"inference_cpu_bs{effective_batch_size}_{stack_sig}"
                     start_time = time()
-                    yhatdummy, _ = self._batch_apply_gpu(dummy_params, dummy_x, dummy_z, dummy_keys)
-                    yhatdummy.block_until_ready()
-                    gpu_compile_time = time() - start_time
-                    logger.info(f"GPU batch_apply precompiled in {gpu_compile_time:.2f} seconds")
-                except Exception as e:
-                    logger.warning(f"Failed to precompile GPU batch_apply: {e}")
+                    self._batch_apply_cpu = cached_compile(
+                        lambda: original_cpu_fn.lower(  # pyright: ignore  # jax.jit has .lower()
+                            dummy_params,
+                            dummy_x,
+                            dummy_z,
+                            dummy_keys,
+                        ).compile(),
+                        signature=cpu_sig,
+                    )
+                    self._batch_apply = self._batch_apply_cpu
+                    logger.debug(
+                        f"CPU batch_apply ready in {time() - start_time:.2f}s (cached or compiled)"
+                    )
+
+                if original_gpu_fn is not None and original_gpu_fn is not original_cpu_fn:
+                    gpu_sig = f"inference_gpu_bs{effective_batch_size}_{stack_sig}"
+                    start_time = time()
+                    self._batch_apply_gpu = cached_compile(
+                        lambda: original_gpu_fn.lower(  # pyright: ignore  # jax.jit has .lower()
+                            dummy_params,
+                            dummy_x,
+                            dummy_z,
+                            dummy_keys,
+                        ).compile(),
+                        signature=gpu_sig,
+                    )
+                    logger.debug(
+                        f"GPU batch_apply ready in {time() - start_time:.2f}s (cached or compiled)"
+                    )
+
+            except Exception as e:
+                logger.info(f"AOT cache unavailable ({type(e).__name__}: {e}), using warm-up call")
+                self._precompile_batch_apply_warmup(dummy_params, dummy_x, dummy_z, dummy_keys)
 
         except Exception as e:
             logger.warning(f"Precompilation failed: {e}")
+
+    def _precompile_batch_apply_warmup(self, dummy_params, dummy_x, dummy_z, dummy_keys):
+        """Fallback: trigger JIT compilation via warm-up call."""
+        from time import time
+
+        if self._batch_apply_cpu is not None:
+            try:
+                start_time = time()
+                yhatdummy, _ = self._batch_apply_cpu(dummy_params, dummy_x, dummy_z, dummy_keys)  # pyright: ignore
+                yhatdummy.block_until_ready()  # pyright: ignore
+                logger.debug(f"CPU batch_apply precompiled in {time() - start_time:.2f} seconds")
+            except Exception as e:
+                logger.warning(f"Failed to precompile CPU batch_apply: {e}")
+
+        if self._batch_apply_gpu is not self._batch_apply_cpu:
+            try:
+                start_time = time()
+                yhatdummy, _ = self._batch_apply_gpu(dummy_params, dummy_x, dummy_z, dummy_keys)  # pyright: ignore
+                yhatdummy.block_until_ready()  # pyright: ignore
+                logger.debug(f"GPU batch_apply precompiled in {time() - start_time:.2f} seconds")
+            except Exception as e:
+                logger.warning(f"Failed to precompile GPU batch_apply: {e}")
 
     def with_model(self, model: BiocompModel) -> "NetworkModel":
         """create a new network model with a different biocomp model"""
