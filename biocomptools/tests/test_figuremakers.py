@@ -496,7 +496,8 @@ class TestGeneticCircuit:
                     CoTransfection(
                         units=[
                             TranscriptionUnit(
-                                name="reporter", slots=["hEF1a", "CasE_rec", "mNeonGreen", "L0.T_4560"]
+                                name="reporter",
+                                slots=["hEF1a", "CasE_rec", "mNeonGreen", "L0.T_4560"],
                             ),
                             TranscriptionUnit(
                                 name="ern_unit", slots=["hEF1a", "CasE", "L0.T_4560"]
@@ -594,6 +595,94 @@ class TestThemeLoading:
 
         assert "SourceAnnotation" in theme
         assert "GeneticSchematic" in theme
+
+
+class TestEmbeddingTrajectories:
+    def test_resolve_trajectories_from_memory(self):
+        """_resolve_trajectories uses in-memory trajectories when provided."""
+        from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure
+
+        trajectories = {
+            "tl_rate_0": [(0.1, 0.2), (0.3, 0.4), (0.5, 0.6)],
+            "tl_rate_1": [(0.7, 0.8), (0.9, 1.0)],
+        }
+        # Call the static-like logic directly via the method on a minimal stub
+        result = InnerNodesFigure._resolve_trajectories_static(
+            embedding_trajectories=trajectories,
+            history_dir=None,
+            emb_type="tl_rate",
+            names=["uorf_a", "uorf_b"],
+        )
+        assert result["uorf_a"] == trajectories["tl_rate_0"]
+        assert result["uorf_b"] == trajectories["tl_rate_1"]
+
+    def test_resolve_trajectories_none_falls_back(self):
+        """When embedding_trajectories is None, falls back to disk (returns empty without history_dir)."""
+        from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure
+
+        result = InnerNodesFigure._resolve_trajectories_static(
+            embedding_trajectories=None,
+            history_dir=None,
+            emb_type="tl_rate",
+            names=["uorf_a"],
+        )
+        assert result == {}
+
+    def test_plotlogger_build_trajectories(self):
+        """PlotLogger._build_trajectories converts snapshots to trajectory dict."""
+        from biocomptools.toollib.loggers.plotlogger import PlotLogger
+
+        snapshots = [
+            (10, {"tl_rate": [[0.1, 0.2], [0.3, 0.4]]}),
+            (20, {"tl_rate": [[0.5, 0.6], [0.7, 0.8]]}),
+            (30, {"tl_rate": [[0.9, 1.0], [1.1, 1.2]]}),
+        ]
+        result = PlotLogger._build_trajectories(snapshots)
+        assert "tl_rate_0" in result
+        assert "tl_rate_1" in result
+        assert len(result["tl_rate_0"]) == 3
+        assert result["tl_rate_0"][0] == (0.1, 0.2)
+        assert result["tl_rate_1"][2] == (1.1, 1.2)
+
+    def test_plotlogger_build_trajectories_empty(self):
+        """Empty snapshots produce empty trajectories."""
+        from biocomptools.toollib.loggers.plotlogger import PlotLogger
+
+        assert PlotLogger._build_trajectories([]) == {}
+
+
+class TestNodeInfo:
+    def test_scalar_emb(self):
+        from biocomptools.toollib.figuremakers.innernodes import NodeInfo, ApplyFn
+
+        dummy_fn = ApplyFn(single=lambda: 0.0, batch=lambda arr, **kw: arr)
+        n = NodeInfo("test", "Translation", dummy_fn, 0, "tl_rate", 0.42)
+        assert n.emb_dim == 1
+        assert n.emb_scalar == 0.42
+
+    def test_tuple_emb(self):
+        from biocomptools.toollib.figuremakers.innernodes import NodeInfo, ApplyFn
+
+        dummy_fn = ApplyFn(single=lambda: 0.0, batch=lambda arr, **kw: arr)
+        n = NodeInfo("test", "ERN", dummy_fn, 0, "affinity", (0.1, 0.9))
+        assert n.emb_dim == 2
+        assert n.emb_scalar is None
+
+    def test_none_emb(self):
+        from biocomptools.toollib.figuremakers.innernodes import NodeInfo, ApplyFn
+
+        dummy_fn = ApplyFn(single=lambda: 0.0, batch=lambda arr, **kw: arr)
+        n = NodeInfo("test", "Source", dummy_fn, 0)
+        assert n.emb_dim == 0
+        assert n.emb_scalar is None
+
+    def test_high_dim_emb(self):
+        from biocomptools.toollib.figuremakers.innernodes import NodeInfo, ApplyFn
+
+        dummy_fn = ApplyFn(single=lambda: 0.0, batch=lambda arr, **kw: arr)
+        n = NodeInfo("test", "ERN", dummy_fn, 0, "affinity", (0.1, 0.5, 0.9))
+        assert n.emb_dim == 3
+        assert n.emb_scalar is None
 
 
 class TestCircuitPlot:

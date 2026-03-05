@@ -73,13 +73,13 @@ DEFAULT_GRID_PLOTCONFIGS = [
             },
             callstack_params={
                 "smooth_2d_params": {
-                    'knn_grid_params': {'grid_resolution': DEFAULT_RESOLUTION},
+                    "knn_grid_params": {"grid_resolution": DEFAULT_RESOLUTION},
                     "draw_colorbar": False,
                     "xtitle": False,
                     "ytitle": False,
                     "title": None,
-                    'heatmap_params': {
-                        'contours': None,
+                    "heatmap_params": {
+                        "contours": None,
                     },
                 },
             },
@@ -167,14 +167,14 @@ class UORFCell:
         return f"UORFCell(row={self.row}, col={self.col}, uorf_values={self.uorf_values})"
 
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 ANNOTATION_STYLE = {
-    'color': '#F76665',
-    'linewidth': 2.5,
-    'clip_on': False,
-    'zorder': 200,
-    'linestyle': '--',
+    "color": "#F76665",
+    "linewidth": 2.5,
+    "clip_on": False,
+    "zorder": 200,
+    "linestyle": "--",
 }
 
 
@@ -273,11 +273,11 @@ class UORFMatrixFigure(Figure):
         """Create a plot task for a specific cell"""
         task = PlotTask(
             plot_config=self.get_plot_config_for_cell(cell.row, cell.col, grid_size),
-            plot_method=PartialFunction(func='biocomp.plotutils.smooth', kwargs={'force_dim': 2}),
+            plot_method=PartialFunction(func="biocomp.plotutils.smooth", kwargs={"force_dim": 2}),
         )
 
         task._ax = ax
-        task.plot_method.kwargs['plot_data'] = cell.data
+        task.plot_method.kwargs["plot_data"] = cell.data
 
         # for config in DEFAULT_GRID_PLOTCONFIGS + self.grid_plotconfigs:
         #     if config.matches(cell.row, cell.col, grid_size):
@@ -314,8 +314,8 @@ class UORFMatrixFigure(Figure):
                     0.5,
                     u_value,
                     fontsize=self.label_fontsize,
-                    ha='right',
-                    va='center',
+                    ha="right",
+                    va="center",
                     transform=ax.transAxes,
                 )
 
@@ -325,14 +325,14 @@ class UORFMatrixFigure(Figure):
                         -self.axis_title_padding - self.ylabel_padding,
                         0.5,
                         # f'uORFs on {side} side\n$\\rightarrow$',
-                        f'uORFs on {side} side',
+                        f"uORFs on {side} side",
                         fontsize=self.label_fontsize * 1.0,
-                        ha='center',
-                        va='bottom',
+                        ha="center",
+                        va="bottom",
                         fontweight=self.label_fontweight,
-                        color='black',
+                        color="black",
                         rotation=90,
-                        rotation_mode='anchor',
+                        rotation_mode="anchor",
                         transform=ax.transAxes,
                     )
 
@@ -351,8 +351,8 @@ class UORFMatrixFigure(Figure):
                     -self.xlabel_padding,
                     u_value,
                     fontsize=self.label_fontsize,
-                    ha='center',
-                    va='top',
+                    ha="center",
+                    va="top",
                     transform=ax.transAxes,
                 )
 
@@ -362,12 +362,12 @@ class UORFMatrixFigure(Figure):
                         0.5,
                         -self.axis_title_padding - self.xlabel_padding,
                         # f'$\\rightarrow$\nuORFs on {side} side',
-                        f'uORFs on {side} side',
+                        f"uORFs on {side} side",
                         fontsize=self.label_fontsize * 1.0,
-                        ha='center',
-                        va='top',
+                        ha="center",
+                        va="top",
                         fontweight=self.label_fontweight,
-                        color='black',
+                        color="black",
                         transform=ax.transAxes,
                     )
 
@@ -403,10 +403,10 @@ class UORFMatrixFigure(Figure):
         rmses = []
         for cell in cells:
             if (
-                'prediction_stats' in cell.data.metadata
-                and 'rmse' in cell.data.metadata['prediction_stats']
+                "prediction_stats" in cell.data.metadata
+                and "rmse" in cell.data.metadata["prediction_stats"]
             ):
-                rmse = cell.data.metadata['prediction_stats']['grid_rmse']
+                rmse = cell.data.metadata["prediction_stats"]["grid_rmse"]
                 rmses.append(rmse)
                 if self.show_individual_rmse:
                     ax = figax.ax[cell.row][cell.col]
@@ -415,10 +415,10 @@ class UORFMatrixFigure(Figure):
                         0.5,
                         f"RMSE: {rmse:.3f}",
                         fontsize=self.rmse_fontsize,
-                        ha='center',
-                        va='center',
+                        ha="center",
+                        va="center",
                         transform=ax.transAxes,
-                        color='black',
+                        color="black",
                     )
 
         if rmses and self.show_overall_rmse:
@@ -429,9 +429,9 @@ class UORFMatrixFigure(Figure):
                 0.97,
                 f"Overall RMSE: {overall_rmse:.3f}",
                 fontsize=self.rmse_fontsize,
-                ha='center',
-                va='center',
-                color='black',
+                ha="center",
+                va="center",
+                color="black",
             )
 
     def add_grid_lines(self, figax, grid_size: tuple[int, int]):
@@ -466,7 +466,7 @@ class UORFMatrixFigure(Figure):
                         linewidth=self.grid_line_width,
                         clip_on=False,
                         zorder=0,
-                        dash_capstyle='round',
+                        dash_capstyle="round",
                         linestyle=self.grid_line_style,
                     )
                 )
@@ -486,7 +486,7 @@ class UORFMatrixFigure(Figure):
                         linewidth=self.grid_line_width,
                         clip_on=False,
                         zorder=0,
-                        dash_capstyle='round',
+                        dash_capstyle="round",
                         linestyle=self.grid_line_style,
                     )
                 )
@@ -501,7 +501,7 @@ class UORFMatrixFigure(Figure):
                         linewidth=self.grid_cross_width,
                         clip_on=False,
                         zorder=1,
-                        dash_capstyle='round',
+                        dash_capstyle="round",
                         linestyle=self.grid_cross_style,
                     )
                 )
@@ -514,7 +514,7 @@ class UORFMatrixFigure(Figure):
                         linewidth=self.grid_cross_width,
                         clip_on=False,
                         zorder=1,
-                        dash_capstyle='round',
+                        dash_capstyle="round",
                         linestyle=self.grid_cross_style,
                     )
                 )
@@ -544,7 +544,7 @@ class UORFMatrixFigure(Figure):
             figax = self.figure_spec.make_figure()
 
             metadata = {}
-            metadata['plot_tasks'] = []
+            metadata["plot_tasks"] = []
             for i, cell in enumerate(cells):
                 ax = figax.ax[cell.row][cell.col]
                 task = self.create_plot_task_for_cell(cell, ax, grid_size)
@@ -554,12 +554,23 @@ class UORFMatrixFigure(Figure):
 
                 try:
                     pt_metadata = task.run()
-                    metadata['plot_tasks'].append(pt_metadata)
+                    metadata["plot_tasks"].append(pt_metadata)
                     logger.info(f"Executed plot task for cell {cell} ({i + 1}/{len(cells)})")
                 except Exception as e:
                     logger.error(f"Error executing plot task {task} for cell {cell}: {e}")
                     logger.exception(e)
                     continue
+
+            # collect and serialize grid data from all tasks into one blob
+            all_grid_data = []
+            for pt_meta in metadata.get("plot_tasks", []):
+                gd = pt_meta.pop("grid_data", None)
+                if gd:
+                    all_grid_data.extend(gd)
+            if all_grid_data:
+                from biocomp.plotting.plotting_smooth import grid_data_to_b64
+
+                metadata["grid_data"] = grid_data_to_b64(all_grid_data)
 
             self.add_grid_lines(figax, grid_size)
             self.final_touches(figax, grid_size, cells)
@@ -595,9 +606,9 @@ def bundle_uorf_data(
     if same_xp:
         xp_groups = defaultdict(list)
         for data in plot_data:
-            if 'network' not in data.metadata:
+            if "network" not in data.metadata:
                 continue
-            xp_name = data.metadata['network'].recipe.experiment.name
+            xp_name = data.metadata["network"].recipe.experiment.name
             if xp_name:
                 xp_groups[xp_name].append(data)
 
@@ -612,8 +623,8 @@ def bundle_uorf_data(
         ern_groups = defaultdict(list)
 
         for data in group:
-            network_info = data.metadata.get('network_info', {})
-            ern_names = network_info.get('ern_names', [])
+            network_info = data.metadata.get("network_info", {})
+            ern_names = network_info.get("ern_names", [])
 
             if not ern_names:
                 continue
@@ -626,7 +637,7 @@ def bundle_uorf_data(
         for ern_name, ern_data in ern_groups.items():
             value_sets = set()
             for data in ern_data:
-                uorf_vals = data.metadata['network_info'].get('uorf_values', [])
+                uorf_vals = data.metadata["network_info"].get("uorf_values", [])
                 for vals in uorf_vals:
                     value_sets.add(tuple(vals))
 
@@ -658,29 +669,29 @@ def get_ern_info(bundle: List[PlotData]) -> Dict[str, str]:
     if not bundle:
         return {}
 
-    network_info = bundle[0].metadata.get('network_info', {})
-    ern_names = network_info.get('ern_names', [])
+    network_info = bundle[0].metadata.get("network_info", {})
+    ern_names = network_info.get("ern_names", [])
     if not ern_names:
         return {}
 
     return {
-        'ern_name': ern_names[0],
-        'experiment': bundle[0].metadata.get('experiment', {}).get('name', 'unknown'),
+        "ern_name": ern_names[0],
+        "experiment": bundle[0].metadata.get("experiment", {}).get("name", "unknown"),
     }
 
 
 def get_uorf_values(data: PlotData) -> Tuple[float, float]:
     # (ERN, target)
-    return tuple(data.metadata['network_info']['uorf_values'][0])
+    return tuple(data.metadata["network_info"]["uorf_values"][0])
 
 
 def extract_uorf_info(network):
-    uvals = network.network_info.get('uorf_values', None)
+    uvals = network.network_info.get("uorf_values", None)
     if not uvals:
         return None
     return {
-        'uorf_values': uvals[0],
-        'ern_name': network.network_info.get('ern_names', None)[0],
+        "uorf_values": uvals[0],
+        "ern_name": network.network_info.get("ern_names", None)[0],
     }
 
 
