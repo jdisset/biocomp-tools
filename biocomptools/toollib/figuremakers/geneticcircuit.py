@@ -25,11 +25,13 @@ def render_circuit_to_ax(
 ):
     """Render a genetic circuit schematic to an existing matplotlib axes."""
     from jeanplot.gene import GeneticSchematic
-    from jeanplot import MatplotlibRenderer, jstyle
+    from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
     from jeanplot.core import Size, BoxStyle, LayoutConstraints, Offset, Shadow
     from jeanplot.core.svg import LineEndFlat
     from dracon import load, resolve_all_lazy
     import importlib.resources
+
+    load_default_theme()
 
     jeanplot_types = [Size, BoxStyle, LayoutConstraints, Offset, Shadow, LineEndFlat]
     theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
@@ -52,6 +54,7 @@ def render_circuit_to_ax(
         grid_gap=grid_gap,
         connection_style=connection_style,
     )
+    jstyle.apply(schematic)
 
     ax.set_aspect("equal")
     ax.axis("off")

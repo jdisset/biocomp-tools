@@ -127,7 +127,7 @@ FluoNode:
       align: center
 
   AggregationNode[style_class=~${e[0]}]:
-    style.background_color: ${e[1]['base']}
+    style.background_color: "#000000"
     style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 10, resolution: 0.01, z_index: 1 }
 
   TUNode[style_class=~${e[0]}]:
@@ -144,8 +144,32 @@ FluoNode:
     Text:
       color: ${e[1]['dark']}
 
+  InputNode[style_class=~${e[0]}]:
+    style.background_color: ${e[1]['light']}
+    style.shadow: !Shadow { color: "${e[1]['bright']}", blur_radius: 12, resolution: 0.01, z_index: 1 }
+    Text:
+      color: ${e[1]['dark']}
+
   Text[style_class=tu_label_marker][style_class=~${e[0]}]:
     color: ${e[1]['dark']}
+
+  Text[style_class=marker_color_label][style_class=~${e[0]}]:
+    color: ${e[1]['dark']}
+
+  ConnectionLabel[style_class=~${e[0]}]:
+    color: ${e[1]['dark']}
+
+Text[style_class=legend_text]:
+  font_size: 7
+  vertical_align: middle
+  align: right
+  offset: !Offset { reference_relative: [2, 0], absolute: [0, 0], relative: [0, -0.3] }
+
+Text[style_class=marker_color_label]:
+  font_size: 6
+  vertical_align: top
+  align: center
+  attachment_offset: !Offset { reference_relative: [1, 0], relative: [-1,0], absolute: [0, -12] }
 
 TUNode:
   min_dimensions: !Size { width: 15, height: 4 }
@@ -159,7 +183,6 @@ TUNode:
     vertical_align: middle
     align: right
     is_overlay: true
-    offset: !Offset { reference_relative: [0, 0], absolute: [-10, 0], relative: [-1, -0.3] }
   Container[style_class=tu_label_container]:
     offset: !Offset { reference_relative: [0, 0], absolute: [-10, 0], relative: [-1, -0.3] }
     Text[style_class=tu_label_prefix]:
@@ -177,15 +200,15 @@ TUNode:
 AggregationNode[style_class=!collapsed]:
   style.background_color: "#FFFFFFAA"
   style.border_color: "#FFA068"
-  style.border_width: 1.5
-  style.padding: [12, 4, 12, 4]
+  style.border_width: 0
+  style.padding: [10, 4, 10, 4]
   layout: !LayoutConstraints { direction: column, justify_content: space-around, gap: 5 }
   TUNode:
     is_overlay: false
 
 AggregationNode[style_class=collapsed]:
-  min_dimensions: !Size { width: 20, height: 8 }
-  max_dimensions: !Size { width: 20, height: 8 }
+  min_dimensions: !Size { width: 20, height: 4 }
+  max_dimensions: !Size { width: 20, height: 4 }
   style.corner_radius: 3
   style.border_width: 0
   style.padding: [0, 0, 0, 0]
@@ -223,14 +246,13 @@ InvNode:
 
   Connection[style_class=comp-connection]:
     color: ${theme.comp_connection_color}
-    line_width: 1
-    start_offset: !Offset { reference_relative: [0.99, 0.5] }
+    start_offset: !Offset { reference_relative: [1, 0.5] }
     end_offset: !Offset { reference_relative: [0.0, 0.5], absolute: [0, 0] }
     curve_type: !SimpleBezierCurve
       start_mode: vector
       end_mode: vector
-      start_vector: [20, 0]
-      end_vector: [-15, 0]
+      start_vector: [30, 0]
+      end_vector: [-25, 0]
     end_cap: !LineEndCircle
       fill_color: ${theme.comp_connection_color}
       stroke_width: 0
@@ -243,6 +265,9 @@ InvNode:
   Connection[style_class=dst-source]:
     end_offset: !Offset { reference_relative: [0.5, 0.5] }
     curve_type: !StraightCurve {}
+
+  Connection[style_class=src-source]:
+    curve_type.start_vector: [30, 0]
 
   Container[style_class=layer]:
     layout.gap: 10
@@ -268,11 +293,60 @@ InvNode:
     layout.gap: 20
 
   Text[style_class=layer_title]:
-    color: "#777"
+    color: "#999"
     font_size: 7
+
 
 NetworkDiagram:
   <<: *nd_base
+  thickness_range: [0.5, 2.5]
+  embedding_thickness_map:
+    tc_rate:
+      hef1a: 1
+    tl_rate:
+      None: 15
+      1w_uorf: 10
+      1x_uorf: 9
+      2x_uorf: 8
+      3x_uorf: 7
+      4x_uorf: 6
+      5x_uorf: 5
+      6x_uorf: 4
+      7x_uorf: 3
+      8x_uorf: 2
+      9x_uorf: 1
+
+  # -- Edge annotation base --
+  ConnectionLabel[style_class=edge_annotation]:
+    z_index: 10
+    align_to_edge: true
+    clip_connection: true
+    clip_padding: 1.0
+
+  # -- Ratio label styling --
+  ConnectionLabel[style_class=edge_ratio]:
+    font_size: 5
+    font_weight: normal
+    color: "#222"
+    halo: {color: "#00000000"}
+    distance: 30
+    relative: false
+    align: left
+    deny_text: "[(].1[)]"
+
+  # -- Part label styling --
+  ConnectionLabel[style_class=edge_part]:
+    font_size: 4
+    font_weight: normal
+    vertical_align: bottom
+    color: "#222"
+    halo: {color: "#00000000"}
+    distance: -20
+    relative: false
+    align: right
+
+  ConnectionLabel[style_class=embed-tc_rate]:
+    deny_text: "hef1a"
 
 "[style_class=disabled]":
   opacity: 0.3

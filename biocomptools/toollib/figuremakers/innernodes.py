@@ -26,7 +26,7 @@ CMAP = "bc_blues"
 # CMAP = 'bc_greens'
 
 N_SAMPLES, SHOW_INVERSE, CMAP_TRUNCATE_MIN = 100_000, True, 0.25
-INV_TL_RANGE = (-0.1, 0.7)
+INV_TL_RANGE = (-0.05, 0.7)
 DEFAULT_RANGE = (0.01, 0.8)
 
 NODE_PARENTS: dict[str, list[str]] = {

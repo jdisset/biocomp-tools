@@ -2,6 +2,8 @@
 
 import pytest
 import matplotlib.pyplot as plt
+from jeanplot.core.text import Text
+from jeanplot.core.renderer.matplotlib import MatplotlibRenderer
 
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
 from biocomp.network import recipe_to_networks
@@ -35,6 +37,174 @@ def simple_network(lib):
         return networks[0]
 
 
+@pytest.fixture(scope="module")
+def marker_input_network(lib):
+    with LibraryContext.with_library(lib):
+        recipe = Recipe(
+            name="test_marker_input",
+            content=[
+                CoTransfection(
+                    name="c1",
+                    units=[
+                        TranscriptionUnit(name="x1", slots=["hEF1a", "mNeonGreen", "L0.T_4560"]),
+                        TranscriptionUnit(name="reg", slots=["hEF1a", "CasE", "L0.T_4560"]),
+                    ],
+                    ratios=[0.5, 0.5],
+                ),
+                CoTransfection(
+                    name="c2",
+                    units=[
+                        TranscriptionUnit(
+                            name="y", slots=["hEF1a", "CasE_rec", "mKO2", "L0.T_4560"]
+                        ),
+                    ],
+                    ratios=[1.0],
+                ),
+            ],
+        )
+        return recipe_to_networks(recipe, invert=True)[0]
+
+
+@pytest.fixture(scope="module")
+def bias_only_network(lib):
+    from biocomp.recipe import FluoIntensity
+
+    with LibraryContext.with_library(lib):
+        recipe = Recipe(
+            name="test_bias_only",
+            content=[
+                CoTransfection(
+                    name="x1",
+                    units=[TranscriptionUnit(name="reg", slots=["hEF1a", "CasE", "L0.T_4560"])],
+                    ratios=[1.0],
+                    fluo_bias=FluoIntensity(tu_id=0, value=100.0, protein="mNeonGreen"),
+                ),
+                CoTransfection(
+                    name="x2",
+                    units=[
+                        TranscriptionUnit(
+                            name="rep", slots=["hEF1a", "CasE_rec", "mKO2", "L0.T_4560"]
+                        ),
+                    ],
+                    ratios=[1.0],
+                ),
+            ],
+        )
+        return recipe_to_networks(recipe, invert=True)[0]
+
+
+@pytest.fixture(scope="module")
+def bias_marker_network(lib):
+    from biocomp.recipe import FluoIntensity
+
+    with LibraryContext.with_library(lib):
+        recipe = Recipe(
+            name="test_bias_marker",
+            content=[
+                CoTransfection(
+                    name="c1",
+                    units=[
+                        TranscriptionUnit(name="x1", slots=["hEF1a", "mNeonGreen", "L0.T_4560"]),
+                        TranscriptionUnit(name="reg", slots=["hEF1a", "CasE", "L0.T_4560"]),
+                    ],
+                    ratios=[0.5, 0.5],
+                    fluo_bias=FluoIntensity(tu_id=0, value=100.0, protein="mNeonGreen"),
+                ),
+                CoTransfection(
+                    name="c2",
+                    units=[
+                        TranscriptionUnit(
+                            name="y", slots=["hEF1a", "CasE_rec", "mKO2", "L0.T_4560"]
+                        ),
+                    ],
+                    ratios=[1.0],
+                ),
+            ],
+        )
+        return recipe_to_networks(recipe, invert=True)[0]
+
+
+@pytest.fixture(scope="module")
+def multi_dependent_output_network(lib):
+    with LibraryContext.with_library(lib):
+        recipe = Recipe(
+            name="test_multi_dependent_outputs",
+            content=[
+                CoTransfection(
+                    name="c1",
+                    units=[TranscriptionUnit(name="reg1", slots=["hEF1a", "CasE", "L0.T_4560"])],
+                ),
+                CoTransfection(
+                    name="c2",
+                    units=[TranscriptionUnit(name="reg2", slots=["hEF1a", "Csy4", "L0.T_4560"])],
+                ),
+                CoTransfection(
+                    name="c3",
+                    units=[
+                        TranscriptionUnit(
+                            name="o1", slots=["hEF1a", "CasE_rec", "mKO2", "L0.T_4560"]
+                        )
+                    ],
+                ),
+                CoTransfection(
+                    name="c4",
+                    units=[
+                        TranscriptionUnit(
+                            name="o2", slots=["hEF1a", "Csy4_rec", "eBFP2", "L0.T_4560"]
+                        )
+                    ],
+                ),
+            ],
+        )
+        return recipe_to_networks(recipe, invert=True)[0]
+
+
+def _apply_network_theme(diagram):
+    from dracon import load, resolve_all_lazy
+    from jeanplot import jstyle, Container
+    from jeanplot.core import (
+        Size,
+        BoxStyle,
+        LayoutConstraints,
+        Offset,
+        Shadow,
+        SimpleBezierCurve,
+        StraightCurve,
+        OrthogonalCurve,
+        LineEndFlat,
+        LineEndCircle,
+        LineEndArrow,
+    )
+    import importlib.resources
+
+    types = [
+        Size,
+        BoxStyle,
+        LayoutConstraints,
+        Offset,
+        Shadow,
+        SimpleBezierCurve,
+        StraightCurve,
+        OrthogonalCurve,
+        LineEndFlat,
+        LineEndCircle,
+        LineEndArrow,
+    ]
+    theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+        "network_diagram.yaml"
+    )
+    theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
+    resolve_all_lazy(theme)
+    jstyle.update(theme)
+
+    root = Container(
+        children=[diagram],
+        layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
+    )
+    jstyle.apply(root)
+    return root
+
+
 @pytest.fixture
 def cleanup():
     yield
@@ -42,6 +212,20 @@ def cleanup():
 
 
 class TestNetworkDiagram:
+    @staticmethod
+    def _get_input_layer_legend_texts(diagram):
+        input_layers = [
+            child
+            for child in diagram.children
+            if hasattr(child, "style_class") and "input_layer" in child.style_class
+        ]
+        assert input_layers
+        return [
+            child
+            for child in input_layers[0].children
+            if isinstance(child, Text) and "legend_text" in child.style_class
+        ]
+
     def test_import(self):
         from biocomptools.toollib.figuremakers.networkdiagram import (
             NetworkDiagram,
@@ -71,6 +255,211 @@ class TestNetworkDiagram:
         diagram = NetworkDiagram(network=simple_network, simplified=False)
         assert diagram is not None
         assert len(diagram.children) > 0
+
+    def test_simplified_hides_marker_only_subgraph(self, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=marker_input_network, simplified=True)
+        marker_tu_ids = diagram._marker_tu_ids
+        assert marker_tu_ids
+
+        graph = marker_input_network.compute_graph
+        marker_compute_nodes = set()
+        for edge in graph.edges.values():
+            edge_tu_ids = set(diagram._edge_tu_ids(edge))
+            if not (edge_tu_ids & marker_tu_ids):
+                continue
+            for node_id in (edge.source_id, edge.target_id):
+                node = graph.nodes[node_id]
+                if node.node_type in ("transcription", "translation"):
+                    marker_compute_nodes.add(node_id)
+
+        assert marker_compute_nodes
+        assert marker_compute_nodes.issubset(diagram._marker_only_nodes)
+        assert marker_compute_nodes.isdisjoint(set(diagram._nodes))
+
+    def test_simplified_hides_marker_only_subgraph_with_bias(self, bias_marker_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=bias_marker_network, simplified=True)
+        marker_tu_ids = diagram._marker_tu_ids
+        assert marker_tu_ids
+
+        graph = bias_marker_network.compute_graph
+        marker_compute_nodes = set()
+        for edge in graph.edges.values():
+            edge_tu_ids = set(diagram._edge_tu_ids(edge))
+            if not (edge_tu_ids & marker_tu_ids):
+                continue
+            for node_id in (edge.source_id, edge.target_id):
+                node = graph.nodes[node_id]
+                if node.node_type in ("transcription", "translation"):
+                    marker_compute_nodes.add(node_id)
+
+        assert marker_compute_nodes
+        assert marker_compute_nodes.issubset(diagram._marker_only_nodes)
+        assert marker_compute_nodes.isdisjoint(set(diagram._nodes))
+
+    def test_marker_input_nodes_get_shadow_from_theme(self, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=marker_input_network, simplified=False)
+        _apply_network_theme(diagram)
+
+        marker_names = {
+            p.upper() for p in marker_input_network.get_inverted_input_proteins(include_biases=True)
+        }
+        input_nodes = [
+            node
+            for node in diagram._nodes.values()
+            if node.node_type == "input" and marker_names.intersection(node.style_class)
+        ]
+        assert input_nodes
+        assert all(node.style.shadow is not None for node in input_nodes)
+
+    def test_simplified_shows_colored_inputs_for_collapsed_sources(self, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=marker_input_network, simplified=True)
+        _apply_network_theme(diagram)
+
+        marker_names = {
+            p.upper() for p in marker_input_network.get_inverted_input_proteins(include_biases=True)
+        }
+        legends = self._get_input_layer_legend_texts(diagram)
+        input_legends = [
+            t
+            for t in legends
+            if t.text.startswith("(")
+            and t.text.split(")")[0].lstrip("(").upper() in marker_names
+        ]
+        assert input_legends
+        assert all(t.attached_to is not None for t in input_legends)
+        assert all(len(t.text.split()) >= 2 for t in input_legends)
+
+    def test_bias_collapsed_aggregation_gets_marker_class(self, bias_only_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=bias_only_network, simplified=True)
+        assert not diagram._collapsed_marker_proteins
+        assert diagram._cotx_marker_map.get("x1") == "mNeonGreen"
+
+        graph = bias_only_network.compute_graph
+        agg_node = next(
+            n for n in graph.get_nodes_by_type("aggregation") if n.extra.get("cotx_group") == "x1"
+        )
+        agg_component = diagram._nodes[agg_node.node_id]
+        assert "MNEONGREEN" in agg_component.style_class
+
+    def test_bias_nodes_get_shadow_from_theme(self, bias_marker_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=bias_marker_network, simplified=False)
+        _apply_network_theme(diagram)
+
+        bias_nodes = [
+            node
+            for node in diagram._nodes.values()
+            if node.node_type == "bias" and "MNEONGREEN" in node.style_class
+        ]
+        assert bias_nodes
+        assert all(node.style.shadow is not None for node in bias_nodes)
+
+    def test_simplified_shows_colored_bias_inputs(self, bias_marker_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=bias_marker_network, simplified=True)
+        _apply_network_theme(diagram)
+
+        legends = self._get_input_layer_legend_texts(diagram)
+        expected_marker = diagram._cotx_marker_map.get("c1")
+        assert expected_marker is not None
+        bias_legends = [t for t in legends if t.text.startswith(f"({expected_marker})")]
+        assert bias_legends
+        assert all(t.attached_to is not None for t in bias_legends)
+        assert all(len(t.text.split()) >= 2 for t in bias_legends)
+
+    def test_simplified_orders_input_before_bias(self, bias_marker_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=bias_marker_network, simplified=True)
+        _apply_network_theme(diagram)
+        legends = self._get_input_layer_legend_texts(diagram)
+
+        attached = [t for t in legends if t.attached_to is not None]
+        assert attached
+        if len(attached) < 2:
+            return
+        attached.sort(key=lambda t: t.attachment_offset.absolute[1])
+        node_types = []
+        for text in attached:
+            if text.id is None or not text.id.startswith("legend_"):
+                continue
+            nid = int(text.id.split("_", 1)[1])
+            node = diagram._nodes.get(nid)
+            if node is not None:
+                node_types.append(node.node_type)
+        if "input" in node_types and "bias" in node_types:
+            assert node_types.index("input") < node_types.index("bias")
+
+    def test_simplified_legend_right_align_anchors_to_offset(self, marker_input_network, cleanup):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=marker_input_network, simplified=True)
+        root = _apply_network_theme(diagram)
+
+        legends = [t for t in self._get_input_layer_legend_texts(diagram) if t.attached_to is not None]
+        assert legends
+        legend = legends[0]
+
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        renderer = MatplotlibRenderer()
+        renderer.create_context(ax=ax)
+        renderer.render_component(ax, root, adjust_lims=True)
+        fig.canvas.draw()
+
+        artists = [a for a in ax.texts if a.get_text() == legend.text]
+        assert artists
+        artist = artists[0]
+        bbox = artist.get_window_extent(fig.canvas.get_renderer())
+        (x0, _y0), (x1, _y1) = ax.transData.inverted().transform([[bbox.x0, bbox.y0], [bbox.x1, bbox.y1]])
+        assert x1 >= x0
+
+        bounds = legend.get_world_bounds()
+        assert bounds is not None
+        assert abs(x1 - bounds[2]) < 2.0
+
+    def test_output_color_uses_dependent_output_order(self, multi_dependent_output_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        class ReversedInfoNetwork:
+            def __init__(self, network):
+                self._network = network
+                self.compute_graph = network.compute_graph
+
+            def generate_network_info(self):
+                info = self._network.generate_network_info()
+                info = dict(info)
+                info["dependent_outputs"] = tuple(reversed(info.get("dependent_outputs", ())))
+                return info
+
+            def __getattr__(self, name):
+                return getattr(self._network, name)
+
+        wrapped = ReversedInfoNetwork(multi_dependent_output_network)
+        expected = wrapped.get_dependent_output_proteins()
+        assert len(expected) > 1
+
+        info_first = wrapped.generate_network_info()["dependent_outputs"][0].upper()
+        true_first = expected[0].upper()
+        assert info_first != true_first
+
+        diagram = NetworkDiagram(network=wrapped, simplified=True)
+        output_nodes = [node for node in diagram._nodes.values() if node.node_type == "output"]
+        assert len(output_nodes) == 1
+        assert true_first in output_nodes[0].style_class
 
 
 class TestGeneticCircuit:

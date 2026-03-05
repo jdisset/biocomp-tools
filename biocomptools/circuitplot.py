@@ -159,14 +159,60 @@ def _render_card(network, recipe, output: Path, config: CircuitPlotConfig):
     from jeanplot import (
         Container,
         Text,
+        Size,
         LayoutConstraints,
         BoxStyle,
         Shadow,
+        Offset,
+        SimpleBezierCurve,
+        StraightCurve,
+        OrthogonalCurve,
+        LineEndFlat,
+        LineEndCircle,
+        LineEndArrow,
         MatplotlibRenderer,
         jstyle,
+        load_default_theme,
     )
     from jeanplot.gene import GeneticSchematic
     from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+    from dracon import load, resolve_all_lazy
+    import importlib.resources
+
+    load_default_theme()
+
+    # Load the same themes used by standalone circuit/diagram renderers.
+    network_theme_types = [
+        Size,
+        BoxStyle,
+        LayoutConstraints,
+        Offset,
+        Shadow,
+        SimpleBezierCurve,
+        StraightCurve,
+        OrthogonalCurve,
+        LineEndFlat,
+        LineEndCircle,
+        LineEndArrow,
+    ]
+    network_theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+        "network_diagram.yaml"
+    )
+    network_theme = load(
+        str(network_theme_file), context={t.__name__: t for t in network_theme_types}, raw_dict=True
+    )
+    resolve_all_lazy(network_theme)
+    jstyle.update(network_theme)
+
+    genetic_theme_types = [Size, BoxStyle, LayoutConstraints, Offset, Shadow, LineEndFlat]
+    genetic_theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+        "genetic_schematic.yaml"
+    )
+    genetic_theme = load(
+        str(genetic_theme_file), context={t.__name__: t for t in genetic_theme_types}, raw_dict=True
+    )
+    resolve_all_lazy(genetic_theme)
+    jstyle.update(genetic_theme)
 
     if config.style:
         jstyle.update(config.style)

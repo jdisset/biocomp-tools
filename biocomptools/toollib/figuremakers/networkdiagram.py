@@ -7,17 +7,64 @@ import matplotlib.pyplot as plt
 import matplotlib.axes
 
 from jeanplot.core.component import AnchorComponent
+from jeanplot.core.connection_label import ConnectionLabel
 from jeanplot.core.container import Container
 from jeanplot.core.models import BoxStyle, LayoutConstraints, Offset
 from jeanplot.core.connector import Connection, OrthogonalCurve, SimpleBezierCurve
 from jeanplot.core.svg import LineEndFlat
 from jeanplot.core.text import Text
+from jeanplot.gene.elements import _format_ratio_multiplier
 
 from biocomp.graphengine import is_inverse_node_type
+from biocomp.ratio_schema import get_slot_entries
 from biocomptools.toollib.plot import Figure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+EMBEDDING_CATEGORY: dict[str, str] = {
+    "tc_rate": "promoters",
+    "tl_rate": "uORFs",
+    "affinity": "ERNs",
+}
+
+IMPLICIT_EMPTY: dict[str, set[str]] = {
+    "tl_rate": {"00_empty_tc"},
+}
+
+
+def _format_edge_parts(content_embedding_names: dict[str, tuple[str, ...]]) -> str:
+    """Format edge embedding info: actual names for single parts, counts for multiple."""
+    segments: list[str] = []
+    for emb_name, part_names in content_embedding_names.items():
+        empty = IMPLICIT_EMPTY.get(emb_name, set())
+        real = [p for p in part_names if p and p not in empty]
+        if not real:
+            continue
+        cat = EMBEDDING_CATEGORY.get(emb_name, emb_name)
+        if len(real) == 1:
+            segments.append(real[0])
+        else:
+            segments.append(f"{{{len(real)} {cat}}}")
+    return " \u00b7 ".join(segments)
+
+
+_EMBEDDING_FOR_TARGET: dict[str, set[str]] = {
+    "transcription": {"tc_rate"},
+    "translation": {"tl_rate"},
+}
+
+
+def _filter_embeddings_for_target(
+    content_embedding_names: dict[str, tuple[str, ...]], target_type: str
+) -> dict[str, tuple[str, ...]]:
+    """Return only the embeddings relevant for the given target node type."""
+    allowed = _EMBEDDING_FOR_TARGET.get(target_type)
+    if allowed is not None:
+        return {k: v for k, v in content_embedding_names.items() if k in allowed}
+    # For other targets (output, etc.), show everything except tc/tl rate
+    all_targeted = set().union(*_EMBEDDING_FOR_TARGET.values())
+    return {k: v for k, v in content_embedding_names.items() if k not in all_targeted}
 
 
 class ComputeNode(Container):
@@ -160,6 +207,32 @@ class NetworkDiagram(Container):
     disabled_tu_ids: set[str] = Field(
         default_factory=set, description="TU IDs to style as disabled"
     )
+    show_ratios: bool = Field(default=False, description="Show ratio text labels on edges")
+    variable_thickness: bool = Field(default=False, description="Scale edge width by ratio or embedding")
+    show_edge_parts: bool = Field(default=False, description="Show embedding part names on edges")
+    thickness_range: tuple[float, float] = Field(
+        default=(0.5, 4.0),
+        description="(min, max) multiplier on base line_width for variable-thickness edges",
+    )
+    embedding_thickness_map: dict[str, dict[str, float]] = Field(
+        default_factory=lambda: {
+            "tc_rate": {"hef1a": 1},
+            "tl_rate": {
+                "None": 15,
+                "1w_uorf": 10,
+                "1x_uorf": 9,
+                "2x_uorf": 8,
+                "3x_uorf": 7,
+                "4x_uorf": 6,
+                "5x_uorf": 5,
+                "6x_uorf": 4,
+                "7x_uorf": 3,
+                "8x_uorf": 2,
+                "9x_uorf": 1,
+            },
+        },
+        description="Embedding name -> (part name -> numeric value) for thickness. Case-insensitive.",
+    )
     layout: LayoutConstraints = Field(
         default_factory=lambda: LayoutConstraints(
             direction="row", gap=15, justify_content="center", align_items="stretch"
@@ -172,19 +245,26 @@ class NetworkDiagram(Container):
 
     _nodes: dict[int, ComputeNode] = PrivateAttr(default_factory=dict)
     _connections: list[Connection] = PrivateAttr(default_factory=list)
+    _connection_labels: list[ConnectionLabel] = PrivateAttr(default_factory=list)
+    _thickness_raw: dict[str, list[tuple[str, float]]] = PrivateAttr(default_factory=dict)
     _net_info: dict = PrivateAttr(default_factory=dict)
-    _marker_tu_names: set[str] = PrivateAttr(default_factory=set)
+    _marker_tu_ids: set[str] = PrivateAttr(default_factory=set)
     _marker_only_nodes: set[int] = PrivateAttr(default_factory=set)
     _cotx_marker_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    _collapsed_marker_proteins: tuple[str, ...] = PrivateAttr(default_factory=tuple)
+    _ratio_map: dict[int, tuple[float, float]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         if not self.network or self.network.compute_graph is None:
             raise ValueError("network with compute_graph is required")
         self._net_info = self.network.generate_network_info()
-        self._marker_tu_names = self._find_marker_tu_names()
-        self._marker_only_nodes = self._find_marker_only_nodes()
+        self._collapsed_marker_proteins = tuple(
+            self.network.get_inverted_input_proteins(include_biases=True)
+        )
+        self._marker_tu_ids = self._find_marker_tu_ids()
         self._cotx_marker_map = self._build_cotx_marker_map()
+        self._marker_only_nodes = self._find_marker_only_nodes()
         self._build()
 
     @property
@@ -193,52 +273,62 @@ class NetworkDiagram(Container):
 
     @property
     def _output_proteins(self) -> tuple:
-        return self._net_info.get("output_proteins", ())
+        return tuple(self.network.get_output_proteins())
 
-    def _find_marker_tu_names(self) -> set[str]:
-        """Find TU name prefixes that produce marker proteins (inverted inputs) without ERN involvement."""
-        # Use 'markers' from network info - these are the inverted input proteins
-        marker_proteins = set(self._net_info.get("markers", ()))
+    @property
+    def _dependent_output_proteins(self) -> tuple:
+        return tuple(self.network.get_dependent_output_proteins())
+
+    @staticmethod
+    def _edge_tu_ids(edge) -> tuple[str, ...]:
+        tu_ids = edge.extra.get("tu_id", [])
+        if tu_ids is None:
+            return ()
+        if isinstance(tu_ids, str):
+            return (tu_ids,)
+        return tuple(tu_ids)
+
+    @staticmethod
+    def _edge_proteins(edge) -> set[str]:
+        proteins = set()
+        for item in edge.content:
+            proteins.add(item.name if hasattr(item, "name") else str(item))
+        return proteins
+
+    def _find_marker_tu_ids(self) -> set[str]:
+        """Find TU IDs that correspond to collapsed marker inputs."""
+        marker_proteins = set(self._collapsed_marker_proteins)
         if not marker_proteins:
             return set()
-        marker_tu_prefixes = set()
-        all_parts = self._net_info.get("all_parts", {})
-        for tu_full_name, parts in all_parts.items():
-            # Check if this TU produces a marker protein but has no ERN parts
-            has_marker_protein = bool(marker_proteins & set(parts.keys()))
-            has_ern = any(cat.startswith("ERN") for cat in parts.values())
-            if has_marker_protein and not has_ern:
-                # Extract TU prefix (e.g., 'TU_0_1' -> 'TU_0', 'reporter_test_1' -> 'reporter')
-                # tu_id on edges uses format like 'TU_0_cotx_1' or 'reporter_test_cotx'
-                parts_split = tu_full_name.rsplit("_", 1)
-                if len(parts_split) == 2:
-                    marker_tu_prefixes.add(parts_split[0])  # 'TU_0' or 'reporter_test'
-        return marker_tu_prefixes
+        marker_tu_ids = set()
+        for source_node in self._graph.get_nodes_by_type("source"):
+            for edge in self._graph.get_outgoing_edges(source_node.node_id):
+                if edge.content_type != "DNA":
+                    continue
+                edge_tu_ids = self._edge_tu_ids(edge)
+                if not edge_tu_ids:
+                    continue
+                if self._edge_proteins(edge) & marker_proteins:
+                    marker_tu_ids.update(edge_tu_ids)
+        return marker_tu_ids
 
     def _build_cotx_marker_map(self) -> dict[str, str]:
-        """Map cotx_group names to their marker protein names (inverted inputs or fluo_bias)."""
-        markers = set(self._net_info.get("markers", ()))
-        all_parts = self._net_info.get("all_parts", {})
+        """Map cotx_group names to marker proteins from inputs/biases."""
+        markers = set(self._collapsed_marker_proteins)
         cotx_to_marker: dict[str, str] = {}
-        for node in self._graph.nodes.values():
-            if node.node_type != "source":
-                continue
-            cotx = node.extra.get("cotx_group")
+        for source_node in self._graph.get_nodes_by_type("source"):
+            cotx = source_node.extra.get("cotx_group")
             if not cotx or cotx in cotx_to_marker:
                 continue
-            tu_name = node.extra.get("name", "")
-            for tu_full_name, parts in all_parts.items():
-                if not tu_full_name.startswith(tu_name):
+            for edge in self._graph.get_outgoing_edges(source_node.node_id):
+                if edge.content_type != "DNA":
                     continue
-                for part_name in parts.keys():
-                    if part_name in markers:
-                        cotx_to_marker[cotx] = part_name
-                        break
-                if cotx in cotx_to_marker:
+                marker_hits = self._edge_proteins(edge) & markers
+                if marker_hits:
+                    cotx_to_marker[cotx] = sorted(marker_hits)[0]
                     break
-        for node in self._graph.nodes.values():
-            if node.node_type != "bias":
-                continue
+
+        for node in self._graph.get_nodes_by_type("bias"):
             fluo_bias = node.extra.get("fluo_bias")
             if not fluo_bias or not isinstance(fluo_bias, dict):
                 continue
@@ -250,32 +340,8 @@ class NetworkDiagram(Container):
                 cotx_to_marker[cotx] = protein
         return cotx_to_marker
 
-    _MARKER_COLORS: dict[str, str] = {
-        "EBFP2": "#6cafc3",
-        "EBFP": "#6cafc3",
-        "MKO2": "#ef957d",
-        "MKO": "#ef957d",
-        "MKATE2": "#ef957d",
-        "MKATE": "#ef957d",
-        "TDTOMATO": "#ef957d",
-        "MNEONGREEN": "#6ccb83",
-        "MNG": "#6ccb83",
-        "NEONGREEN": "#6ccb83",
-        "EGFP": "#6ccb83",
-        "EYFP": "#fad26d",
-        "EYFPG5A": "#fad26d",
-        "IRFP720": "#df9ae4",
-        "IRFP": "#df9ae4",
-        "MMAROON": "#d3a888",
-        "MMAROON1": "#d3a888",
-    }
-
-    def _get_marker_color(self, marker: str) -> str:
-        """Get the color for a marker protein name."""
-        return self._MARKER_COLORS.get(marker, "#aaa")
-
-    def _find_cotx_for_bias(self, node_id: int) -> str | None:
-        """Find cotx_group for a bias node by traversing edges."""
+    def _find_cotx_for_node(self, node_id: int) -> str | None:
+        """Find cotx_group for a node by traversing toward aggregation/source."""
         visited = set()
         current_id = node_id
         while current_id not in visited:
@@ -289,26 +355,46 @@ class NetworkDiagram(Container):
                 orig = current.is_inverse_of
                 if orig:
                     orig_node = self._graph.nodes.get(orig.node_id)
-                    if orig_node and orig_node.extra.get("cotx_group"):
-                        return orig_node.extra.get("cotx_group")
+                    if orig_node:
+                        cotx = orig_node.extra.get("cotx_group")
+                        if cotx:
+                            return cotx
+                        if orig_node.node_type == "source":
+                            for edge in self._graph.get_incoming_edges(orig_node.node_id):
+                                up = self._graph.nodes.get(edge.source_id)
+                                if up and up.node_type == "aggregation":
+                                    cotx = up.extra.get("cotx_group")
+                                    if cotx:
+                                        return cotx
             outgoing = list(self._graph.get_outgoing_edges(current_id))
             if not outgoing:
                 break
             current_id = outgoing[0].target_id
         return None
 
+    def _find_cotx_for_bias(self, node_id: int) -> str | None:
+        """Find cotx_group for a bias node."""
+        return self._find_cotx_for_node(node_id)
+
+    def _find_aggregation_for_cotx(self, cotx: str | None) -> int | None:
+        if not cotx:
+            return None
+        for node in self._graph.get_nodes_by_type("aggregation"):
+            if node.extra.get("cotx_group") == cotx:
+                return node.node_id
+        return None
+
     def _is_marker_only_edge(self, edge) -> bool:
         """Check if edge carries only marker TU IDs."""
-        tu_ids = edge.extra.get("tu_id", [])
+        tu_ids = self._edge_tu_ids(edge)
         if not tu_ids:
             return False
-        return all(
-            any(tu_id.startswith(mtu + "_") for mtu in self._marker_tu_names) for tu_id in tu_ids
-        )
+        marker_tu_ids = self._marker_tu_ids
+        return all(tu_id in marker_tu_ids for tu_id in tu_ids)
 
     def _find_marker_only_nodes(self) -> set[int]:
         """Find nodes connected only by marker-only edges (except output/aggregation)."""
-        if not self._marker_tu_names:
+        if not self._marker_tu_ids:
             return set()
         # For each node, check if ALL its edges are marker-only
         marker_nodes = set()
@@ -344,10 +430,10 @@ class NetworkDiagram(Container):
         return proteins
 
     def _is_hidden(self, node) -> bool:
-        """In simplified mode, hide inputs, biases, inverse nodes, sources, numeric, and marker-only nodes."""
+        """In simplified mode, hide inverse/source internals and marker-only subgraphs."""
         if not self.simplified:
             return False
-        if node.node_type in ("input", "bias", "source", "numeric"):
+        if node.node_type in ("source", "numeric"):
             return True
         if node.is_inverse_of is not None:
             return True
@@ -408,10 +494,7 @@ class NetworkDiagram(Container):
             return TUNode(style_class=style, **kw)
 
         if cls is FluoNode:
-            # Use dependent_outputs for coloring (the non-marker output protein)
-            proteins = self._net_info.get("dependent_outputs", ()) or self._net_info.get(
-                "output_proteins", ()
-            )
+            proteins = self._dependent_output_proteins or self._output_proteins
             f = FluoNode(**kw)
             if proteins:
                 f.style_class.append(proteins[0].upper())
@@ -439,14 +522,95 @@ class NetworkDiagram(Container):
 
         return cls(**kw)
 
+    def _build_ratio_map(self) -> dict[int, tuple[float, float]]:
+        """Map source node_id -> (raw_ratio, normalized_ratio) via aggregation ratio schemas."""
+        ratio_map: dict[int, tuple[float, float]] = {}
+        # Build source_id (str) -> node_id mapping
+        source_id_to_nid: dict[str, int] = {}
+        for node in self._graph.get_nodes_by_type("source"):
+            sid = node.extra.get("source_id")
+            if sid is not None:
+                source_id_to_nid[str(sid)] = node.node_id
+
+        for agg_node in self._graph.get_nodes_by_type("aggregation"):
+            entries = get_slot_entries(agg_node.extra, require=False)
+            if not entries:
+                continue
+            raw_ratios = [float(e.get("ratio", 1.0)) for e in entries]
+            positive = [r for r in raw_ratios if r > 0]
+            min_r = min(positive) if positive else 1.0
+            for entry, raw_r in zip(entries, raw_ratios, strict=True):
+                sid = str(entry["source_id"])
+                nid = source_id_to_nid.get(sid)
+                if nid is not None:
+                    norm_r = raw_r / min_r if min_r > 0 else 1.0
+                    ratio_map[nid] = (raw_r, norm_r)
+        return ratio_map
+
+    def _get_marker_ratio(self, cotx: str) -> float | None:
+        """Get normalized ratio for the marker source in a cotransfection group."""
+        for node in self._graph.get_nodes_by_type("source"):
+            if node.extra.get("cotx_group") != cotx:
+                continue
+            nid = node.node_id
+            if nid not in self._ratio_map:
+                continue
+            for edge in self._graph.get_outgoing_edges(nid):
+                if edge.content_type != "DNA":
+                    continue
+                tu_ids = self._edge_tu_ids(edge)
+                if any(tid in self._marker_tu_ids for tid in tu_ids):
+                    _, norm_r = self._ratio_map[nid]
+                    return norm_r
+        return None
+
+    def _lookup_embedding_thickness(
+        self, edge, target_type: str | None = None
+    ) -> tuple[str, float] | None:
+        """Find thickness group and value from edge embeddings.
+
+        When target_type is given, prefer the embedding relevant for that node type
+        (e.g. tl_rate for translation, tc_rate for transcription).
+        """
+        emb_names = getattr(edge, "content_embedding_names", None)
+        if not emb_names:
+            return None
+        preferred = _EMBEDDING_FOR_TARGET.get(target_type) if target_type else None
+        ordered = emb_names.items()
+        if preferred:
+            ordered = sorted(ordered, key=lambda kv: 0 if kv[0] in preferred else 1)
+        for emb_name, part_names in ordered:
+            lower_map = self._lower_embedding_maps.get(emb_name)
+            if lower_map is None:
+                continue
+            implicit_empty = IMPLICIT_EMPTY.get(emb_name, set())
+            for pname in part_names:
+                key = "none" if (pname and pname in implicit_empty) else (pname or "None").lower()
+                if key in lower_map:
+                    return (emb_name, lower_map[key])
+        return None
+
     def _build(self):
         self._nodes.clear()
+        # Pre-compute case-insensitive embedding maps once
+        self._lower_embedding_maps: dict[str, dict[str, float]] = {
+            emb: {k.lower(): v for k, v in part_map.items()}
+            for emb, part_map in self.embedding_thickness_map.items()
+        }
         for n in self._graph.nodes.values():
             if not self._is_hidden(n):
                 if comp := self._make_node(n, n.node_id):
                     self._nodes[n.node_id] = comp
 
+        self._ratio_map = (
+            self._build_ratio_map() if (self.show_ratios or self.variable_thickness) else {}
+        )
+
         self._connections = []
+        self._connection_labels = []
+        self._thickness_raw.clear()
+        labeled_sources: set[int] = set()
+
         for e in self._graph.edges.values():
             src, tgt = e.source_id, e.target_id
             if src not in self._nodes or tgt not in self._nodes:
@@ -461,7 +625,9 @@ class NetworkDiagram(Container):
             ):
                 continue
             start = src_comp._out if isinstance(src_comp, ERNNode) else src_comp
-            style = [
+
+            conn_id = f"conn_{src}_{tgt}_{e.to_input_slot}"
+            conn_classes = [
                 "comp-connection",
                 f"src-{src_comp.node_type}",
                 f"dst-{tgt_comp.node_type}",
@@ -469,15 +635,112 @@ class NetworkDiagram(Container):
             ]
             self._connections.append(
                 Connection(
-                    id=f"conn_{src}_{tgt}_{e.to_input_slot}",
+                    id=conn_id,
                     start_component=start,
                     end_component=tgt_comp,
-                    line_width=1,
-                    style_class=style,
+                    style_class=conn_classes,
                 )
             )
 
-        self.children = self._connections + self._create_layers()
+            # Collect raw thickness values per group
+            if self.variable_thickness:
+                if src in self._ratio_map:
+                    _, norm_r = self._ratio_map[src]
+                    self._thickness_raw.setdefault("ratio", []).append((conn_id, norm_r))
+                else:
+                    result = self._lookup_embedding_thickness(e, tgt_comp.node_type)
+                    if result is not None:
+                        group, value = result
+                        self._thickness_raw.setdefault(group, []).append((conn_id, value))
+
+            # Derive marker classes for annotation labels
+            src_node = self._graph.nodes.get(src)
+            cotx = src_node.extra.get("cotx_group") if src_node else None
+            marker = self._cotx_marker_map.get(cotx) if cotx else None
+            marker_classes = [marker.upper()] if marker else []
+
+            # Base style classes shared by all annotations on this edge
+            base_label_classes = [
+                "edge_annotation",
+                f"src-{src_comp.node_type}",
+                f"dst-{tgt_comp.node_type}",
+                f"slot-{e.to_input_slot}",
+                *marker_classes,
+            ]
+
+            # Ratio annotation (one per source node, avoid duplicates)
+            if self.show_ratios and src in self._ratio_map and src not in labeled_sources:
+                _, norm_r = self._ratio_map[src]
+                self._connection_labels.append(
+                    ConnectionLabel(
+                        text=_format_ratio_multiplier(norm_r),
+                        style_class=["edge_ratio", *base_label_classes],
+                        connection=conn_id,
+                        font_size=5.0,
+                        font_weight="bold",
+                        color="#666666",
+                    )
+                )
+                labeled_sources.add(src)
+
+            # Edge part name annotation — filter by target node type
+            if self.show_edge_parts and e.content_embedding_names:
+                filtered = _filter_embeddings_for_target(
+                    e.content_embedding_names, tgt_comp.node_type
+                )
+                parts_text = _format_edge_parts(filtered)
+                if parts_text:
+                    embed_classes = [f"embed-{k}" for k in filtered]
+                    cat_classes = [
+                        f"cat-{EMBEDDING_CATEGORY[k]}"
+                        for k in filtered
+                        if k in EMBEDDING_CATEGORY
+                    ]
+                    self._connection_labels.append(
+                        ConnectionLabel(
+                            text=parts_text,
+                            style_class=[
+                                "edge_part",
+                                *base_label_classes,
+                                *embed_classes,
+                                *cat_classes,
+                            ],
+                            connection=conn_id,
+                            font_size=4.5,
+                            font_weight="normal",
+                            color="#888888",
+                        )
+                    )
+
+        self.children = self._connections + self._connection_labels + self._create_layers()
+
+    def apply_variable_line_widths(self) -> None:
+        """Normalize raw thickness values and multiply onto connection line_width.
+
+        Called after jstyle.apply() so that self.thickness_range reflects the
+        theme value rather than the field default.
+        """
+        min_t, max_t = self.thickness_range
+        conn_multipliers: dict[str, float] = {}
+        for group_name, entries in self._thickness_raw.items():
+            # For embedding groups, normalize against the full map range
+            part_map = self.embedding_thickness_map.get(group_name)
+            if part_map is not None:
+                all_values = list(part_map.values())
+                min_v, max_v = min(all_values), max(all_values)
+            else:
+                values = [v for _, v in entries]
+                min_v, max_v = min(values), max(values)
+            for conn_id, raw_v in entries:
+                if max_v == min_v:
+                    mult = (min_t + max_t) / 2
+                else:
+                    t = (raw_v - min_v) / (max_v - min_v)
+                    mult = min_t + t * (max_t - min_t)
+                conn_multipliers[conn_id] = mult
+        for conn in self._connections:
+            if conn.id and conn.id in conn_multipliers:
+                conn.line_width *= conn_multipliers[conn.id]
 
     def _create_layers(self) -> list[Container]:
         layers, layed_out = [], set()
@@ -496,6 +759,119 @@ class NetworkDiagram(Container):
                 for child in comp.children:
                     if hasattr(child, "node_id") and child.node_id is not None:
                         layed_out.add(child.node_id)
+
+        if not self.simplified:
+            for nid, comp in sorted(self._nodes.items()):
+                if comp.node_type in ("input", "bias"):
+                    input_layer.add_child(comp)
+                    layed_out.add(nid)
+
+        # Attach simplified input/bias markers to the left of their source aggregation.
+        if self.simplified:
+
+            def legend_text_for(comp: ComputeNode, cotx: str | None) -> str:
+                """Legend text: just the cotx name."""
+                return cotx or ""
+
+            marker_groups: dict[int, list[tuple[int, str, str, int, str | None, ComputeNode]]] = (
+                defaultdict(list)
+            )
+            unanchored_markers: list[tuple[int, str, str, int, str | None, ComputeNode]] = []
+            for nid, comp in sorted(self._nodes.items()):
+                if comp.node_type not in ("input", "bias"):
+                    continue
+                cotx = self._find_cotx_for_node(nid)
+                agg_id = self._find_aggregation_for_cotx(cotx)
+                kind_rank = 0 if comp.node_type == "input" else 1
+                entry = (
+                    kind_rank,
+                    (cotx or "").lower(),
+                    (comp.node_label or "").lower(),
+                    nid,
+                    cotx,
+                    comp,
+                )
+                if agg_id is None or agg_id not in self._nodes:
+                    unanchored_markers.append(entry)
+                    continue
+                marker_groups[agg_id].append(entry)
+
+            legend_anchor_x = -50
+            for agg_id, entries in marker_groups.items():
+                anchor = self._nodes[agg_id]
+                entries.sort(key=lambda item: item[:4])
+                n_entries = len(entries)
+                y_step = 22
+                for idx, (_kind, _cotx_key, _label_key, nid, cotx, comp) in enumerate(entries):
+                    marker_classes = [
+                        sc
+                        for sc in comp.style_class
+                        if sc not in ("input", "bias", "node-type-input", "node-type-bias")
+                    ]
+                    label = legend_text_for(comp, cotx)
+                    if not label:
+                        layed_out.add(nid)
+                        continue
+                    y = (idx - (n_entries - 1) / 2.0) * y_step
+                    legend = Text(
+                        text=label,
+                        style_class=["legend_text", *marker_classes],
+                        vertical_align="middle",
+                        align="right",
+                        is_overlay=True,
+                        attached_to=anchor,
+                        attachment_offset=Offset(relative=(-1, 0), absolute=(legend_anchor_x, y)),
+                        id=f"legend_{nid}",
+                    )
+                    input_layer.add_child(legend)
+                    layed_out.add(nid)
+
+            unanchored_markers.sort(key=lambda item: item[:4])
+            for _kind, _cotx_key, _label_key, nid, cotx, comp in unanchored_markers:
+                marker_classes = [
+                    sc
+                    for sc in comp.style_class
+                    if sc not in ("input", "bias", "node-type-input", "node-type-bias")
+                ]
+                label = legend_text_for(comp, cotx)
+                if label:
+                    legend = Text(
+                        text=label,
+                        style_class=["legend_text", *marker_classes],
+                        vertical_align="middle",
+                        align="right",
+                        id=f"legend_{nid}",
+                    )
+                    input_layer.add_child(legend)
+                layed_out.add(nid)
+
+            # Marker color labels below each aggregation node
+            for nid, comp in self._nodes.items():
+                if comp.node_type != "aggregation":
+                    continue
+                g_node = self._graph.nodes.get(nid)
+                if not g_node:
+                    continue
+                cotx = g_node.extra.get("cotx_group")
+                if not cotx:
+                    continue
+                marker = self._cotx_marker_map.get(cotx)
+                if not marker:
+                    continue
+                label = marker
+                if self.show_ratios:
+                    norm_r = self._get_marker_ratio(cotx)
+                    if norm_r is not None:
+                        label = f"{label} {_format_ratio_multiplier(norm_r)}"
+                input_layer.add_child(
+                    Text(
+                        text=label,
+                        style_class=["marker_color_label", marker.upper()],
+                        is_overlay=True,
+                        attached_to=comp,
+                        id=f"marker_color_{nid}",
+                    )
+                )
         if input_layer.children:
             layers.append(input_layer)
 
@@ -576,47 +952,6 @@ class NetworkDiagram(Container):
         return layers
 
 
-_MARKER_COLORS_THEME = {
-    "EBFP2": {"base": "#6cafc3", "bright": "#1AD5FF60"},
-    "EBFP": {"base": "#6cafc3", "bright": "#1AD5FF60"},
-    "MKO2": {"base": "#ef957d", "bright": "#FF2C4944"},
-    "MKO": {"base": "#ef957d", "bright": "#FF2C4944"},
-    "MKATE2": {"base": "#ef957d", "bright": "#FF2C4944"},
-    "MKATE": {"base": "#ef957d", "bright": "#FF2C4944"},
-    "TDTOMATO": {"base": "#ef957d", "bright": "#FF2C4944"},
-    "MNEONGREEN": {"base": "#6ccb83", "bright": "#0EFF7377"},
-    "MNG": {"base": "#6ccb83", "bright": "#0EFF7377"},
-    "NEONGREEN": {"base": "#6ccb83", "bright": "#0EFF7377"},
-    "EGFP": {"base": "#6ccb83", "bright": "#0EFF7377"},
-    "EYFP": {"base": "#fad26d", "bright": "#FFC83Caa"},
-    "EYFPG5A": {"base": "#fad26d", "bright": "#FFC83Caa"},
-    "IRFP720": {"base": "#df9ae4", "bright": "#FF82FCaa"},
-    "IRFP": {"base": "#df9ae4", "bright": "#FF82FCaa"},
-    "MMAROON": {"base": "#d3a888", "bright": "#FF9853a0"},
-    "MMAROON1": {"base": "#d3a888", "bright": "#FF9853a0"},
-}
-
-
-def _apply_marker_colors_to_collapsed_aggregations(diagram: "NetworkDiagram", Shadow):
-    """Post-process collapsed aggregation nodes to apply marker colors."""
-
-    def apply_to_component(comp):
-        if isinstance(comp, AggregationNode) and comp.collapsed:
-            for sc in comp.style_class:
-                if sc in _MARKER_COLORS_THEME:
-                    colors = _MARKER_COLORS_THEME[sc]
-                    comp.style.background_color = colors["base"]
-                    comp.style.shadow = Shadow(
-                        color=colors["bright"], blur_radius=8, resolution=0.01, z_index=2
-                    )
-                    break
-        if hasattr(comp, "children"):
-            for child in comp.children:
-                apply_to_component(child)
-
-    apply_to_component(diagram)
-
-
 def render_diagram_to_ax(
     network: Any,
     ax: matplotlib.axes.Axes,
@@ -624,10 +959,14 @@ def render_diagram_to_ax(
     disabled_tu_ids: set[str] | None = None,
     style_overrides: dict | None = None,
     title: str | None = None,
+    show_ratios: bool = False,
+    variable_thickness: bool = False,
+    show_edge_parts: bool = False,
+    thickness_range: tuple[float, float] = (0.5, 4.0),
     **_kwargs,
 ):
     """Render a network compute diagram to an existing matplotlib axes."""
-    from jeanplot import MatplotlibRenderer, jstyle
+    from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
     from jeanplot.core import (
         Size,
         BoxStyle,
@@ -641,8 +980,11 @@ def render_diagram_to_ax(
         LineEndCircle,
         LineEndArrow,
     )
+    from jeanplot.core.models import TextHalo
     from dracon import load, resolve_all_lazy
     import importlib.resources
+
+    load_default_theme()
 
     types = [
         Size,
@@ -650,6 +992,7 @@ def render_diagram_to_ax(
         LayoutConstraints,
         Offset,
         Shadow,
+        TextHalo,
         SimpleBezierCurve,
         StraightCurve,
         OrthogonalCurve,
@@ -667,7 +1010,13 @@ def render_diagram_to_ax(
         jstyle.update(style_overrides)
 
     diagram = NetworkDiagram(
-        network=network, simplified=simplified, disabled_tu_ids=disabled_tu_ids or set()
+        network=network,
+        simplified=simplified,
+        disabled_tu_ids=disabled_tu_ids or set(),
+        show_ratios=show_ratios,
+        variable_thickness=variable_thickness,
+        show_edge_parts=show_edge_parts,
+        thickness_range=thickness_range,
     )
     root = Container(
         children=[diagram],
@@ -675,12 +1024,13 @@ def render_diagram_to_ax(
     )
     jstyle.apply(root)
 
-    if simplified:
-        _apply_marker_colors_to_collapsed_aggregations(diagram, Shadow)
-
     ax.set_aspect("equal")
     ax.axis("off")
-    MatplotlibRenderer().render_component(ax, root, adjust_lims=True)
+    renderer = MatplotlibRenderer()
+    # Apply variable line widths via pre_render callback so they survive
+    # jstyle re-application during measure_and_layout.
+    renderer.pre_render_callbacks.append(lambda _ax: diagram.apply_variable_line_widths())
+    renderer.render_component(ax, root, adjust_lims=True)
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")
 
@@ -692,6 +1042,10 @@ class NetworkDiagramFigure(Figure):
     simplified: bool = True
     disabled_tu_ids: set[str] | None = None
     style_overrides: dict | None = None
+    show_ratios: bool = False
+    variable_thickness: bool = False
+    show_edge_parts: bool = False
+    thickness_range: tuple[float, float] = (0.5, 4.0)
 
     def run(self, overwrite: bool = True):
         if not overwrite and self.figure_spec.output_path.exists():
@@ -706,6 +1060,10 @@ class NetworkDiagramFigure(Figure):
             simplified=self.simplified,
             disabled_tu_ids=self.disabled_tu_ids,
             style_overrides=self.style_overrides,
+            show_ratios=self.show_ratios,
+            variable_thickness=self.variable_thickness,
+            show_edge_parts=self.show_edge_parts,
+            thickness_range=self.thickness_range,
         )
         self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(self.figure_spec.output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1)
