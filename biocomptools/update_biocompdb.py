@@ -581,7 +581,7 @@ def _w_proc_fig_path(args_tuple: Tuple[str, str, List[str]]) -> FigureProcessorR
         cleaned_fig_meta = {k: v for k, v in metadata.items() if k != 'FigureMetadata'}
         if 'FigureMetadata' in metadata:
             cleaned_fig_meta['FigureMetadata'] = {
-                k: v for k, v in fig_meta_content.items() if k != 'plot_tasks'
+                k: v for k, v in fig_meta_content.items() if k not in ('plot_tasks', 'grid_data')
             }
 
         figure = md.Figure(file=rel_path, meta=cleaned_fig_meta)

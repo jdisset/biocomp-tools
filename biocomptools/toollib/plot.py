@@ -24,7 +24,7 @@ def load_default_plotconf():
     from dracon.lazy import resolve_all_lazy
 
     plcontent = dr.load(
-        'pkg:biocomptools:configs/plot_config/default_plotconf_v2',
+        "pkg:biocomptools:configs/plot_config/default_plotconf_v2",
         enable_interpolation=True,
         raw_dict=True,
     )
@@ -64,22 +64,22 @@ class PlotConfig(BaseModel):
                 return False
 
         metadata = {}
-        metadata['plot_method'] = plot_method.get_name()
+        metadata["plot_method"] = plot_method.get_name()
 
         if can_dump(callstack_conf):
-            metadata['callstack_conf'] = callstack_conf
+            metadata["callstack_conf"] = callstack_conf
 
         extra_args = list(args)
 
         for pval in plot_method.args + extra_args:
-            if hasattr(pval, 'metadata') and pval.metadata:
+            if hasattr(pval, "metadata") and pval.metadata:
                 for k, v in pval.metadata.items():
                     if can_dump(v):
                         metadata[k] = v
 
         extra_kwargs = list(kwargs.items())
         for _, pval in list(plot_method.kwargs.items()) + extra_kwargs:
-            if hasattr(pval, 'metadata') and pval.metadata:
+            if hasattr(pval, "metadata") and pval.metadata:
                 for k, v in pval.metadata.items():
                     if can_dump(v):
                         metadata[k] = v
@@ -95,28 +95,38 @@ class PlotConfig(BaseModel):
         callstack_conf = {}
         if auto_callstack_bind:
             callstack_conf = ut.generate_full_nested_config(
-                self.callstack_params, namespace='biocomp.plotting'
-            ).get(f'{plot_method.get_name()}_params', {})
+                self.callstack_params, namespace="biocomp.plotting"
+            ).get(f"{plot_method.get_name()}_params", {})
 
         if overwrite_kwargs:
             plot_method.set_missing_kwargs(overwrite_kwargs)
 
         def wrapped_plot_method(*args, **kwargs):
+            from biocomp.plotutils import PlotFunctionResult
+
             # collect metadata after calling the plot method
             # (better than before, since some args may be modified e.g. lazy-loaded plot data)
             res = plot_method(*args, **kwargs)
+
+            # extract output-side metadata from PlotFunctionResult
+            extra_meta: dict = {}
+            if isinstance(res, PlotFunctionResult):
+                extra_meta = res.metadata
+                res = res.rendering
+
             metadata = self._auto_extract_metadata(
                 callstack_conf,
                 plot_method,
                 *args,
                 **kwargs,
             )
+            metadata.update(extra_meta)
             return res, metadata
 
         def prepared_func(
             *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
         ):
-            full_kwargs = {'rescaler': rescaler, **cs, **kwargs}
+            full_kwargs = {"rescaler": rescaler, **cs, **kwargs}
 
             with mpl.rc_context(rc=rc):
                 return wrapped_plot_method(*args, **full_kwargs)
@@ -124,7 +134,7 @@ class PlotConfig(BaseModel):
         return prepared_func
 
     def inherit_from(
-        self, other: 'PlotConfig', keep_rescaler: bool = True, key: str = '<<{+<}[~<]'
+        self, other: "PlotConfig", keep_rescaler: bool = True, key: str = "<<{+<}[~<]"
     ):
         from dracon.merge import MergeKey, merged
 
@@ -154,7 +164,7 @@ class PlotTask(BaseModel):
         # generates some metadata and returns it
         metadata = {}
         if self.plot_method:
-            kw = {'ax': self._ax} if self._ax else {}
+            kw = {"ax": self._ax} if self._ax else {}
             f = self.plot_config.prepare_func(
                 plot_method=self.plot_method,
                 auto_callstack_bind=self.auto_callstack_bind,
@@ -177,10 +187,10 @@ def resolve(obj):
 
 
 TXT_PLOT_FUNC_MAP = {
-    'biocomp.plotutils.smooth': 'biocomp.plotutils.smooth_txt',
-    'biocomp.plotting.plotting_smooth.smooth_1d': 'biocomp.plotting.plotting_txt.smooth_1d_txt',
-    'biocomp.plotting.plotting_smooth.smooth_2d': 'biocomp.plotting.plotting_txt.smooth_2d_txt',
-    'biocomp.plotting.plotting_3d.smooth_3d': 'biocomp.plotting.plotting_txt.smooth_3d_txt',
+    "biocomp.plotutils.smooth": "biocomp.plotutils.smooth_txt",
+    "biocomp.plotting.plotting_smooth.smooth_1d": "biocomp.plotting.plotting_txt.smooth_1d_txt",
+    "biocomp.plotting.plotting_smooth.smooth_2d": "biocomp.plotting.plotting_txt.smooth_2d_txt",
+    "biocomp.plotting.plotting_3d.smooth_3d": "biocomp.plotting.plotting_txt.smooth_3d_txt",
 }
 
 
@@ -203,7 +213,7 @@ class Figure(BaseModel):
 
     @property
     def is_txt_output(self) -> bool:
-        return self.text_mode or str(self.figure_spec.output_file).endswith('.txt')
+        return self.text_mode or str(self.figure_spec.output_file).endswith(".txt")
 
     def prepare(self):
         if self.is_txt_output:
@@ -273,16 +283,27 @@ class Figure(BaseModel):
     def _run_mpl(self, overwrite: bool = True, finalize: bool = True):
         with mpl.rc_context(rc=self.plot_config.rc_context):
             metadata = {}
-            metadata['plot_tasks'] = []
+            metadata["plot_tasks"] = []
             for i, pt in enumerate(self._ptasks):
                 try:
                     resolve_all_lazy(pt)
                     pt_metadata = pt.run()
-                    metadata['plot_tasks'].append(pt_metadata)
+                    metadata["plot_tasks"].append(pt_metadata)
                 except Exception as e:
                     logger.error(f"Error running plot task {i}: {e}")
                     logger.exception(e)
                     continue
+
+            # collect and serialize grid data from all tasks into one blob
+            all_grid_data = []
+            for pt_meta in metadata.get("plot_tasks", []):
+                gd = pt_meta.pop("grid_data", None)
+                if gd:
+                    all_grid_data.extend(gd)
+            if all_grid_data:
+                from biocomp.plotting.plotting_smooth import grid_data_to_b64
+
+                metadata["grid_data"] = grid_data_to_b64(all_grid_data)
 
             if is_plot_debug_enabled():
                 self._save_plot_debug_state(metadata)
@@ -295,7 +316,7 @@ class Figure(BaseModel):
         from biocomp.plotting.plotting_txt import TextPlotResult
 
         txt_parts = []
-        metadata = {'plot_tasks': []}
+        metadata = {"plot_tasks": []}
 
         for i, pt in enumerate(self._ptasks):
             try:
@@ -308,7 +329,7 @@ class Figure(BaseModel):
 
                 if txt_func_name is None:
                     for key, val in TXT_PLOT_FUNC_MAP.items():
-                        if func_name.endswith(key.split('.')[-1]):
+                        if func_name.endswith(key.split(".")[-1]):
                             txt_func_name = val
                             break
 
@@ -316,36 +337,36 @@ class Figure(BaseModel):
                     logger.warning(f"No txt plot function for {func_name}, skipping")
                     continue
 
-                module_path, func_name_only = txt_func_name.rsplit('.', 1)
+                module_path, func_name_only = txt_func_name.rsplit(".", 1)
                 import importlib
 
                 module = importlib.import_module(module_path)
                 txt_func = getattr(module, func_name_only)
 
                 kwargs = dict(pt.plot_method.kwargs)
-                kwargs['ax'] = None
+                kwargs["ax"] = None
                 if pt.plot_config.rescaler:
-                    kwargs['rescaler'] = pt.plot_config.rescaler
+                    kwargs["rescaler"] = pt.plot_config.rescaler
 
                 cs = ut.generate_full_nested_config(
-                    pt.plot_config.callstack_params, namespace='biocomp.plotting'
-                ).get(f'{func_name_only}_params', {})
+                    pt.plot_config.callstack_params, namespace="biocomp.plotting"
+                ).get(f"{func_name_only}_params", {})
                 kwargs.update(cs)
 
                 result = txt_func(**kwargs)
                 if isinstance(result, TextPlotResult):
                     txt_parts.append(result.text)
-                    metadata['plot_tasks'].append({'txt_result': True})
+                    metadata["plot_tasks"].append({"txt_result": True})
                 elif isinstance(result, str):
                     txt_parts.append(result)
-                    metadata['plot_tasks'].append({'txt_result': True})
+                    metadata["plot_tasks"].append({"txt_result": True})
 
             except Exception as e:
                 logger.error(f"Error running txt plot task {i}: {e}")
                 logger.exception(e)
                 continue
 
-        self._txt_output = '\n\n'.join(txt_parts)
+        self._txt_output = "\n\n".join(txt_parts)
 
         if self.stdout_txt_plot and self._txt_output:
             print(self._txt_output)
@@ -360,13 +381,13 @@ class Figure(BaseModel):
         output_path = self.figure_spec.output_path
         if output_path is None:
             return
-        if not str(output_path).endswith('.txt'):
-            output_path = PathLib(str(output_path).rsplit('.', 1)[0] + '.txt')
+        if not str(output_path).endswith(".txt"):
+            output_path = PathLib(str(output_path).rsplit(".", 1)[0] + ".txt")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self._txt_output:
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(self._txt_output)
             logger.debug(f"Text plot saved to {output_path}")
 
@@ -392,19 +413,19 @@ class Figure(BaseModel):
 
             # Look for common data containers in plot method kwargs
             for key, val in pt.plot_method.kwargs.items():
-                if hasattr(val, 'xval') and hasattr(val, 'yval'):
+                if hasattr(val, "xval") and hasattr(val, "yval"):
                     # PlotData-like object
                     data[f"task_{i}_{key}_X"] = np.asarray(val.xval)
                     data[f"task_{i}_{key}_Y"] = np.asarray(val.yval)
-                    if hasattr(val, 'input_names'):
+                    if hasattr(val, "input_names"):
                         meta[f"task_{i}_{key}_input_names"] = val.input_names
-                elif hasattr(val, 'x') and hasattr(val, 'y'):
+                elif hasattr(val, "x") and hasattr(val, "y"):
                     # DataSource-like object
                     data[f"task_{i}_{key}_X"] = np.asarray(val.x)
                     data[f"task_{i}_{key}_Y"] = np.asarray(val.y)
-                    if hasattr(val, 'input_names'):
+                    if hasattr(val, "input_names"):
                         meta[f"task_{i}_{key}_input_names"] = val.input_names
-                    if hasattr(val, 'metadata'):
+                    if hasattr(val, "metadata"):
                         meta[f"task_{i}_{key}_metadata"] = val.metadata
 
         save_debug_state(
@@ -417,7 +438,7 @@ class Figure(BaseModel):
 
     @property
     def fig(self):
-        if hasattr(self, '_figax'):
+        if hasattr(self, "_figax"):
             return self._figax.figure
         raise AttributeError("Figure not prepared yet. Call 'prepare()' first.")
 
