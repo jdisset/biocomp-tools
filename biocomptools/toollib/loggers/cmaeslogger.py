@@ -227,7 +227,12 @@ class CMAESLogger(Logger):
             if self.show_plots:
                 self._plot_ec_history()
 
-        return [(self.periods, log_ec_step), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, log_ec_step))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         if not self._history:

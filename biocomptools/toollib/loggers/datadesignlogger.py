@@ -199,12 +199,10 @@ class DataDesignLogger(Logger):
                 self._save_final_summary(output_path / 'final_summary.json')
 
         callbacks = []
-        if isinstance(self.periods, int):
-            callbacks.append((self.periods, periodic_callback))
-        else:
-            for period in self.periods:
-                callbacks.append((period, periodic_callback))
-        callbacks.append((-1, end_callback))
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, end_callback))
         return callbacks
 
     def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:

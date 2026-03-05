@@ -97,10 +97,10 @@ class TestDesignDiagnosticLogger:
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
         logger = DesignDiagnosticLogger(
             output_dir=str(tmp_output_dir),
-            periods=5,
+            call_at_interval=5,
             max_history_len=10,
         )
-        assert logger.periods == 5
+        assert logger.call_at_interval == 5
         assert logger.max_history_len == 10
 
     def test_initialize_creates_directory(self, tmp_output_dir):
@@ -115,7 +115,7 @@ class TestDesignDiagnosticLogger:
         logger.initialize()
         callbacks = logger.get_callbacks()
         assert len(callbacks) == 2
-        assert callbacks[0][0] == logger.periods  # periodic
+        assert callbacks[0][0] == logger.call_at_interval  # periodic
         assert callbacks[1][0] == -1  # final
 
     def test_extract_metrics(self, tmp_output_dir):
@@ -199,7 +199,7 @@ class TestIntegration:
 
         logger = DesignDiagnosticLogger(
             output_dir=str(tmp_output_dir),
-            periods=1,
+            call_at_interval=1,
             generate_plots=False,  # skip plotting for speed
         )
         logger.initialize()

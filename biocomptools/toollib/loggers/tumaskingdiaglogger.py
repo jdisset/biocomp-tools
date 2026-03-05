@@ -73,7 +73,7 @@ class TUMaskingDiagLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    periods: int = Field(default=10, description="Steps between diagnostic output")
+    call_at_interval: int = Field(default=10, description="Steps between diagnostic output")
     output_dir: str | None = Field(default=None, description="Directory for summary plots")
     history_len: int = Field(default=500, description="Number of steps to retain in history")
     console_output: bool = Field(default=True, description="Print diagnostic lines to console")
@@ -292,7 +292,12 @@ class TUMaskingDiagLogger(Logger):
                 if len(self._history) > 10:
                     self._generate_plots()
 
-        return [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def _save_summary(self):
         """Save text summary of TU masking diagnostics with per-network breakdown."""

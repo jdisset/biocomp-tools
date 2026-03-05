@@ -13,6 +13,7 @@ from typing import List, Tuple, Callable, Optional, Dict, Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.loggers.utils import extract_design_step_metrics
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -118,46 +119,8 @@ class DesignCheckpointLogger(Logger):
 
     def _collect_aux_entry(self, step: int, step_history: Dict):
         """Collect condensed aux data for history tracking."""
-        import numpy as np
-
-        def _to_scalar(val) -> float:
-            """Convert array to scalar, taking mean if multi-element."""
-            if val is None:
-                return float('nan')
-            arr = jax.device_get(val)
-            if hasattr(arr, 'shape'):
-                arr = np.asarray(arr)
-                if arr.size == 0:
-                    return float('nan')
-                return float(np.nanmean(arr))
-            return float(arr) if arr is not None else float('nan')
-
-        entry = {'step': step}
-
-        # scalar metrics
-        for key in ['loss', 'l0_penalty', 'tucount_penalty', 'spread_penalty', 'coupling_penalty']:
-            val = step_history.get(key)
-            if val is not None:
-                entry[key] = _to_scalar(val)
-
-        # sublosses
-        sublosses = step_history.get('sublosses', {})
-        if sublosses:
-            for k, v in sublosses.items():
-                entry[f'subloss_{k}'] = _to_scalar(v) if v is not None else None
-
-        # TU stats
-        tu_stats = step_history.get('tu_stats', {})
-        if tu_stats:
-            for k, v in tu_stats.items():
-                entry[f'tu_{k}'] = _to_scalar(v) if v is not None else None
-
-        # ratio stats
-        ratio_stats = step_history.get('ratio_stats', {})
-        if ratio_stats:
-            for k, v in ratio_stats.items():
-                entry[f'ratio_{k}'] = _to_scalar(v) if v is not None else None
-
+        entry = extract_design_step_metrics(step_history)
+        entry["step"] = step
         self._aux_history.append(entry)
 
     def get_callbacks(self, training_program=None) -> List[Tuple[int, Callable]]:
@@ -185,8 +148,12 @@ class DesignCheckpointLogger(Logger):
                     pickle.dump(self._aux_history, f)
                 logger.info(f"Saved full aux history to {history_path}")
 
-        # use self.periods for periodic, -1 for end
-        return [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
         return {

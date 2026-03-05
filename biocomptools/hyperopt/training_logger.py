@@ -8,7 +8,7 @@ from biocomptools.toollib.loggers.logger import Logger
 class HyperoptTrainingLogger(Logger):
     """Live training progress logger for hyperopt using rich."""
 
-    periods: int = 1  # log every step
+    call_at_interval: int = 1  # log every step
     async_ok: bool = False  # must be sync for live display
     n_replicates: int = 4
 

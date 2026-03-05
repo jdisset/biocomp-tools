@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import mlflow
 import sys
 from pathlib import Path
 import json
-from typing import Any, List, Optional, Tuple, Callable, Dict
-from pydantic import Field, ConfigDict
+from typing import Any
+from pydantic import Field, ConfigDict, PrivateAttr
 import numpy as np
 from biocomptools.toollib.common import config
 import time
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.trainutils import make_json_ready
 
 
@@ -17,9 +20,7 @@ logger = get_logger(__name__)
 
 
 class MLflowLogger(Logger):
-    """
-    Logs experiments, runs, metrics, parameters, models and artifacts to MLflow.
-    """
+    """Logs experiments, runs, metrics, parameters, models and artifacts to MLflow."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -28,38 +29,37 @@ class MLflowLogger(Logger):
     )
     log_artifacts: bool = Field(default=True, description="Whether to log model artifacts")
     log_plots: bool = Field(default=True, description="Whether to log generated plots")
+    required_metrics: list[str] = ["loss"]
 
-    # Valid file extensions to log as artifacts
     valid_extensions: list[str] = Field(
         default=[
-            '.pdf',
-            '.txt',
-            '.md',
-            '.png',
-            '.jpg',
-            '.jpeg',
-            '.gif',
-            '.bmp',
-            '.tiff',
-            '.webp',
-            '.svg',
-            '.mp4',
-            '.json',
-            '.csv',
-            '.yaml',
-            '.pickle',
-            '.pkl',
-            '.npy',
+            ".pdf",
+            ".txt",
+            ".md",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".tiff",
+            ".webp",
+            ".svg",
+            ".mp4",
+            ".json",
+            ".csv",
+            ".yaml",
+            ".pickle",
+            ".pkl",
+            ".npy",
         ],
         description="Valid file extensions to log",
     )
 
-    # Private state
-    _training_program: Optional[Any] = None
-    _logged_plots: set[str] = set()  # Track logged plots by content hash
-    _active_run = None
+    _training_program: Any = PrivateAttr(default=None)
+    _logged_plots: set[str] = PrivateAttr(default_factory=set)
+    _active_run: Any = PrivateAttr(default=None)
 
-    def _flatten_dict(self, d: Any, parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
+    def _flatten_dict(self, d: Any, parent_key: str = "", sep: str = "_") -> dict[str, Any]:
         """Flatten a nested dictionary or a list of dictionaries."""
         items = []
         if isinstance(d, dict):
@@ -81,11 +81,12 @@ class MLflowLogger(Logger):
         periods (.), spaces ( ), colon(:) and slashes (/).
         """
         import re
+
         # Replace @ and other invalid characters with underscores
-        sanitized = re.sub(r'[^a-zA-Z0-9_\-.\s:/]', '_', name)
+        sanitized = re.sub(r"[^a-zA-Z0-9_\-.\s:/]", "_", name)
         return sanitized
 
-    def _sanitize_metrics(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
         """Sanitize all metric names in a dictionary."""
         return {self._sanitize_metric_name(k): v for k, v in metrics.items()}
 
@@ -108,7 +109,7 @@ class MLflowLogger(Logger):
             for ext in self.valid_extensions:
                 for file_path in dir_path.glob(f"**/*{ext}"):
                     # Calculate hash of file content + path to ensure uniqueness
-                    with open(file_path, 'rb') as f:
+                    with open(file_path, "rb") as f:
                         content = f.read()
                         file_hash = xxhash.xxh64(content + str(file_path).encode()).hexdigest()
 
@@ -168,9 +169,7 @@ class MLflowLogger(Logger):
             mlflow.set_experiment(training_program.experiment_name)
 
             # Start the run with the same name as the training program's run
-            self._active_run = mlflow.start_run(
-                run_name=training_program._run_name
-            )
+            self._active_run = mlflow.start_run(run_name=training_program._run_name)
 
             # Enable system metrics logging
             mlflow.enable_system_metrics_logging()
@@ -181,7 +180,9 @@ class MLflowLogger(Logger):
             self._log_datamanager_info()
 
         except Exception as e:
-            error_msg = f"Failed to set up MLflow experiment '{training_program.experiment_name}': {e}"
+            error_msg = (
+                f"Failed to set up MLflow experiment '{training_program.experiment_name}': {e}"
+            )
             logger.error(error_msg)
             logger.exception(e)
             raise RuntimeError(error_msg) from e
@@ -224,7 +225,7 @@ class MLflowLogger(Logger):
         assert self._training_program is not None
 
         try:
-            if hasattr(self._training_program, '_training_dman'):
+            if hasattr(self._training_program, "_training_dman"):
                 dman = self._training_program._training_dman
 
                 # Create a summary of the dataset
@@ -245,7 +246,7 @@ class MLflowLogger(Logger):
             logger.error("Failed to log dataset info")
             logger.exception(e)
 
-    def _log_checkpoint(self, step: int, params: Any, losses: Optional[List[np.ndarray]] = None):
+    def _log_checkpoint(self, step: int, params: Any, losses: list[np.ndarray] | None = None):
         """Log model checkpoint and register if it's the best model"""
         assert self._training_program is not None
         try:
@@ -286,7 +287,7 @@ class MLflowLogger(Logger):
             for ext in self.valid_extensions:
                 for file_path in dir_path.glob(f"**/*{ext}"):
                     # Calculate hash of file content + path to ensure uniqueness
-                    with open(file_path, 'rb') as f:
+                    with open(file_path, "rb") as f:
                         content = f.read()
                         file_hash = xxhash.xxh64(content + str(file_path).encode()).hexdigest()
 
@@ -303,40 +304,35 @@ class MLflowLogger(Logger):
         except Exception as e:
             logger.error(f"Failed to log files in directory {dir_path}: {e}")
 
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        """Return callbacks for logging during training"""
-        assert self._training_program is not None
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        latest = view.latest()
+        if latest is None:
+            return
+        step = context.current_step
+        step_history = view.to_step_history()
 
-        def log_metrics(step, training_config, step_history=None, **kwargs):
-            logger.debug(f"Processing metrics for step {step}")
-            if step_history is None:
-                return
+        try:
+            losses = step_history.get("loss")
+            if losses is not None:
+                metrics = {
+                    f"loss_replicate_{i}": float(np.mean(loss))
+                    for i, loss in enumerate(losses)
+                    if not np.isnan(loss).any()
+                }
+                valid_losses = [loss_arr for loss_arr in losses if not np.isnan(loss_arr).any()]
+                if valid_losses:
+                    metrics["loss_min"] = float(np.min(np.concatenate(valid_losses)))
+                mlflow.log_metrics(self._sanitize_metrics(metrics), step=step)
 
-            try:
-                # Log training loss from step_history
-                losses = step_history.get('loss')
-                if losses is not None:
-                    metrics = {
-                        f"loss_replicate_{i}": float(np.mean(loss))
-                        for i, loss in enumerate(losses)
-                        if not np.isnan(loss).any()
-                    }
-                    valid_losses = [loss_arr for loss_arr in losses if not np.isnan(loss_arr).any()]
-                    if valid_losses:
-                        metrics["loss_min"] = float(np.min(np.concatenate(valid_losses)))
-                    sanitized_metrics = self._sanitize_metrics(metrics)
-                    mlflow.log_metrics(sanitized_metrics, step=step)
-
-                # Log metrics from other loggers
+            # Log metrics from other loggers
+            if self._training_program is not None:
                 all_logger_metrics = {}
                 for logger_obj in self._training_program.loggers:
                     if logger_obj is self:
                         continue
-
                     logger_metrics = logger_obj.get_metrics(replicate=None)
                     if logger_metrics:
-                        flat_metrics = self._flatten_dict(logger_metrics)
-                        all_logger_metrics.update(flat_metrics)
+                        all_logger_metrics.update(self._flatten_dict(logger_metrics))
 
                 if all_logger_metrics:
                     numeric_metrics = {
@@ -344,29 +340,21 @@ class MLflowLogger(Logger):
                         for k, v in all_logger_metrics.items()
                         if isinstance(v, (int, float, np.number))
                     }
-                    if len(numeric_metrics) != len(all_logger_metrics):
-                        logger.warning(
-                            "Some logger metrics were non-numeric and skipped by MLflow."
-                        )
-
                     if numeric_metrics:
-                        sanitized_metrics = self._sanitize_metrics(numeric_metrics)
-                        mlflow.log_metrics(sanitized_metrics, step=step)
-                        logger.debug(f"Logged {len(sanitized_metrics)} metrics from other loggers.")
+                        mlflow.log_metrics(self._sanitize_metrics(numeric_metrics), step=step)
 
-                # Log any other metrics from step_history and new plots
-                other_metrics = step_history.get('metrics', {})
-                if other_metrics:
-                    sanitized_other_metrics = self._sanitize_metrics(other_metrics)
-                    mlflow.log_metrics(sanitized_other_metrics, step=step)
-                if self.log_plots:
-                    self._log_new_artifacts()
+            other_metrics = step_history.get("metrics", {})
+            if other_metrics:
+                mlflow.log_metrics(self._sanitize_metrics(other_metrics), step=step)
+            if self.log_plots:
+                self._log_new_artifacts()
 
-            except Exception as e:
-                logger.error(f"Error logging metrics for step {step}: {e}")
-                logger.exception(e)
+        except Exception as e:
+            logger.error(f"Error logging metrics for step {step}: {e}")
+            logger.exception(e)
 
-        return [(self.periods, log_metrics)]
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        self.on_batch(view, context)
 
     def finalize(self):
         """Final cleanup and logging"""

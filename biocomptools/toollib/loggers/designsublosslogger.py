@@ -16,26 +16,10 @@ from typing import Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.loggers.utils import extract_design_step_metrics
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-
-def _to_scalar(val) -> float:
-    if val is None:
-        return float('nan')
-    if hasattr(val, 'shape'):
-        arr = np.asarray(val)
-        if arr.size == 0:
-            return float('nan')
-        if arr.size == 1:
-            return float(arr.item())
-        return float(np.nanmean(arr))
-    if hasattr(val, '__float__'):
-        return float(val)
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        return float(np.nanmean(val))
-    return float(val) if val is not None else float('nan')
 
 
 def _get_target_extents(target) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -133,31 +117,21 @@ class DesignSublossLogger(Logger):
 
     def _extract_subloss_data(self, step: int, step_history: dict) -> dict:
         """Extract comprehensive metrics from step_history."""
-        data = {"step": step, "progress": step / max(self._total_steps, 1)}
+        data = extract_design_step_metrics(step_history)
+        data["step"] = step
+        data["progress"] = step / max(self._total_steps, 1)
 
-        # Scalar loss
-        data["loss"] = _to_scalar(step_history.get("loss"))
-
-        # Sublosses - both raw and weighted
-        sublosses = step_history.get("sublosses", {})
-        for key, val in sublosses.items():
-            data[f"subloss_{key}"] = _to_scalar(val)
-
-        # All losses array (per replicate/target/network)
+        # Subloss-specific: extended all_losses stats
         all_losses = step_history.get("all_losses")
         if all_losses is not None:
             arr = np.asarray(all_losses)
             data["all_losses_shape"] = arr.shape
-            data["all_losses_mean"] = float(np.nanmean(arr))
-            data["all_losses_min"] = float(np.nanmin(arr))
-            data["all_losses_max"] = float(np.nanmax(arr))
             data["all_losses_std"] = float(np.nanstd(arr))
-            # Per-network loss for first replicate, first target
             if arr.ndim >= 4:
                 per_net = arr[0, 0, 0, :] if arr.ndim == 4 else arr[0, 0, 0, 0, :]
                 data["per_network_losses"] = per_net.tolist()
 
-        # Predictions
+        # Subloss-specific: prediction stats
         yhatdep = step_history.get("yhatdep")
         if yhatdep is not None:
             arr = np.asarray(yhatdep)
@@ -167,35 +141,6 @@ class DesignSublossLogger(Logger):
             data["yhatdep_max"] = float(np.nanmax(arr))
             data["yhatdep_std"] = float(np.nanstd(arr))
             data["yhatdep_nan_count"] = int(np.sum(np.isnan(arr)))
-
-        # TU stats
-        tu_stats = step_history.get("tu_stats", {})
-        for key, val in tu_stats.items():
-            data[f"tu_{key}"] = _to_scalar(val)
-
-        # Ratio stats
-        ratio_stats = step_history.get("ratio_stats", {})
-        for key, val in ratio_stats.items():
-            data[f"ratio_{key}"] = _to_scalar(val)
-
-        # Penalties with their contribution to total loss
-        total_loss = data["loss"]
-        penalty_names = [
-            "l0_penalty",
-            "tucount_penalty",
-            "spread_penalty",
-            "coupling_penalty",
-            "ern_tying_penalty",
-        ]
-        total_penalty = 0.0
-        for pname in penalty_names:
-            val = step_history.get(pname)
-            if val is not None:
-                scalar_val = _to_scalar(val)
-                data[pname] = scalar_val
-                total_penalty += scalar_val
-        data["total_penalty"] = total_penalty
-        data["penalty_fraction"] = total_penalty / total_loss if total_loss > 0 else 0.0
 
         return data
 
@@ -802,7 +747,12 @@ class DesignSublossLogger(Logger):
                     # Trajectory plots
                     self._generate_trajectory_plots()
 
-        return [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def _generate_trajectory_plots(self):
         if not self._history or not self.generate_plots:

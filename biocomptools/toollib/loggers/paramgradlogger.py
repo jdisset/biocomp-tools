@@ -1,18 +1,21 @@
 ## {{{                          --     imports     --
+from __future__ import annotations
+
 import matplotlib
 
-matplotlib.use('Agg')  # Use non-interactive backend to prevent GUI issues in threads
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import jax
 from math import ceil, sqrt
 from pathlib import Path
-from typing import Union, Optional, List, Tuple, Callable, Literal
+from typing import Literal
 
-
+from pydantic import PrivateAttr
 from biocomp.parameters import ParameterTree, PTree, flatten_PTree, get_path_components
 from biocomp.jaxutils import tree_get
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 from biocomptools.modelmodel import get_shared_params, get_nonshared_params
 
@@ -125,15 +128,15 @@ def _compute_statistics(pvalues_flat, gvalues_flat, pnames, learning_rate, shape
         w_std = np.std(w_flat) if w_flat.size > 1 else 0.0
 
         stats = {
-            'w': {
-                'l2': w_l2,
-                'mean': w_mean,
-                'std': w_std,
-                'size': w_flat.size,
-                'shape': shapes[i] if i < len(shapes) else w_flat.size,
+            "w": {
+                "l2": w_l2,
+                "mean": w_mean,
+                "std": w_std,
+                "size": w_flat.size,
+                "shape": shapes[i] if i < len(shapes) else w_flat.size,
             },
-            'g': {},
-            'ratio': np.nan,
+            "g": {},
+            "ratio": np.nan,
         }
 
         if has_grads and i < len(gvalues_flat):
@@ -148,21 +151,21 @@ def _compute_statistics(pvalues_flat, gvalues_flat, pnames, learning_rate, shape
                     )
                 else:
                     g_l2 = np.linalg.norm(g_flat)
-                    stats['g'] = {
-                        'l2': g_l2,
-                        'mean': np.mean(g_flat),
+                    stats["g"] = {
+                        "l2": g_l2,
+                        "mean": np.mean(g_flat),
                         # Handle single element case for std calculation
-                        'std': np.std(g_flat) if g_flat.size > 1 else 0.0,
+                        "std": np.std(g_flat) if g_flat.size > 1 else 0.0,
                     }
                     if has_lr and w_l2 > 1e-9:
-                        stats['ratio'] = (learning_rate * g_l2) / w_l2
+                        stats["ratio"] = (learning_rate * g_l2) / w_l2
 
         stats_list.append(stats)
 
     is_normal = [
         not (
-            get_path_components(name)[-1].endswith('rate')
-            or get_path_components(name)[-1].endswith('affinities')
+            get_path_components(name)[-1].endswith("rate")
+            or get_path_components(name)[-1].endswith("affinities")
         )
         for name in pnames
     ]
@@ -187,22 +190,22 @@ def _compute_stat_ranges_fast(stats_list, is_normal, has_grads, has_lr):
         if stats is None or not is_normal[i]:
             continue
 
-        w_l2_vals.append(np.abs(stats['w']['l2']))
-        w_mean_vals.append(np.abs(stats['w']['mean']))
-        w_std_vals.append(np.abs(stats['w']['std']))
+        w_l2_vals.append(np.abs(stats["w"]["l2"]))
+        w_mean_vals.append(np.abs(stats["w"]["mean"]))
+        w_std_vals.append(np.abs(stats["w"]["std"]))
 
-        if has_grads and 'l2' in stats['g']:
-            g_l2_vals.append(np.abs(stats['g']['l2']))
-            g_mean_vals.append(np.abs(stats['g']['mean']))
-            g_std_vals.append(np.abs(stats['g']['std']))
+        if has_grads and "l2" in stats["g"]:
+            g_l2_vals.append(np.abs(stats["g"]["l2"]))
+            g_mean_vals.append(np.abs(stats["g"]["mean"]))
+            g_std_vals.append(np.abs(stats["g"]["std"]))
 
-        if has_grads and has_lr and not np.isnan(stats['ratio']):
-            ratio_vals.append(stats['ratio'])
+        if has_grads and has_lr and not np.isnan(stats["ratio"]):
+            ratio_vals.append(stats["ratio"])
 
     for key, vals in [
-        ('l2', w_l2_vals + g_l2_vals),
-        ('mean', w_mean_vals + g_mean_vals),
-        ('std', w_std_vals + g_std_vals),
+        ("l2", w_l2_vals + g_l2_vals),
+        ("mean", w_mean_vals + g_mean_vals),
+        ("std", w_std_vals + g_std_vals),
     ]:
         if vals:
             ranges[key] = (min(vals), max(vals))
@@ -210,7 +213,7 @@ def _compute_stat_ranges_fast(stats_list, is_normal, has_grads, has_lr):
             ranges[key] = (0, 1)
 
     if ratio_vals:
-        ranges['ratio'] = (min(ratio_vals), max(ratio_vals))
+        ranges["ratio"] = (min(ratio_vals), max(ratio_vals))
 
     return ranges
 
@@ -240,14 +243,14 @@ def _create_shared_bins(w_flat, g_flat, bins):
 
 
 def _get_title_color(last_name_part, colors):
-    if last_name_part == 'w':
-        return colors['title_w']
-    elif last_name_part == 'b':
-        return colors['title_b']
-    elif last_name_part.endswith('rate') or last_name_part.endswith('affinities'):
-        return colors['title_special']
+    if last_name_part == "w":
+        return colors["title_w"]
+    elif last_name_part == "b":
+        return colors["title_b"]
+    elif last_name_part.endswith("rate") or last_name_part.endswith("affinities"):
+        return colors["title_special"]
     else:
-        return colors['title_default']
+        return colors["title_default"]
 
 
 def _format_name_tuple_for_title(name_tuple, skip_first_name=True):
@@ -259,7 +262,7 @@ def _format_name_tuple_for_title(name_tuple, skip_first_name=True):
     """
     if hasattr(name_tuple, "actual_path"):  # ArrayRefPath
         actual_components = get_path_components(name_tuple.actual_path)
-        display_path = '/'.join(
+        display_path = "/".join(
             actual_components[1:]
             if skip_first_name and len(actual_components) > 1
             else actual_components
@@ -267,7 +270,7 @@ def _format_name_tuple_for_title(name_tuple, skip_first_name=True):
         return f"{display_path} [ArrayRef]"
     else:  # Regular ParamPath or tuple
         components = get_path_components(name_tuple)
-        return '/'.join(components[1:] if skip_first_name and len(components) > 1 else components)
+        return "/".join(components[1:] if skip_first_name and len(components) > 1 else components)
 
 
 def _build_stat_matrix(stats, stat_ranges, stat_keys, num_rows):
@@ -279,13 +282,13 @@ def _build_stat_matrix(stats, stat_ranges, stat_keys, num_rows):
             vmin, vmax = stat_ranges[key]
             norm_factors[key] = (vmin, vmax - vmin) if vmax > vmin else (vmin, 1)
 
-    for r_idx, source in enumerate(['w', 'g']):
+    for r_idx, source in enumerate(["w", "g"]):
         if r_idx == 1 and num_rows == 1:
             break
 
         for c_idx, key in enumerate(stat_keys):
-            if key == 'ratio':
-                val = stats['ratio'] if r_idx == 1 else np.nan
+            if key == "ratio":
+                val = stats["ratio"] if r_idx == 1 else np.nan
             else:
                 val = stats[source].get(key, np.nan) if source in stats else np.nan
 
@@ -297,47 +300,47 @@ def _build_stat_matrix(stats, stat_ranges, stat_keys, num_rows):
 
 
 def _annotate_heatmap(ax, matrix, stats, stat_keys, col_labels, num_rows):
-    row_labels = ['W', 'G']
+    row_labels = ["W", "G"]
 
     formatted_values = {}
-    for source in ['w', 'g']:
+    for source in ["w", "g"]:
         if source in stats:
             for key in stat_keys:
-                if key != 'ratio':
+                if key != "ratio":
                     formatted_values[(source, key)] = format_stat(stats[source].get(key, np.nan))
 
-    if 'ratio' in stat_keys:
-        formatted_values[('ratio',)] = format_stat(stats.get('ratio', np.nan))
+    if "ratio" in stat_keys:
+        formatted_values[("ratio",)] = format_stat(stats.get("ratio", np.nan))
 
     ratio_opt = 1e-3
     log_fold_range = 3.0
 
     for r_idx in range(num_rows):
         for c_idx, key in enumerate(stat_keys):
-            if key == 'ratio' and r_idx == 1:
-                ratio_val = stats.get('ratio', np.nan)
+            if key == "ratio" and r_idx == 1:
+                ratio_val = stats.get("ratio", np.nan)
                 if np.isfinite(ratio_val) and ratio_val > 1e-9:
                     log_dist = np.log10(ratio_val) - np.log10(ratio_opt)
                     norm_val = 0.5 * (log_dist / log_fold_range + 1.0)
                     norm_val = np.clip(norm_val, 0, 1)
-                    text_color = 'white' if norm_val < 0.2 or norm_val > 0.8 else 'black'
+                    text_color = "white" if norm_val < 0.2 or norm_val > 0.8 else "black"
                 else:
-                    text_color = 'black'
+                    text_color = "black"
             else:
-                text_color = 'white' if matrix[r_idx, c_idx] > 0.6 else 'black'
+                text_color = "white" if matrix[r_idx, c_idx] > 0.6 else "black"
 
-            if key == 'ratio':
-                text_val = formatted_values.get(('ratio',), " ") if r_idx == 1 else " "
+            if key == "ratio":
+                text_val = formatted_values.get(("ratio",), " ") if r_idx == 1 else " "
             else:
                 source = row_labels[r_idx].lower()
                 text_val = formatted_values.get((source, key), " ")
 
-            ax.text(c_idx, r_idx, text_val, ha='center', va='center', color=text_color, fontsize=7)
+            ax.text(c_idx, r_idx, text_val, ha="center", va="center", color=text_color, fontsize=7)
 
             if r_idx == 0:
-                ax.text(c_idx, -1.2, col_labels[c_idx], ha='center', va='center', fontsize=9)
+                ax.text(c_idx, -1.2, col_labels[c_idx], ha="center", va="center", fontsize=9)
 
-        ax.text(-0.7, r_idx, row_labels[r_idx], ha='center', va='center', fontsize=9)
+        ax.text(-0.7, r_idx, row_labels[r_idx], ha="center", va="center", fontsize=9)
 
 
 def _add_stats_heatmap(ax, stats, stat_ranges, has_grads, colors):
@@ -346,26 +349,26 @@ def _add_stats_heatmap(ax, stats, stat_ranges, has_grads, colors):
     inset_ax = ax.inset_axes([0, 1.02, 1, height], transform=ax.transAxes)
     inset_ax.set_axis_off()
 
-    col_labels = ['L2', 'µ', 'σ']
-    stat_keys = ['l2', 'mean', 'std']
-    if has_grads and 'ratio' in stat_ranges:
-        col_labels.append('Upd/W')
-        stat_keys.append('ratio')
+    col_labels = ["L2", "µ", "σ"]
+    stat_keys = ["l2", "mean", "std"]
+    if has_grads and "ratio" in stat_ranges:
+        col_labels.append("Upd/W")
+        stat_keys.append("ratio")
 
     num_rows = 2 if has_grads else 1
     num_cols = len(col_labels)
     stat_matrix = _build_stat_matrix(stats, stat_ranges, stat_keys, num_rows)
     rgba_img = np.zeros((num_rows, num_cols, 4))
-    cmap_main = plt.get_cmap(colors['cmap'])
-    cmap_diverging = plt.get_cmap('RdBu_r')
+    cmap_main = plt.get_cmap(colors["cmap"])
+    cmap_diverging = plt.get_cmap("RdBu_r")
 
     ratio_opt = 1e-3
     log_fold_range = 3.0
 
     for r_idx in range(num_rows):
         for c_idx, key in enumerate(stat_keys):
-            if key == 'ratio' and r_idx == 1:
-                ratio_val = stats.get('ratio', np.nan)
+            if key == "ratio" and r_idx == 1:
+                ratio_val = stats.get("ratio", np.nan)
                 if np.isfinite(ratio_val) and ratio_val > 1e-9:
                     log_dist = np.log10(ratio_val) - np.log10(ratio_opt)
                     norm_val = 0.5 * (log_dist / log_fold_range + 1.0)
@@ -377,7 +380,7 @@ def _add_stats_heatmap(ax, stats, stat_ranges, has_grads, colors):
                 norm_val = stat_matrix[r_idx, c_idx]
                 rgba_img[r_idx, c_idx, :] = cmap_main(norm_val)
 
-    inset_ax.imshow(rgba_img, aspect='auto', interpolation='nearest')
+    inset_ax.imshow(rgba_img, aspect="auto", interpolation="nearest")
 
     _annotate_heatmap(inset_ax, stat_matrix, stats, stat_keys, col_labels, num_rows)
 
@@ -405,20 +408,20 @@ def _plot_layer(
         bin_centers,
         w_counts,
         width=bin_width * 0.8,
-        color=colors['weights_hist'],
-        edgecolor='#000000ff',
+        color=colors["weights_hist"],
+        edgecolor="#000000ff",
         linewidth=0.5,
     )
 
-    ax.set_ylabel("Weights Count", color=colors['weights_label'], fontsize=9)
-    ax.grid(True, alpha=grid_alpha, color=colors['grid_color'], linestyle='-', linewidth=0.5)
+    ax.set_ylabel("Weights Count", color=colors["weights_label"], fontsize=9)
+    ax.grid(True, alpha=grid_alpha, color=colors["grid_color"], linestyle="-", linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color(colors['grid_color'])
-    ax.spines['bottom'].set_color(colors['grid_color'])
-    ax.tick_params(colors=colors['text_color'])
-    ax.tick_params(axis='y', labelcolor=colors['weights_label'])
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(colors["grid_color"])
+    ax.spines["bottom"].set_color(colors["grid_color"])
+    ax.tick_params(colors=colors["text_color"])
+    ax.tick_params(axis="y", labelcolor=colors["weights_label"])
 
     if g_flat is not None and g_flat.size > 0:
         ax_grad = ax.twinx()
@@ -427,31 +430,31 @@ def _plot_layer(
             bin_centers,
             g_counts,
             width=bin_width * 0.8,
-            color=colors['gradients_hist'],
-            edgecolor='#000000ff',
+            color=colors["gradients_hist"],
+            edgecolor="#000000ff",
             linewidth=0.5,
         )
-        ax_grad.set_ylabel("Gradients Count", color=colors['gradients_label'], fontsize=9)
-        ax_grad.tick_params(axis='y', labelcolor=colors['gradients_label'])
-        ax_grad.spines['top'].set_visible(False)
-        ax_grad.spines['left'].set_visible(False)
-        ax_grad.spines['right'].set_color(colors['grid_color'])
+        ax_grad.set_ylabel("Gradients Count", color=colors["gradients_label"], fontsize=9)
+        ax_grad.tick_params(axis="y", labelcolor=colors["gradients_label"])
+        ax_grad.spines["top"].set_visible(False)
+        ax_grad.spines["left"].set_visible(False)
+        ax_grad.spines["right"].set_color(colors["grid_color"])
     elif g_flat is None:
         # Show "[no gradients]" label when gradients are missing
         ax_grad = ax.twinx()
-        ax_grad.set_ylabel("[no gradients]", color=colors['gradients_label'], fontsize=9)
+        ax_grad.set_ylabel("[no gradients]", color=colors["gradients_label"], fontsize=9)
         ax_grad.set_ylim(0, 1)
         ax_grad.set_yticks([])
-        ax_grad.spines['top'].set_visible(False)
-        ax_grad.spines['left'].set_visible(False)
-        ax_grad.spines['right'].set_color(colors['grid_color'])
+        ax_grad.spines["top"].set_visible(False)
+        ax_grad.spines["left"].set_visible(False)
+        ax_grad.spines["right"].set_color(colors["grid_color"])
 
     last_name = get_path_components(name_tuple)[-1]
     title_color = _get_title_color(last_name, colors)
     layer_name = _format_name_tuple_for_title(name_tuple, skip_first_name)
 
     # Create title with parameter shape in brackets
-    param_shape = stats['w'].get('shape', stats['w']['size'])
+    param_shape = stats["w"].get("shape", stats["w"]["size"])
     if isinstance(param_shape, tuple):
         shape_str = str(param_shape)
     else:
@@ -472,12 +475,12 @@ def _plot_parameter_section(
     params_section,
     gradients_section,
     section_name: str,
-    learning_rate: Optional[float],
+    learning_rate: float | None,
     bins: int,
     skip_first_name: bool,
     colors,
     grid_alpha: float,
-    bg_color: str = '#ffffff',
+    bg_color: str = "#ffffff",
 ):
     """Plot a section (shared or non-shared) of parameters in a subfigure."""
     if params_section is None:
@@ -580,8 +583,8 @@ def _plot_parameter_section(
         n_rows,
         n_cols,
         gridspec_kw={
-            'hspace': 1.2,
-            'wspace': 0.8,
+            "hspace": 1.2,
+            "wspace": 0.8,
         },
     )
 
@@ -614,13 +617,13 @@ def _plot_parameter_section(
         )
 
     # Add section title
-    subfig.suptitle(f"{section_name} Parameters", fontsize=12, color=colors['text_color'], y=0.95)
+    subfig.suptitle(f"{section_name} Parameters", fontsize=12, color=colors["text_color"], y=0.95)
 
 
 def plot_parameter_diagnostics(
-    params: Union[PTree, ParameterTree],
-    param_gradients: Optional[Union[PTree, ParameterTree]] = None,
-    learning_rate: Optional[float] = None,
+    params: PTree | ParameterTree,
+    param_gradients: PTree | ParameterTree | None = None,
+    learning_rate: float | None = None,
     title: str = "Parameter & Gradient Diagnostics",
     bins: int = 30,
     show_plot: bool = False,
@@ -632,20 +635,20 @@ def plot_parameter_diagnostics(
 ):
     if colors is None:
         colors = {
-            'weights_label': '#0db3d0',
-            'gradients_label': '#F5BD70',
-            'weights_hist': '#0db3d0b0',
-            'gradients_hist': '#fff00080',
-            'title_w': 'black',
-            'title_b': 'black',
-            'title_special': 'black',
-            'title_default': '#333333',
-            'cmap': 'Greys',
-            'bg_color': 'white',
-            'text_color': 'black',
-            'grid_color': 'gray',
-            'shared_bg': '#EEFDF7aa',
-            'nonshared_bg': '#FDF6EEaa',
+            "weights_label": "#0db3d0",
+            "gradients_label": "#F5BD70",
+            "weights_hist": "#0db3d0b0",
+            "gradients_hist": "#fff00080",
+            "title_w": "black",
+            "title_b": "black",
+            "title_special": "black",
+            "title_default": "#333333",
+            "cmap": "Greys",
+            "bg_color": "white",
+            "text_color": "black",
+            "grid_color": "gray",
+            "shared_bg": "#EEFDF7aa",
+            "nonshared_bg": "#FDF6EEaa",
         }
 
     # Separate shared and non-shared parameters using the proper functions
@@ -669,8 +672,8 @@ def plot_parameter_diagnostics(
 
     # Create figure with subfigures
     fig = plt.figure(figsize=(fwidth, fheight))
-    fig.suptitle(title, fontsize=16, color=colors['text_color'], y=0.98)
-    fig.patch.set_facecolor(colors['bg_color'])
+    fig.suptitle(title, fontsize=16, color=colors["text_color"], y=0.98)
+    fig.patch.set_facecolor(colors["bg_color"])
 
     if has_shared and has_nonshared:
         # Use proportional height ratios based on actual row counts
@@ -680,15 +683,15 @@ def plot_parameter_diagnostics(
         subfigs = fig.subfigures(2, 1, height_ratios=height_ratios, hspace=0.0)
         shared_subfig = subfigs[0]
         nonshared_subfig = subfigs[1]
-        shared_subfig.patch.set_facecolor(colors['shared_bg'])
-        nonshared_subfig.patch.set_facecolor(colors['nonshared_bg'])
+        shared_subfig.patch.set_facecolor(colors["shared_bg"])
+        nonshared_subfig.patch.set_facecolor(colors["nonshared_bg"])
     elif has_shared:
         shared_subfig = (
             fig.subfigures(1, 1)[0]
             if isinstance(fig.subfigures(1, 1), list)
             else fig.subfigures(1, 1)
         )
-        shared_subfig.patch.set_facecolor(colors['shared_bg'])
+        shared_subfig.patch.set_facecolor(colors["shared_bg"])
         nonshared_subfig = None
     elif has_nonshared:
         shared_subfig = None
@@ -697,7 +700,7 @@ def plot_parameter_diagnostics(
             if isinstance(fig.subfigures(1, 1), list)
             else fig.subfigures(1, 1)
         )
-        nonshared_subfig.patch.set_facecolor(colors['nonshared_bg'])
+        nonshared_subfig.patch.set_facecolor(colors["nonshared_bg"])
     else:
         # No parameters to plot
         return fig
@@ -736,161 +739,135 @@ def plot_parameter_diagnostics(
 
 
 class ParamGradLogger(Logger):
-    """
-    Logs and visualizes parameter and gradient diagnostics during training.
+    """Logs and visualizes parameter and gradient diagnostics during training.
 
-    For each logging step, this logger generates a plot for each replicate,
-    showing distributions and statistics for model parameters and their gradients.
-    Gradients are averaged over the batches within the step.
+    For each logging step, generates a plot for each replicate showing
+    distributions and statistics for model parameters and their gradients.
     """
 
     output_dir: str = "plots/params_diagnostics"
     plot_local_params: bool = False
     plot_shared_params: bool = True
-    learning_rate: Optional[float] = None  # if None, will try to extract from step_history
-    replicate: Optional[int] = None  # if None, will plot all replicates
-    grad_aggregation: Literal['mean', 'first'] = 'mean'
-    file_format: Literal['png', 'pdf'] = 'png'
+    learning_rate: float | None = None
+    replicate: int | None = None
+    grad_aggregation: Literal["mean", "first"] = "mean"
+    file_format: Literal["png", "pdf"] = "png"
     dpi: int = 200
+    required_arrays: list[str] = ["latest_params", "grad"]
 
-    _save_dir: Optional[Path] = None
+    _save_dir: Path | None = PrivateAttr(default=None)
 
     def initialize(self, training_program):
-        """Initializes the logger by setting up the output directory."""
         self._save_dir = training_program._save_dir / self.output_dir
         self._save_dir.mkdir(exist_ok=True, parents=True)
         logger.debug(f"ParamGradLogger saving plots to {self._save_dir}")
 
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        """Returns the callback for logging parameter and gradient diagnostics."""
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        if context.current_step == 0:
+            return
+        if self._save_dir is None:
+            logger.warning("ParamGradLogger not initialized, cannot save plots.")
+            return
 
-        def log_param_grads(
-            step: int,
-            training_config,
-            step_history: Optional[dict] = None,
-            **kwargs,
-        ):
-            if step == 0:  # Skip initial state
-                return
+        step_history = view.to_step_history()
+        if "latest_params" not in step_history:
+            logger.debug(
+                f"Skipping ParamGradLogger at step {context.current_step}: not a sync point"
+            )
+            return
 
-            if self._save_dir is None:
-                logger.warning("ParamGradLogger not initialized, cannot save plots.")
-                return
+        self._generate_plots(context.current_step, step_history, context.training_config)
 
-            if step_history is None or 'latest_params' not in step_history:
-                # expected when period doesn't align with sync points
-                logger.debug(f"Skipping ParamGradLogger at step {step}: not a sync point")
-                return
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        self.on_batch(view, context)
 
-            logger.info(f"ParamGradLogger: Generating diagnostic plots for step {step}...")
+    def _generate_plots(self, step: int, step_history: dict, training_config: object) -> None:
+        import time as _time
 
-            params = step_history['latest_params']
-            grads = step_history.get('grad')  # Gradients are optional
+        logger.info(f"ParamGradLogger: Generating diagnostic plots for step {step}...")
 
-            # Extract learning rate from step_history if available
-            effective_learning_rate = self.learning_rate
-            lr_display_text = ""
+        params = step_history["latest_params"]
+        grads = step_history.get("grad")
 
-            if 'learning_rate' in step_history and self.learning_rate is None:
-                # learning_rate contains history across all batches in the step
-                lr_history = step_history['learning_rate']
+        effective_learning_rate = self.learning_rate
+        lr_display_text = ""
 
-                # Extract learning rates for first replicate to check pattern
-                first_replicate_lr = tree_get(lr_history, 0)
-                if first_replicate_lr is not None:
-                    lr_array = np.array(first_replicate_lr)
-                    if lr_array.ndim > 0:  # array of learning rates across batches
-                        start_lr = float(lr_array[0])
-                        end_lr = float(lr_array[-1])
-                        mean_lr = float(lr_array.mean())
-
-                        if np.allclose(lr_array, start_lr):
-                            lr_display_text = f"learning rate: {start_lr:.2e}"
-                        else:
-                            lr_display_text = f"learning rate: {start_lr:.2e} → {end_lr:.2e}"
-
-                        effective_learning_rate = mean_lr
-                    else:  # scalar learning rate
-                        effective_learning_rate = float(lr_array)
-                        lr_display_text = f"learning rate: {effective_learning_rate:.2e}"
-
-            n_replicates = training_config.n_replicates
-            import time
-
-            times = []
-            for i in range(n_replicates):
-                t0 = time.time()
-                replicate_params = tree_get(params, i)
-                replicate_gradients = None
-                if grads is not None:
-                    # grads contains history across all batches in the step
-                    # we need to average them to get the mean gradient for the step
-                    replicate_grads_history = tree_get(grads, i)
-
-                    # average gradients across batch history
-                    if replicate_grads_history is not None:
-                        # the gradient history is structured as a tree where each leaf
-                        # contains an array with shape (batches_per_step, *param_shape)
-                        if self.grad_aggregation == 'mean':
-                            replicate_gradients = jax.tree.map(
-                                lambda g: g.mean(axis=0) if g is not None else None,
-                                replicate_grads_history,
-                            )
-                        elif self.grad_aggregation == 'first':
-                            replicate_gradients = jax.tree.map(
-                                lambda g: g[0] if g is not None else None,
-                                replicate_grads_history,
-                            )
-                        else:
-                            logger.warning(
-                                f"Unknown grad_aggregation method '{self.grad_aggregation}', "
-                                "defaulting to 'mean'."
-                            )
-                            replicate_gradients = jax.tree.map(
-                                lambda g: g.mean(axis=0) if g is not None else None,
-                                replicate_grads_history,
-                            )
-
-                t1 = time.time()
-
-                # Create title with learning rate info
-                main_title = f"Parameter Diagnostics - Step {step}"
-                if lr_display_text:
-                    main_title += f"\n{lr_display_text}"
-
-                fig = plot_parameter_diagnostics(
-                    params=replicate_params,
-                    param_gradients=replicate_gradients,
-                    learning_rate=effective_learning_rate,
-                    title=main_title,
-                    show_plot=False,
-                    plot_local_params=self.plot_local_params,
-                    plot_shared_params=self.plot_shared_params,
-                )
-                t2 = time.time()
-
-                try:
-                    save_path = (
-                        self._save_dir / f"replicate{i}/{step:04d}_params.{self.file_format}"
+        if "learning_rate" in step_history and self.learning_rate is None:
+            lr_history = step_history["learning_rate"]
+            first_replicate_lr = tree_get(lr_history, 0)
+            if first_replicate_lr is not None:
+                lr_array = np.array(first_replicate_lr)
+                if lr_array.ndim > 0:
+                    start_lr = float(lr_array[0])
+                    end_lr = float(lr_array[-1])
+                    effective_learning_rate = float(lr_array.mean())
+                    lr_display_text = (
+                        f"learning rate: {start_lr:.2e}"
+                        if np.allclose(lr_array, start_lr)
+                        else f"learning rate: {start_lr:.2e} → {end_lr:.2e}"
                     )
-                    save_path.parent.mkdir(parents=True, exist_ok=True)
-                    fig.savefig(save_path, dpi=self.dpi)
-                except Exception as e:
-                    logger.error(f"Failed to save parameter diagnostic plot: {e}")
-                finally:
-                    plt.close(fig)
-                    t3 = time.time()
-                    times.append((t1 - t0, t2 - t1, t3 - t2))
+                else:
+                    effective_learning_rate = float(lr_array)
+                    lr_display_text = f"learning rate: {effective_learning_rate:.2e}"
 
-            for i, (t0, t1, t2) in enumerate(times):
-                logger.debug(
-                    f"Replicate {i}: "
-                    f"Param extraction: {t0:.2f}s, "
-                    f"Plot generation: {t1:.2f}s, "
-                    f"Saving: {t2:.2f}s"
-                )
+        n_replicates = training_config.n_replicates
+        times = []
+        for i in range(n_replicates):
+            t0 = _time.time()
+            replicate_params = tree_get(params, i)
+            replicate_gradients = None
+            if grads is not None:
+                replicate_grads_history = tree_get(grads, i)
+                if replicate_grads_history is not None:
+                    agg = (
+                        self.grad_aggregation
+                        if self.grad_aggregation in ("mean", "first")
+                        else "mean"
+                    )
+                    if agg == "mean":
+                        replicate_gradients = jax.tree.map(
+                            lambda g: g.mean(axis=0) if g is not None else None,
+                            replicate_grads_history,
+                        )
+                    else:
+                        replicate_gradients = jax.tree.map(
+                            lambda g: g[0] if g is not None else None,
+                            replicate_grads_history,
+                        )
 
-        return [(self.periods, log_param_grads)]
+            t1 = _time.time()
+
+            main_title = f"Parameter Diagnostics - Step {step}"
+            if lr_display_text:
+                main_title += f"\n{lr_display_text}"
+
+            fig = plot_parameter_diagnostics(
+                params=replicate_params,
+                param_gradients=replicate_gradients,
+                learning_rate=effective_learning_rate,
+                title=main_title,
+                show_plot=False,
+                plot_local_params=self.plot_local_params,
+                plot_shared_params=self.plot_shared_params,
+            )
+            t2 = _time.time()
+
+            try:
+                save_path = self._save_dir / f"replicate{i}/{step:04d}_params.{self.file_format}"
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                fig.savefig(save_path, dpi=self.dpi)
+            except Exception as e:
+                logger.error(f"Failed to save parameter diagnostic plot: {e}")
+            finally:
+                plt.close(fig)
+                t3 = _time.time()
+                times.append((t1 - t0, t2 - t1, t3 - t2))
+
+        for i, (t0, t1, t2) in enumerate(times):
+            logger.debug(
+                f"Replicate {i}: Param extraction: {t0:.2f}s, "
+                f"Plot generation: {t1:.2f}s, Saving: {t2:.2f}s"
+            )
 
     def finalize(self):
         """Create videos from parameter diagnostic plots using ffmpeg."""

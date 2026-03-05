@@ -14,6 +14,7 @@ from typing import List, Tuple, Callable, Optional, Any, Dict
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.loggers.utils import extract_design_step_metrics
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -62,40 +63,7 @@ class DesignAuxLogger(Logger):
 
     def _extract_aux_metrics(self, step_history: Dict) -> Dict[str, Any]:
         """Extract scalar metrics from step_history for tracking."""
-        metrics = {"loss": _to_scalar(step_history.get("loss"))}
-
-        # all_losses shape: (n_replicates, batches_per_step, n_targets, n_networks) or similar
-        all_losses = step_history.get("all_losses")
-        if all_losses is not None:
-            metrics["all_losses_mean"] = _to_scalar(np.mean(all_losses))
-            metrics["all_losses_min"] = _to_scalar(np.min(all_losses))
-            metrics["all_losses_max"] = _to_scalar(np.max(all_losses))
-
-        # sublosses - individual loss components
-        sublosses = step_history.get("sublosses", {})
-        if sublosses:
-            for key, val in sublosses.items():
-                metrics[f"subloss_{key}"] = _to_scalar(val)
-
-        # TU statistics
-        tu_stats = step_history.get("tu_stats", {})
-        if tu_stats:
-            for key, val in tu_stats.items():
-                metrics[f"tu_{key}"] = _to_scalar(val)
-
-        # ratio statistics
-        ratio_stats = step_history.get("ratio_stats", {})
-        if ratio_stats:
-            for key, val in ratio_stats.items():
-                metrics[f"ratio_{key}"] = _to_scalar(val)
-
-        # regularization penalties
-        for penalty_name in ["l0_penalty", "tucount_penalty", "spread_penalty", "coupling_penalty"]:
-            val = step_history.get(penalty_name)
-            if val is not None:
-                metrics[penalty_name] = _to_scalar(val)
-
-        return metrics
+        return extract_design_step_metrics(step_history)
 
     def _update_history(self, step: int, step_history: Dict):
         metrics = self._extract_aux_metrics(step_history)
@@ -339,7 +307,11 @@ class DesignAuxLogger(Logger):
                 (self._save_dir / "aux_summary.txt").write_text(text_summary)
                 logger.info(f"Saved text summary to {self._save_dir / 'aux_summary.txt'}")
 
-        callbacks = [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
         return callbacks
 
     def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -354,25 +326,3 @@ class DesignAuxLogger(Logger):
         logger.info(f"DesignAuxLogger finalized with {len(self._history)} entries")
 
 
-def _to_scalar(val) -> float:
-    """Convert JAX/numpy array to Python scalar, taking mean if multi-element.
-
-    step_history values from jax.lax.scan have shape (batches_per_step, ...)
-    so we need to handle multi-element arrays by taking the mean.
-    """
-    if val is None:
-        return float('nan')
-    # Handle numpy/jax arrays
-    if hasattr(val, 'shape'):
-        arr = np.asarray(val)
-        if arr.size == 0:
-            return float('nan')
-        if arr.size == 1:
-            return float(arr.item())
-        # Multi-element array: take mean
-        return float(np.nanmean(arr))
-    if hasattr(val, '__float__'):
-        return float(val)
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        return float(np.nanmean(val))
-    return float(val) if val is not None else float('nan')

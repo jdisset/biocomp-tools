@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.loggers.utils import to_scalar as _to_scalar
 from biocomptools.toollib.design_pipeline import CommitCache, precommit_pairs
 from biocomptools.toollib.design_selection import normalize_losses_for_ranking
 from biocomptools.logging_config import get_logger
@@ -14,22 +15,6 @@ from biocomp.designloss import GridLossWeights
 from biocomp.designutils import side_by_side_txt_plot
 
 logger = get_logger(__name__)
-
-
-def _to_scalar(val: Any, default: float = 0.0) -> float:
-    """Convert array-like (numpy/JAX) or scalar to float, averaging if multi-element."""
-    if val is None:
-        return default
-    if hasattr(val, 'shape'):
-        size = getattr(val, 'size', 1)
-        if size > 1:
-            return float(np.mean(val))
-        if size == 1:
-            return float(np.asarray(val).item())
-    try:
-        return float(val) if val else default
-    except (TypeError, ValueError):
-        return default
 
 
 def _extract_at_indices(arr: Any, rid: int, tid: int, nid: int) -> float:
@@ -957,7 +942,12 @@ class DesignHeatmapLogger(Logger):
             if self.save_reproduction_pickle:
                 self._save_reproduction_pickle(step, step_history)
 
-        return [(self.periods, callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         return None

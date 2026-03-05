@@ -17,14 +17,17 @@ class Logger(BaseModel):
     1. Legacy: Override get_callbacks() to return (period, callback) tuples
     2. New: Set declarative attributes and override on_batch/on_end methods
 
+    Scheduling:
+        call_at_interval: Periodic firing every N steps. None = no periodic calls.
+        call_at: Specific step numbers. 0 = before first step, -1 = after last step,
+                 positive = after that step. Default [-1] (end only).
+        The final call schedule is the union of both.
+
     New pattern attributes:
-        frequency: Callback frequency in steps (1 = every step)
         history_window: Number of steps to retain in history (None = all)
         history_mode: "window" (last N), "since_last" (since last callback), "all"
         required_metrics: Metric keys to include in HistoryView
         required_arrays: Array keys to include in HistoryView
-        call_at_start: Whether to call on_start at beginning
-        call_at_end: Whether to call on_end at end
     """
 
     model_config = ConfigDict(
@@ -33,21 +36,22 @@ class Logger(BaseModel):
         validate_default=True,
     )
 
-    # legacy attributes (still supported)
-    periods: int | list[int] = 1
+    # scheduling
+    call_at_interval: int | None = None
+    call_at: list[int] = [-1]
+
+    # execution mode
     async_ok: bool = True
     parallel_ok: bool = False
     callback_mode: Literal["thread", "process"] = "thread"
     metadata: dict[str, object] = {}
 
     # new declarative attributes
-    frequency: int = 1  # steps between callbacks (alias for periods when int)
     history_window: int | None = None  # number of steps to keep (None = all)
     history_mode: Literal["window", "since_last", "all"] = "window"
     required_metrics: list[str] = []
     required_arrays: list[str] = []
-    call_at_start: bool = False
-    call_at_end: bool = False
+    required_extra: list[str] = []  # extra context keys to request from handler
 
     # internal tracking
     _last_callback_step: int = -1
@@ -59,11 +63,6 @@ class Logger(BaseModel):
         self._uses_new_pattern = (
             cls.on_batch is not Logger.on_batch or cls.on_end is not Logger.on_end
         )
-        # Sync periods → frequency for new-pattern loggers so YAML configs
-        # using `periods: 10` work seamlessly with new dispatch
-        if self._uses_new_pattern and isinstance(self.periods, int):
-            if self.frequency == 1 and self.periods != 1:
-                self.frequency = self.periods
 
     def initialize(self, training_program: object) -> None:
         """Optional initialization before training starts."""
@@ -81,7 +80,7 @@ class Logger(BaseModel):
         raise NotImplementedError("Subclass must implement get_callbacks or on_batch/on_end")
 
     def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
-        """Called every `frequency` steps with requested history.
+        """Called every `call_at_interval` steps (and at specific `call_at` steps).
 
         New pattern - override this instead of get_callbacks for simpler code.
 
@@ -92,11 +91,11 @@ class Logger(BaseModel):
         pass
 
     def on_start(self, context: LoggerContext) -> None:
-        """Called at training start if call_at_start=True."""
+        """Called at training start if 0 is in call_at."""
         pass
 
     def on_end(self, view: HistoryView, context: LoggerContext) -> None:
-        """Called at training end if call_at_end=True.
+        """Called at training end if -1 is in call_at.
 
         Receives full history (or windowed based on history_window).
         """
@@ -126,17 +125,21 @@ class Logger(BaseModel):
 
 
 class FunctionLogger(Logger):
+    call_at_interval: int | dict[str, int] | None = None
     functions: list[Callable[..., object]] = []
 
     def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
-        if isinstance(self.periods, int):
-            self.periods = [self.periods]
-        assert isinstance(self.periods, list)
-        if len(self.periods) == 1:
-            self.periods = self.periods * len(self.functions)
-
-        assert len(self.periods) == len(self.functions), (
-            f"Number of periods in FunctionLogger ({len(self.periods)}) must match number of functions ({len(self.functions)})"
-        )
-
-        return list(zip(self.periods, self.functions, strict=True))
+        interval = self.call_at_interval
+        if isinstance(interval, dict):
+            # Map function name → interval; pair each function with its interval
+            callbacks: list[tuple[int, Callable[..., object]]] = []
+            for fn in self.functions:
+                fn_interval = interval.get(fn.__name__)
+                if fn_interval is not None:
+                    callbacks.append((fn_interval, fn))
+            return callbacks
+        elif isinstance(interval, int):
+            return [(interval, fn) for fn in self.functions]
+        else:
+            # No periodic interval; check call_at for end-only dispatch
+            return []

@@ -65,14 +65,16 @@ class LoggerDispatcher(LoggerDispatch):
         self._sync_callbacks: list[tuple[int, Callable]] = []
         self._sync_logger_objects: list[Logger] = []
         self._async_handler: "AsyncLoggerHandler | None" = None
+        self._last_config: object = None
 
         sync_loggers = [lg for lg in loggers if isinstance(lg, LoggerCls) and not lg.async_ok]
         async_loggers = [lg for lg in loggers if isinstance(lg, LoggerCls) and lg.async_ok]
         new_pattern_loggers = [
             lg
             for lg in loggers
-            if isinstance(lg, LoggerCls) and getattr(lg, '_uses_new_pattern', False)
+            if isinstance(lg, LoggerCls) and getattr(lg, "_uses_new_pattern", False)
         ]
+        self._new_pattern_loggers = new_pattern_loggers
 
         for logger_obj in sync_loggers:
             logger_obj.initialize(training_program)
@@ -102,10 +104,7 @@ class LoggerDispatcher(LoggerDispatch):
         self._sync_callbacks = sync_callbacks.copy()
 
         needs_async_handler = (
-            async_callbacks
-            or save_all_steps
-            or keep_history_on_disk
-            or new_pattern_loggers
+            async_callbacks or save_all_steps or keep_history_on_disk or new_pattern_loggers
         )
         if async_logging and needs_async_handler:
             from biocomptools.async_logger_handler import AsyncLoggerHandler
@@ -141,10 +140,11 @@ class LoggerDispatcher(LoggerDispatch):
 
         # Build effective logger objects for sync detection (sync + async handler's loggers)
         self._effective_logger_objects: list[Logger] = list(self._sync_logger_objects)
-        if self._async_handler and hasattr(self._async_handler, 'logger_objects'):
+        if self._async_handler and hasattr(self._async_handler, "logger_objects"):
             self._effective_logger_objects.extend(self._async_handler.logger_objects)
 
     def on_start(self, config: object, stack: object) -> None:
+        self._last_config = config
         if self._async_handler:
             self._async_handler.process_start_loggers(config, stack)
         else:
@@ -155,11 +155,35 @@ class LoggerDispatcher(LoggerDispatch):
                 stack,
                 lambda p, s: p == 0,
             )
+            # New-pattern dispatch: call on_start for loggers with 0 in call_at
+            from biocomptools.logger_history import LoggerContext
+
+            for logger_obj in self._new_pattern_loggers:
+                if logger_obj.async_ok:
+                    continue
+                if 0 not in getattr(logger_obj, "call_at", [-1]):
+                    continue
+                name = type(logger_obj).__name__
+                try:
+                    context = LoggerContext(
+                        training_config=config,
+                        stack=stack,
+                        output_dir=None,
+                        current_step=0,
+                    )
+                    logger_obj.on_start(context)
+                except Exception as e:
+                    logger.error(f"on_start failed for {name}: {e}")
+                    logger.exception(e)
+                    raise
 
     def on_step(
         self, step: int, config: object, step_history: StepHistoryLike, stack: object
     ) -> None:
+        self._last_config = config
         self._run_callbacks(step, config, step_history, stack, _is_step_period)
+        # Dispatch on_batch for new-pattern sync loggers
+        self._dispatch_new_pattern_on_batch(step, config, step_history, stack)
 
     def on_end(
         self, step: int, config: object, step_history: StepHistoryLike, stack: object
@@ -168,40 +192,47 @@ class LoggerDispatcher(LoggerDispatch):
             self._run_callbacks(
                 step, config, step_history, stack, lambda p, s: p is None or p == -1
             )
+            # Dispatch on_end to new-pattern loggers (non-async path)
+            self._dispatch_new_pattern_on_end(step, config, step_history, stack)
 
     def needs_params_sync(self, step: int) -> bool:
         for logger_obj in self._effective_logger_objects:
-            period = getattr(logger_obj, 'periods', None)
-            if period is None:
-                period = getattr(logger_obj, 'frequency', 1)
-            if isinstance(period, list):
-                period = period[0] if period else 1
-            if period is not None and period > 0 and step > 0 and step % period == 0:
-                reqs = getattr(logger_obj, 'required_arrays', [])
-                if 'latest_params' in reqs:
+            interval = getattr(logger_obj, "call_at_interval", None)
+            call_at_set = set(getattr(logger_obj, "call_at", [-1]))
+            fires = (
+                (interval is not None and interval > 0 and step > 0 and step % interval == 0)
+                or (step > 0 and step in call_at_set)
+            )
+            if fires:
+                reqs = getattr(logger_obj, "required_arrays", [])
+                if "latest_params" in reqs:
                     return True
         return False
 
-    def shutdown(self, result: object, sync_callbacks: list[tuple[int, Callable]] | None = None) -> None:
+    def shutdown(
+        self, result: object, sync_callbacks: list[tuple[int, Callable]] | None = None
+    ) -> None:
         """Shutdown async handler and run final sync callbacks."""
         if self._async_handler:
-            effective_sync = sync_callbacks if sync_callbacks is not None else [
-                (p, cb) for p, cb in self._sync_callbacks
-                if p is None or p == -1
-            ]
+            effective_sync = (
+                sync_callbacks
+                if sync_callbacks is not None
+                else [(p, cb) for p, cb in self._sync_callbacks if p is None or p == -1]
+            )
             try:
                 step_history = _extract_final_step_history(result)
                 final_step = _extract_final_step_index(result)
+                config = getattr(self, "_last_config", None)
                 self._async_handler.process_end_loggers(
                     step=final_step,
-                    training_config=None,
+                    training_config=config,
                     step_history=step_history,
                     stack=None,
                 )
 
                 for period, callback in effective_sync:
                     if period is None or period == -1:
-                        callback(final_step, None, step_history=step_history, stack=None)
+                        callback(final_step, config, step_history=step_history, stack=None)
             finally:
                 self._async_handler.shutdown()
 
@@ -215,6 +246,98 @@ class LoggerDispatcher(LoggerDispatch):
     @property
     def async_handler(self) -> "AsyncLoggerHandler | None":
         return self._async_handler
+
+    def _dispatch_new_pattern_on_batch(
+        self,
+        step: int,
+        config: object,
+        step_history: StepHistoryLike,
+        stack: object,
+    ) -> None:
+        """Dispatch on_batch to new-pattern sync loggers at their declared interval."""
+        from biocomptools.logger_history import LoggerContext, HistoryManager
+
+        batch_loggers = [
+            lg
+            for lg in self._new_pattern_loggers
+            if not lg.async_ok  # only sync loggers handled here; async via handler
+        ]
+        if not batch_loggers:
+            return
+
+        # Lazily create HistoryManager for sync path
+        if not hasattr(self, "_history_manager"):
+            self._history_manager = HistoryManager(max_batches=10000)
+
+        normalized = ensure_step_history_snapshot(
+            step_history, context=f"new-pattern on_batch step_history at step {step}"
+        )
+        self._history_manager.append_from_step(step, dict(normalized))
+
+        for logger_obj in batch_loggers:
+            interval = logger_obj.call_at_interval
+            call_at_set = set(logger_obj.call_at)
+            should_fire = (
+                (interval is not None and interval > 0 and step > 0 and step % interval == 0)
+                or (step > 0 and step in call_at_set)
+            )
+            if not should_fire:
+                continue
+
+            view = self._history_manager.get_view(
+                window=logger_obj.history_window,
+            )
+            context = LoggerContext(
+                training_config=config,
+                stack=stack,
+                output_dir=None,
+                current_step=step,
+            )
+            name = type(logger_obj).__name__
+            try:
+                logger_obj.on_batch(view, context)
+            except Exception as e:
+                logger.error(f"on_batch failed for {name} at step {step}: {e}")
+                logger.exception(e)
+                raise
+
+    def _dispatch_new_pattern_on_end(
+        self,
+        step: int,
+        config: object,
+        step_history: StepHistoryLike,
+        stack: object,
+    ) -> None:
+        """Dispatch on_end to new-pattern loggers with -1 in call_at."""
+        from biocomptools.logger_history import LoggerContext, HistoryView, BatchData
+
+        end_loggers = [lg for lg in self._new_pattern_loggers if -1 in getattr(lg, "call_at", [-1])]
+        if not end_loggers:
+            return
+
+        normalized = ensure_step_history_snapshot(
+            step_history, context=f"new-pattern on_end step_history at step {step}"
+        )
+        context = LoggerContext(
+            training_config=config,
+            stack=stack,
+            output_dir=None,
+            current_step=step,
+            is_final=True,
+            extra={},
+        )
+        batch = BatchData.from_step_history(step, dict(normalized))
+        view = HistoryView([batch])
+
+        for logger_obj in end_loggers:
+            name = type(logger_obj).__name__
+            try:
+                logger.info(f"Running on_end for new-pattern logger: {name}")
+                logger_obj.on_end(view, context)
+            except Exception as e:
+                logger.error(f"on_end failed for {name}: {e}")
+                logger.exception(e)
+                raise
 
     def _run_callbacks(
         self,

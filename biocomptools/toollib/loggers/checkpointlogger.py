@@ -1,11 +1,12 @@
 import dill as pickle
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional
-from pydantic import Field
+from typing import Callable
+from pydantic import Field, PrivateAttr
 import jax
 
 from biocomp.jaxutils import tree_get
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -21,9 +22,10 @@ class CheckpointLogger(Logger):
         default=True,
         description="If True, saves parameters and optimizer state for resuming training.",
     )
+    required_arrays: list[str] = ["latest_params"]
 
-    _save_dir: Optional[Path] = None
-    _replicate_model_factory: Optional[Callable] = None
+    _save_dir: Path | None = PrivateAttr(default=None)
+    _replicate_model_factory: Callable[..., object] | None = PrivateAttr(default=None)
 
     def initialize(self, training_program):
         """Initializes the logger by setting up the output directory."""
@@ -32,62 +34,61 @@ class CheckpointLogger(Logger):
         self._replicate_model_factory = training_program.get_replicate_model_func()
         logger.debug(f"CheckpointLogger saving to {self._save_dir}")
 
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        """Returns the callback for saving checkpoints."""
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        if context.current_step == 0:
+            return
+        self._save(view, context)
 
-        def save_checkpoint(
-            step: int, training_config, step_history: Optional[dict] = None, **kwargs
-        ):
-            try:
-                if step == 0 or step_history is None:
-                    return
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        self._save(view, context)
 
-                if 'latest_params' not in step_history:
-                    # expected when checkpoint period doesn't align with sync points
-                    logger.debug(f"Skipping checkpoint at step {step}: not a sync point")
-                    return
+    def _save(self, view: HistoryView, context: LoggerContext) -> None:
+        latest = view.latest()
+        if latest is None:
+            return
+        step_history = view.to_step_history()
 
-                params = step_history['latest_params']
-                opt_state = step_history.get('opt_state')
-                losses = step_history.get('loss', [])
-                n_replicates = training_config.n_replicates
+        if "latest_params" not in step_history:
+            logger.debug(f"Skipping checkpoint at step {context.current_step}: not a sync point")
+            return
 
-                logger.info(f"Saving checkpoint for step {step}...")
+        try:
+            params = step_history["latest_params"]
+            opt_state = step_history.get("opt_state")
+            losses = step_history.get("loss", [])
+            n_replicates = context.training_config.n_replicates
+            step = context.current_step
 
-                for i in range(n_replicates):
-                    rep_params = tree_get(params, i)
-                    # safe check for None - avoid "truth value of array" error
-                    if rep_params is None:
-                        continue
+            logger.info(f"Saving checkpoint for step {step}...")
 
-                    # save the full BiocompModel
-                    assert self._replicate_model_factory is not None, (
-                        "CheckpointLogger._replicate_model_factory is not set. "
-                        "Ensure that the training program provides a model factory."
-                    )
-                    model = self._replicate_model_factory(
-                        all_params=params, all_losses=losses, replicate_id=i
-                    )
-                    # safe boolean check for model existence
-                    if model is not None:
-                        model_path = self._save_dir / f"step_{step:06d}_rep_{i}.model.pickle"
-                        model.save(model_path)
-                    else:
-                        logger.warning(f"Failed to create model for replicate {i} at step {step}")
+            for i in range(n_replicates):
+                rep_params = tree_get(params, i)
+                if rep_params is None:
+                    continue
 
-                    # save the raw training state for resuming
-                    if self.save_optimizer_state and opt_state is not None:
-                        rep_opt_state = tree_get(opt_state, i)
-                        state_dict = {
-                            'params': rep_params,
-                            'opt_state': rep_opt_state,
-                            'step': step,
-                        }
-                        state_path = self._save_dir / f"step_{step:06d}_rep_{i}.state.pickle"
-                        with open(state_path, 'wb') as f:
-                            pickle.dump(jax.device_get(state_dict), f)
-            except Exception as e:
-                logger.error(f"Error saving checkpoint at step {step}: {e}")
-                logger.exception(e)
+                assert self._replicate_model_factory is not None, (
+                    "CheckpointLogger._replicate_model_factory is not set. "
+                    "Ensure that the training program provides a model factory."
+                )
+                model = self._replicate_model_factory(
+                    all_params=params, all_losses=losses, replicate_id=i
+                )
+                if model is not None:
+                    model_path = self._save_dir / f"step_{step:06d}_rep_{i}.model.pickle"
+                    model.save(model_path)
+                else:
+                    logger.warning(f"Failed to create model for replicate {i} at step {step}")
 
-        return [(self.periods, save_checkpoint)]
+                if self.save_optimizer_state and opt_state is not None:
+                    rep_opt_state = tree_get(opt_state, i)
+                    state_dict = {
+                        "params": rep_params,
+                        "opt_state": rep_opt_state,
+                        "step": step,
+                    }
+                    state_path = self._save_dir / f"step_{step:06d}_rep_{i}.state.pickle"
+                    with open(state_path, "wb") as f:
+                        pickle.dump(jax.device_get(state_dict), f)
+        except Exception as e:
+            logger.error(f"Error saving checkpoint at step {context.current_step}: {e}")
+            logger.exception(e)

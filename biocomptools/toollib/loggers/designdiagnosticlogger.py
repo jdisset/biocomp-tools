@@ -8,6 +8,7 @@ from typing import Any, Literal, TYPE_CHECKING
 from pydantic import ConfigDict, PrivateAttr
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.toollib.loggers.utils import to_scalar as _to_scalar
 from biocomptools.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -91,23 +92,6 @@ def _build_transform_metadata(stack: ComputeStack) -> dict[str, list[list[str]]]
         metadata[ns] = node_tu_names
 
     return metadata
-
-
-def _to_scalar(val) -> float:
-    if val is None:
-        return float('nan')
-    if hasattr(val, 'shape'):
-        arr = np.asarray(val)
-        if arr.size == 0:
-            return float('nan')
-        if arr.size == 1:
-            return float(arr.item())
-        return float(np.nanmean(arr))
-    if hasattr(val, '__float__'):
-        return float(val)
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        return float(np.nanmean(val))
-    return float(val) if val is not None else float('nan')
 
 
 def unroll_dict(d: dict, prefix: str = "") -> dict[str, float]:
@@ -446,7 +430,7 @@ class DesignDiagnosticLogger(Logger):
     # configuration
     output_dir: str | None = None
     history_dir: str | None = None  # For replay: directory containing step_*.pkl files
-    periods: int = 10
+    call_at_interval: int = 10
     max_history_len: int = 100
     generate_plots: bool = True
     final_figure_only: bool = False
@@ -472,9 +456,7 @@ class DesignDiagnosticLogger(Logger):
     deferred_figures: bool = False  # if True, queue figures instead of generating
 
     # new pattern attributes
-    frequency: int = 10
     history_window: int | None = 50
-    call_at_end: bool = True
     required_metrics: list[str] = [
         'loss',
         'all_losses',
@@ -1394,7 +1376,12 @@ class DesignDiagnosticLogger(Logger):
                 if step_history:
                     self._save_summary_json(step, step_history, final_dir / "summary.json")
 
-        return [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         if not self._history:

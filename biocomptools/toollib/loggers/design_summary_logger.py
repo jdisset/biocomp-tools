@@ -43,8 +43,7 @@ class DesignSummaryLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    log_period: int = 500
-    log_at_end: bool = True
+    call_at_interval: int = 500
     topk_per_target: int = 3
     output_formats: list[str] = ["png"]
     grid_resolution: tuple[int, int] = (48, 48)
@@ -429,20 +428,21 @@ class DesignSummaryLogger(Logger):
                 return
             self._generate_summaries(step, params, stack, all_losses, is_final=False)
 
-        callbacks = [(self.log_period, periodic_callback)]
-        if self.log_at_end:
+        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
+            if step_history is None:
+                return
+            all_losses, params = (
+                step_history.get('all_losses'),
+                step_history.get('latest_params'),
+            )
+            if all_losses is None or params is None:
+                return
+            self._generate_summaries(step, params, stack, all_losses, is_final=True)
 
-            def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-                if step_history is None:
-                    return
-                all_losses, params = (
-                    step_history.get('all_losses'),
-                    step_history.get('latest_params'),
-                )
-                if all_losses is None or params is None:
-                    return
-                self._generate_summaries(step, params, stack, all_losses, is_final=True)
-
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
             callbacks.append((-1, final_callback))
         return callbacks
 

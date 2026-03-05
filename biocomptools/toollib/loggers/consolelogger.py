@@ -1,8 +1,7 @@
 ## {{{                          --     imports     --
 
-from dracon.deferred import DeferredNode
 import numpy as np
-from typing import List, Tuple, Callable, Literal, TypeVar
+from typing import Literal
 from pydantic import PrivateAttr
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.logger_history import HistoryView, LoggerContext
@@ -13,9 +12,6 @@ logger = get_logger(__name__)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-T = TypeVar('T')
-MaybeDeferred = DeferredNode[T] | T
-
 
 class EnhancedConsoleLogger(Logger):
     """Logs and visualizes training loss with historical tracking.
@@ -25,7 +21,7 @@ class EnhancedConsoleLogger(Logger):
     """
 
     # new pattern attributes
-    frequency: int = 10
+    call_at_interval: int = 10
     history_mode: Literal["window", "since_last", "all"] = "all"
     history_window: int | None = None
     required_metrics: list[str] = []
@@ -39,7 +35,7 @@ class EnhancedConsoleLogger(Logger):
 
     # internal state
     _design_mode: bool = PrivateAttr(default=False)
-    _best_mean_loss: float = PrivateAttr(default=float('inf'))
+    _best_mean_loss: float = PrivateAttr(default=float("inf"))
 
     def on_batch(self, view: HistoryView, context: LoggerContext):
         if view.n_batches == 0:
@@ -49,11 +45,11 @@ class EnhancedConsoleLogger(Logger):
         if latest is None:
             return
 
-        current_losses = latest.arrays.get('loss')
+        current_losses = latest.arrays.get("loss")
         if current_losses is None:
             return
 
-        all_losses = latest.arrays.get('all_losses')
+        all_losses = latest.arrays.get("all_losses")
         if all_losses is not None:
             self._design_mode = True
 
@@ -151,7 +147,7 @@ class EnhancedConsoleLogger(Logger):
         replicate_histories: dict[int, list[float]] = {}
 
         for batch in view.iter_batches():
-            loss_arr = batch.arrays.get('loss')
+            loss_arr = batch.arrays.get("loss")
             if loss_arr is None:
                 continue
             loss_arr = np.asarray(loss_arr)
@@ -166,7 +162,7 @@ class EnhancedConsoleLogger(Logger):
         if not replicate_histories:
             return
 
-        colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'white']
+        colors = ["red", "green", "blue", "yellow", "magenta", "cyan", "white"]
         all_positive = True
 
         for rep_id, losses in replicate_histories.items():
@@ -193,7 +189,7 @@ class EnhancedConsoleLogger(Logger):
         # collect design losses history from view
         design_history: list[tuple[int, np.ndarray]] = []
         for batch in view.iter_batches():
-            all_losses = batch.arrays.get('all_losses')
+            all_losses = batch.arrays.get("all_losses")
             if all_losses is None:
                 continue
             all_losses = np.asarray(all_losses)
@@ -221,7 +217,7 @@ class EnhancedConsoleLogger(Logger):
         plt.subplots(n_rows, n_cols)
         plt.plot_size(self.plot_width, self.plot_height * n_rows)
 
-        colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'white', 'orange']
+        colors = ["red", "green", "blue", "yellow", "magenta", "cyan", "white", "orange"]
 
         for target_id in range(n_targets):
             plt.subplot(target_id // n_cols + 1, target_id % n_cols + 1)
@@ -265,24 +261,25 @@ class EnhancedConsoleLogger(Logger):
 
 
 class ConsoleLogger(Logger):
-    """Logs the training loss to console"""
+    """Logs the training loss to console."""
 
+    call_at_interval: int = 1
     async_ok: bool = False
+    required_arrays: list[str] = ["loss"]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        def log_loss(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is not None:
-                losses = step_history.get('loss')
-                if losses is not None:
-                    for i, loss in enumerate(losses):
-                        avg_loss = np.mean(loss)
-                        min_loss = np.min(loss)
-                        max_loss = np.max(loss)
-                        logger.debug(
-                            f"Step {step}, Replicate {i}: Avg loss: {avg_loss:.4f}, Min loss: {min_loss:.4f}, Max loss: {max_loss:.4f}"
-                        )
-
-        return [(self.periods, log_loss)]
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        latest = view.latest()
+        if latest is None:
+            return
+        losses = latest.arrays.get("loss")
+        if losses is None:
+            return
+        losses = np.asarray(losses)
+        for i, loss in enumerate(losses):
+            avg_loss = np.mean(loss)
+            min_loss = np.min(loss)
+            max_loss = np.max(loss)
+            logger.debug(
+                f"Step {context.current_step}, Replicate {i}: "
+                f"Avg loss: {avg_loss:.4f}, Min loss: {min_loss:.4f}, Max loss: {max_loss:.4f}"
+            )

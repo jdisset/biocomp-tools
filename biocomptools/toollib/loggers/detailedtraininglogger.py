@@ -1,11 +1,14 @@
 ## {{{                          --     imports     --
 
+from __future__ import annotations
+
 from biocomptools.toollib.loggers.base_metrics_logger import BaseMetricsLogger
 from biocomptools.toollib.loggers.metrics_models import ReplicateMetrics, NetworkDataPairMetrics
 from biocomptools.logging_config import get_logger
 from biocomp.datautils import DataManager
 import numpy as np
-from typing import List, Tuple, Callable, Optional, Dict, Any
+from typing import Any
+from pydantic import PrivateAttr
 from rich.table import Table
 
 logger = get_logger(__name__)
@@ -14,21 +17,12 @@ logger = get_logger(__name__)
 
 
 class DetailedTrainingStatsLogger(BaseMetricsLogger):
-    """
-    Logs detailed training statistics during training, computing RMSE and MSE
-    for both overall training set and per-networkdatapair if y and yhat are available
-    in the step history.
+    """Logs detailed training statistics (RMSE, MSE, per-network metrics).
 
-    Requirements:
-    - training_config.keep_in_history must include both "y" and "yhat"
-
-    Usage:
-        logger = DetailedTrainingStatsLogger(periods=10)  # Log every 10 steps
-        training_program.loggers.append(logger)
+    Requires training_config.keep_in_history to include "y" and "yhat".
     """
 
-    # Additional fields specific to this logger
-    _data_manager: Optional[DataManager] = None
+    _data_manager: DataManager | None = PrivateAttr(default=None)
 
     def initialize(self, training_program):
         """Initialize from training program."""
@@ -37,7 +31,7 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
         if training_program:
             self._data_manager = training_program._training_dman
 
-    def _compute_metrics(self, step_data: Dict[str, Any]) -> List[ReplicateMetrics]:
+    def _compute_metrics(self, step_data: dict[str, Any]) -> list[ReplicateMetrics]:
         """
         Compute RMSE and MSE metrics for training data from step_data.
 
@@ -50,11 +44,11 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
         import numpy as np
 
         # Check if y and yhat are available
-        if 'y' not in step_data or 'yhat' not in step_data:
+        if "y" not in step_data or "yhat" not in step_data:
             return []
 
-        y = step_data['y']
-        yhat = step_data['yhat']
+        y = step_data["y"]
+        yhat = step_data["yhat"]
 
         metrics_list = []
         n_replicates = y.shape[0]
@@ -72,33 +66,35 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
             mse = float(np.mean((y_rep - yhat_rep) ** 2))
             rmse = float(np.sqrt(mse))
 
-            # Debug logging to trace data values
-            logger.info(f"Rep {rep_idx}: DetailedTraining - y_rep stats: mean={y_rep.mean():.6f}, std={y_rep.std():.6f}, shape={y_rep.shape}")
-            logger.info(f"Rep {rep_idx}: DetailedTraining - yhat_rep stats: mean={yhat_rep.mean():.6f}, std={yhat_rep.std():.6f}")
+            logger.debug(
+                f"Rep {rep_idx}: y_rep stats: mean={y_rep.mean():.6f}, std={y_rep.std():.6f}, shape={y_rep.shape}"
+            )
+            logger.debug(
+                f"Rep {rep_idx}: yhat_rep stats: mean={yhat_rep.mean():.6f}, std={yhat_rep.std():.6f}"
+            )
             if y_rep.shape[0] >= 5:
-                logger.info(f"Rep {rep_idx}: DetailedTraining - First 5 y values: {y_rep[:5, 0]}")
-                logger.info(f"Rep {rep_idx}: DetailedTraining - First 5 yhat values: {yhat_rep[:5, 0]}")
+                logger.debug(f"Rep {rep_idx}: First 5 y values: {y_rep[:5, 0]}")
+                logger.debug(f"Rep {rep_idx}: First 5 yhat values: {yhat_rep[:5, 0]}")
 
             # Debug: compare with sublosses RMSE if available
-            if 'sublosses' in step_data and step_data['sublosses'] is not None:
-                if 'rmse' in step_data['sublosses']:
+            if "sublosses" in step_data and step_data["sublosses"] is not None:
+                if "rmse" in step_data["sublosses"]:
                     # step_data['sublosses']['rmse'] has shape (n_replicates, batches_per_step)
                     # Each element is the RMSE computed for one batch for one replicate
-                    subloss_rmse_values = step_data['sublosses']['rmse']
+                    subloss_rmse_values = step_data["sublosses"]["rmse"]
 
                     # Extract RMSE values for this specific replicate
                     replicate_rmse_values = subloss_rmse_values[
                         rep_idx
                     ]  # Shape: (batches_per_step,)
                     avg_subloss_rmse = float(np.mean(replicate_rmse_values))
-                    logger.info(
-                        f"Rep {rep_idx}: Training Logger RMSE = {rmse:.6f}, Avg Sublosses RMSE = {avg_subloss_rmse:.6f}, Ratio = {avg_subloss_rmse / rmse:.2f}"
+                    logger.debug(
+                        f"Rep {rep_idx}: Logger RMSE={rmse:.6f}, Sublosses RMSE={avg_subloss_rmse:.6f}, Ratio={avg_subloss_rmse / rmse:.2f}"
                     )
-                    logger.info(
-                        f"Rep {rep_idx}: Full step_data shapes - y: {y.shape}, yhat: {yhat.shape}"
+                    logger.debug(
+                        f"Rep {rep_idx}: shapes - y: {y.shape}, yhat: {yhat.shape}, sublosses_rmse: {subloss_rmse_values.shape}"
                     )
-                    logger.info(f"Rep {rep_idx}: Sublosses RMSE shape: {subloss_rmse_values.shape}")
-                    logger.info(
+                    logger.debug(
                         f"Rep {rep_idx}: This replicate's RMSE values: {replicate_rmse_values}"
                     )
 
@@ -117,20 +113,13 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
                         per_batch_rmses.append(batch_rmse)
 
                     avg_per_batch_rmse = np.mean(per_batch_rmses)
-                    logger.info(
-                        f"Rep {rep_idx}: Manually computed avg per-batch RMSE = {avg_per_batch_rmse:.6f}"
+                    logger.debug(
+                        f"Rep {rep_idx}: Per-batch RMSE={avg_per_batch_rmse:.6f}, "
+                        f"vs Sublosses ratio={avg_per_batch_rmse / avg_subloss_rmse:.6f}"
                     )
-                    logger.info(
+                    logger.debug(
                         f"Rep {rep_idx}: Individual batch RMSEs: {[f'{r:.6f}' for r in per_batch_rmses]}"
                     )
-                    logger.info(
-                        f"Rep {rep_idx}: Manual vs Sublosses RMSE ratio = {avg_per_batch_rmse / avg_subloss_rmse:.6f}"
-                    )
-
-                    # The key question: why is avg_per_batch_rmse different from the training logger rmse?
-                    # Training logger: sqrt(mean(all_errors^2))
-                    # Per-batch average: mean(sqrt(mean(batch_errors^2)))
-                    # These are mathematically different due to Jensen's inequality!
 
             # compute per-networkdatapair metrics if data manager available
             per_network_list = []
@@ -147,12 +136,12 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
 
             # Extract sublosses for this replicate if available
             sublosses_data = None
-            if 'sublosses' in step_data and step_data['sublosses'] is not None:
+            if "sublosses" in step_data and step_data["sublosses"] is not None:
                 try:
                     # sublosses is shape (n_replicates, n_batches_per_step) for each loss component
                     sublosses_rep = {}
-                    for loss_name, loss_values in step_data['sublosses'].items():
-                        if hasattr(loss_values, 'shape') and len(loss_values.shape) >= 1:
+                    for loss_name, loss_values in step_data["sublosses"].items():
+                        if hasattr(loss_values, "shape") and len(loss_values.shape) >= 1:
                             # Average over batches for this replicate
                             avg_loss = float(np.mean(loss_values[rep_idx]))
                             sublosses_rep[loss_name] = avg_loss
@@ -175,7 +164,7 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
 
     def _compute_per_network_metrics(
         self, y: np.ndarray, yhat: np.ndarray, data_manager, replicate: int
-    ) -> List[NetworkDataPairMetrics]:
+    ) -> list[NetworkDataPairMetrics]:
         """Compute RMSE and MSE for each network-datapair"""
         per_network_metrics = []
 
@@ -187,24 +176,26 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
             per_net_yhat = np.split(yhat, slice_at_y, axis=1)
 
             # Compute metrics for each network
-            for i, (net_y, net_yhat, network) in enumerate(zip(per_net_y, per_net_yhat, networks, strict=True)):
+            for i, (net_y, net_yhat, network) in enumerate(
+                zip(per_net_y, per_net_yhat, networks, strict=True)
+            ):
                 if net_y.size > 0:  # Only compute if there's data
                     mse = np.mean((net_y - net_yhat) ** 2)
                     rmse = np.sqrt(mse)
                     network_name = network.name
 
-                    # Debug logging for per-network
-                    if i == 0:  # Log first network
-                        logger.info(f"DetailedTraining Per-Network {network_name} - net_y stats: mean={net_y.mean():.6f}, std={net_y.std():.6f}, shape={net_y.shape}")
-                        logger.info(f"DetailedTraining Per-Network {network_name} - net_yhat stats: mean={net_yhat.mean():.6f}, std={net_yhat.std():.6f}")
-                        if net_y.shape[0] >= 5:
-                            logger.info(f"DetailedTraining Per-Network {network_name} - First 5 y: {net_y[:5, 0]}")
-                            logger.info(f"DetailedTraining Per-Network {network_name} - First 5 yhat: {net_yhat[:5, 0]}")
+                    if i == 0:
+                        logger.debug(
+                            f"Per-Network {network_name}: y mean={net_y.mean():.6f} std={net_y.std():.6f} shape={net_y.shape}"
+                        )
+                        logger.debug(
+                            f"Per-Network {network_name}: yhat mean={net_yhat.mean():.6f} std={net_yhat.std():.6f}"
+                        )
                     networkdatapair = {
-                        'network_name': network_name,
-                        'network_hash': getattr(network, 'hash', ''),
-                        'n_inputs': network.get_nb_inputs(),
-                        'n_outputs': network.get_nb_outputs(),
+                        "network_name": network_name,
+                        "network_hash": getattr(network, "hash", ""),
+                        "n_inputs": network.get_nb_inputs(),
+                        "n_outputs": network.get_nb_outputs(),
                     }
                     per_network_metrics.append(
                         NetworkDataPairMetrics(
@@ -223,7 +214,7 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
 
         return per_network_metrics
 
-    def _print_metrics(self, step: int, metrics: List[ReplicateMetrics]):
+    def _print_metrics(self, step: int, metrics: list[ReplicateMetrics]):
         """Print training statistics in a formatted table."""
         if not metrics:
             return
@@ -283,29 +274,6 @@ class DetailedTrainingStatsLogger(BaseMetricsLogger):
                     sublosses_table.add_row(*row)
 
             self._console.print(sublosses_table)
-
-    def get_callbacks(self, training_program) -> List[Tuple[int, Callable]]:
-        self.initialize(training_program)
-
-        def log_training_stats(step, training_config, step_history=None, **kwargs):
-            if step_history is None:
-                return
-
-            if 'y' not in step_history or 'yhat' not in step_history:
-                if step > 0:
-                    logger.debug(
-                        f"DetailedTrainingStatsLogger {self.name}: y/yhat not available at step {step}"
-                    )
-                return
-            logger.info(
-                f"DetailedTrainingStatsLogger {self.name}: Computing training statistics at step {step}"
-            )
-
-            # Use the base class method to handle metrics computation and plotting
-            training_loss = step_history.get('loss')
-            self._log_metrics_step(step, step_history, training_loss)
-
-        return [(self.periods, log_training_stats)]
 
     def finalize(self):
         """Create video from training metrics plots and call parent finalize."""

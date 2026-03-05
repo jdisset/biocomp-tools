@@ -245,7 +245,12 @@ class NSGA2DesignLogger(Logger):
             if self.print_predictions and step_history.get("yhatdep") is not None:
                 self._print_top_predictions(step_history, pareto_fitness)
 
-        return [(self.periods, periodic_callback), (-1, final_callback)]
+        callbacks = []
+        if self.call_at_interval is not None:
+            callbacks.append((self.call_at_interval, periodic_callback))
+        if -1 in self.call_at:
+            callbacks.append((-1, final_callback))
+        return callbacks
 
     def _save_pareto_data(self, pareto_front: np.ndarray | None, pareto_fitness: np.ndarray):
         """Save pareto front data to files."""

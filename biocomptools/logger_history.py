@@ -145,6 +145,7 @@ class LoggerContext:
     is_replay: bool = False
     is_final: bool = False
     dmanager: Any = None  # design manager if available
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class HistoryView:

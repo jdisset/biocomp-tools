@@ -91,8 +91,8 @@ class TestRecipeSerialization:
 class TestDesignSummaryLogger:
     def test_logger_initialization(self):
         from biocomptools.toollib.loggers.design_summary_logger import DesignSummaryLogger
-        logger = DesignSummaryLogger(log_period=100, topk_per_target=3)
-        assert logger.log_period == 100 and logger.topk_per_target == 3
+        logger = DesignSummaryLogger(call_at_interval=100, topk_per_target=3)
+        assert logger.call_at_interval == 100 and logger.topk_per_target == 3
 
     def test_top_candidates_extraction(self):
         import jax.numpy as jnp

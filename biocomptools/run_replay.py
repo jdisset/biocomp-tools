@@ -149,16 +149,12 @@ class ReplayJob(BaseModel):
 
         # Configure loggers for replay
         for lg in loggers:
-            if hasattr(lg, 'frequency'):
-                lg.frequency = self.period
-            if hasattr(lg, 'periods'):
-                lg.periods = self.period
+            if hasattr(lg, 'call_at_interval'):
+                lg.call_at_interval = self.period
             if hasattr(lg, 'history_window'):
                 lg.history_window = self.max_history_len
             if hasattr(lg, 'final_figure_only'):
                 lg.final_figure_only = self.final_only
-            if hasattr(lg, 'call_at_end'):
-                lg.call_at_end = True
 
         # Count available steps
         all_steps = _get_all_steps(history_dir)

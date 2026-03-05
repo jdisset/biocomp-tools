@@ -93,7 +93,6 @@ def test_integration_shutdown_end_callback_receives_snapshot():
     from biocomptools.logger_dispatch import LoggerDispatcher
 
     class _CaptureEndLogger(Logger):
-        periods: int = -1
         async_ok: bool = False
         captured_loss: float | None = None
         captured_type: str | None = None

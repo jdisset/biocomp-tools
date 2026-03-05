@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING, Any
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future, as_completed
 from threading import Thread, Lock
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import multiprocessing as mp
 
 import dill
@@ -130,7 +130,7 @@ class AsyncLoggerHandler(BaseModel):
     # that can't be properly type-annotated (Lock is a function, not a class)
     tmpdir: Path | None = Field(exclude=True, default=None)
     cleanup_tmpdir: bool = Field(exclude=True, default=True)
-    step_queue: Any = Field(exclude=True, default=None)  # queue.Queue[int | None]
+    step_queue: Any = Field(exclude=True, default=None)  # queue.Queue[dict | None]
     results_queue: Any = Field(exclude=True, default=None)  # queue.Queue[CallbackResult]
     should_stop: bool = Field(exclude=True, default=False)
     thread_executor: ThreadPoolExecutor | None = Field(exclude=True, default=None)
@@ -183,6 +183,12 @@ class AsyncLoggerHandler(BaseModel):
 
         self.embedding_snapshots = deque(maxlen=10000)
         self._history_manager = HistoryManager(max_batches=10000)
+
+        # Cache for immutable objects — written once, read by consumer (Fix 2)
+        self._cached_stack: Any = None
+        self._cached_training_config: Any = None
+        # Single-slot latest params cache for dispatch injection (Fix 3)
+        self._latest_params_for_dispatch: Any = None
 
         # Build logger lookup
         self.loggers_by_name = {}
@@ -246,62 +252,103 @@ class AsyncLoggerHandler(BaseModel):
             return period is not None and period > 0 and step > 0 and step % period == 0
 
     def _consumer_loop(self):
-        """Consumer thread: batch steps and dispatch to workers."""
+        """Consumer thread: batch data items and dispatch to workers.
+
+        Receives raw data dicts from the in-memory queue (put by the main-thread
+        callback) and performs all heavy work: normalization, snapshot extraction,
+        disk I/O, history accumulation, and logger dispatch.
+        """
         while not self.should_stop:
-            # Batch collection with timeout
-            batch = []
+            batch: list[dict[str, Any]] = []
             deadline = time.time() + 0.1  # 100ms batch window
 
             while len(batch) < self.batch_size and time.time() < deadline:
                 try:
-                    step = self.step_queue.get(timeout=0.05)
-                    if step is None:  # Shutdown signal
+                    data_item = self.step_queue.get(timeout=0.05)
+                    if data_item is None:  # Shutdown signal
                         self.should_stop = True
                         break
-                    batch.append(step)
+                    batch.append(data_item)
                 except queue.Empty:
                     continue
 
             if not batch:
                 continue
 
-            # Process batch
-            logger.debug(f"Processing batch of {len(batch)} steps: {batch}")
+            logger.debug(f"Processing batch of {len(batch)} steps: {[d['step'] for d in batch]}")
             self._process_batch(batch)
 
-    def _process_batch(self, steps: list[int]) -> None:
-        """Process a batch of steps, dispatching to appropriate executors."""
+    def _process_batch(self, items: list[dict[str, Any]]) -> None:
+        """Process a batch of data items from the in-memory queue.
+
+        All heavy work happens here on the consumer thread:
+        - Step history normalization (Fix 1: moved from main thread)
+        - Quantization snapshot extraction (Fix 1: moved from main thread)
+        - Disk save without stack/config (Fix 2: immutable caching)
+        - History accumulation without latest_params (Fix 3: memory management)
+        - Legacy and new-pattern logger dispatch
+        """
         assert self.thread_executor is not None, "Thread executor must be initialized"
         assert self.process_executor is not None, "Process executor must be initialized"
-        assert self.tmpdir is not None, "AsyncLoggerHandler.tmpdir must be initialized"
         futures: list[tuple[int, str, Future[Any], str]] = []
 
-        for step in steps:
-            step_file = self.tmpdir / f"step_{step:06d}.pkl"
-            if not step_file.exists():
-                logger.warning(f"Step file not found: {step_file}")
-                continue
+        for data_item in items:
+            step = data_item["step"]
+            raw_step_history = data_item.get("step_history")
+            timestamp = float(data_item.get("timestamp", 0.0))
 
-            data = self._load_step_data(step_file)
-
-            # Accumulate into HistoryManager for new-pattern loggers
-            raw_step_history = data.get("step_history")
+            # Normalize step history on consumer thread (Fix 1)
+            sh_snapshot = None
             if raw_step_history is not None:
-                sh_dict = dict(
-                    ensure_step_history_snapshot(
-                        raw_step_history,
-                        context=f"history accumulation at step {step}",
-                    )
+                sh_snapshot = ensure_step_history_snapshot(
+                    raw_step_history,
+                    context=f"consumer step_history at step {step}",
                 )
+                sh_dict = dict(sh_snapshot)
+
+                # Extract embedding snapshots on consumer thread (Fix 1)
+                snapshot = self._extract_quantization_snapshot(sh_dict)
+                if snapshot:
+                    self.embedding_snapshots.append((step, snapshot))
+
+                # Cache latest_params before stripping (Fix 3)
+                if "latest_params" in sh_dict:
+                    self._latest_params_for_dispatch = sh_dict["latest_params"]
+
+                # Strip heavy arrays before HistoryManager accumulation (Fix 3):
+                # latest_params and opt_state would otherwise be kept in the deque
+                # for up to 10,000 entries, preventing GC of old parameter states.
+                sh_dict_for_history = {
+                    k: v for k, v in sh_dict.items() if k not in ("latest_params", "opt_state")
+                }
                 self._history_manager.append_from_step(
                     step=step,
-                    step_history=sh_dict,
-                    timestamp=float(data.get("timestamp", 0.0)),
+                    step_history=sh_dict_for_history,
+                    timestamp=timestamp,
                 )
+
+            # Save to disk if configured — without stack/config (Fix 2)
+            if self.keep_history_on_disk or self.save_all_steps:
+                disk_data: dict[str, object] = {
+                    "step": step,
+                    "step_history": sh_snapshot,
+                    "timestamp": timestamp,
+                }
+                self._save_step_data(step, disk_data)
+
+            # Build full data dict with cached immutable objects for dispatch (Fix 2)
+            data: dict[str, object] = {
+                "step": step,
+                "training_config": self._cached_training_config,
+                "step_history": sh_snapshot,
+                "stack": self._cached_stack,
+                "timestamp": timestamp,
+            }
 
             # Dispatch on_batch for new-pattern async loggers
             self._dispatch_new_pattern_on_batch(step, data)
 
+            # Legacy callback dispatch
             for period, callback, logger_obj in self.logger_callbacks:
                 if not self._should_run_callback(period, step, "regular"):
                     continue
@@ -332,8 +379,6 @@ class AsyncLoggerHandler(BaseModel):
                     )
                     futures.append((step, logger_name, future, mode))
 
-            self._cleanup_step_file(step_file)
-
         # Collect futures
         for step, logger_name, future, mode in futures:
             try:
@@ -359,33 +404,78 @@ class AsyncLoggerHandler(BaseModel):
                     )
                 )
 
+    def _build_extra(self, required_keys: set[str]) -> dict[str, Any]:
+        """Build extra context dict for loggers, producing only requested keys.
+
+        Register new accumulated state here; loggers declare what they need
+        via ``required_extra``.
+        """
+        extra: dict[str, Any] = {}
+        if "embedding_snapshots" in required_keys:
+            extra["embedding_snapshots"] = list(self.embedding_snapshots)
+        return extra
+
     def _dispatch_new_pattern_on_batch(self, step: int, data: dict[str, object]) -> None:
-        """Dispatch on_batch to new-pattern async loggers via thread pool (fire-and-forget)."""
+        """Dispatch on_batch to new-pattern async loggers via thread pool (fire-and-forget).
+
+        For loggers that declare ``required_arrays: ["latest_params"]``, the cached
+        latest_params are injected into the view's latest batch via dataclasses.replace.
+        This avoids accumulating params in the HistoryManager deque (Fix 3).
+        """
         assert self.thread_executor is not None, "Thread executor must be initialized"
+
+        # Collect loggers that will fire this step
+        firing: list[Logger] = []
         for logger_obj in self.logger_objects:
             if not getattr(logger_obj, "_uses_new_pattern", False):
                 continue
-            # Sync loggers (async_ok=False) are dispatched by LoggerDispatcher
             if not logger_obj.async_ok:
                 continue
-            freq = getattr(logger_obj, "frequency", 1)
-            # Skip end-only loggers
-            if freq <= 0:
+            interval = getattr(logger_obj, "call_at_interval", None)
+            call_at_set = set(getattr(logger_obj, "call_at", [-1]))
+            should_fire = (
+                interval is not None and interval > 0 and step > 0 and step % interval == 0
+            ) or (step > 0 and step in call_at_set)
+            if not should_fire:
                 continue
-            if getattr(logger_obj, "call_at_end", False) and freq <= 0:
-                continue
-            if step > 0 and step % freq != 0:
-                continue
+            firing.append(logger_obj)
 
+        if not firing:
+            return
+
+        # Build shared extra from union of required_extra across firing loggers
+        required = set()
+        for lg in firing:
+            required.update(getattr(lg, "required_extra", []))
+        extra = self._build_extra(required)
+
+        context = LoggerContext(
+            training_config=data.get("training_config"),
+            stack=data.get("stack"),
+            output_dir=self.base_dir,
+            current_step=step,
+            extra=extra,
+        )
+
+        for logger_obj in firing:
             view = self._history_manager.get_view(
                 window=getattr(logger_obj, "history_window", None),
             )
-            context = LoggerContext(
-                training_config=data.get("training_config"),
-                stack=data.get("stack"),
-                output_dir=self.base_dir,
-                current_step=step,
-            )
+
+            # Inject cached latest_params into view's latest batch (Fix 3).
+            # The view._batches is a new list (from get_view), so replacing the
+            # last element doesn't mutate the HistoryManager's deque.
+            needs_params = "latest_params" in getattr(logger_obj, "required_arrays", [])
+            if needs_params and self._latest_params_for_dispatch is not None and view._batches:
+                latest_batch = view._batches[-1]
+                view._batches[-1] = replace(
+                    latest_batch,
+                    arrays={
+                        **latest_batch.arrays,
+                        "latest_params": self._latest_params_for_dispatch,
+                    },
+                )
+
             name = type(logger_obj).__name__
 
             def _on_done(fut: Future[Any], _name: str = name, _step: int = step) -> None:
@@ -507,7 +597,13 @@ class AsyncLoggerHandler(BaseModel):
         return result
 
     def create_callback(self) -> Callable[..., None]:
-        """Create callback for training loop to call on each step."""
+        """Create callback for training loop to call on each step.
+
+        The callback is lightweight: it caches immutable objects (stack, config)
+        and queues raw data references to the consumer thread via an in-memory
+        queue. All heavy work (normalization, snapshot extraction, disk I/O)
+        happens on the consumer thread.
+        """
 
         def async_callback(
             step: int,
@@ -515,15 +611,11 @@ class AsyncLoggerHandler(BaseModel):
             step_history: StepHistoryLike | None = None,
             stack: object = None,
         ) -> None:
-            # Accumulate lightweight quantization snapshot for trajectory tracking
-            # (always, regardless of whether any logger triggers this step)
-            if step_history is not None:
-                sh_dict = dict(
-                    ensure_step_history_snapshot(step_history, context=f"snapshot at step {step}")
-                )
-                snapshot = self._extract_quantization_snapshot(sh_dict)
-                if snapshot:
-                    self.embedding_snapshots.append((step, snapshot))
+            # Cache immutable objects on first call (Fix 2)
+            if self._cached_stack is None and stack is not None:
+                self._cached_stack = stack
+            if self._cached_training_config is None and training_config is not None:
+                self._cached_training_config = training_config
 
             # Check if any logger needs this step (legacy callbacks)
             triggering = []
@@ -537,8 +629,11 @@ class AsyncLoggerHandler(BaseModel):
                     continue
                 if not logger_obj.async_ok:
                     continue  # sync loggers dispatched by LoggerDispatcher
-                freq = getattr(logger_obj, "frequency", 1)
-                if freq > 0 and step > 0 and step % freq == 0:
+                interval = getattr(logger_obj, "call_at_interval", None)
+                call_at_set = set(getattr(logger_obj, "call_at", [-1]))
+                if (
+                    interval is not None and interval > 0 and step > 0 and step % interval == 0
+                ) or (step > 0 and step in call_at_set):
                     triggering.append(type(logger_obj).__name__)
 
             should_save = self.save_all_steps or bool(triggering)
@@ -547,29 +642,27 @@ class AsyncLoggerHandler(BaseModel):
 
             logger.debug(f"Step {step}: queueing for {triggering or 'all'}")
 
-            normalized_step_history = (
-                None
-                if step_history is None
-                else ensure_step_history_snapshot(
-                    step_history,
-                    context=f"async callback step_history at step {step}",
-                )
+            # Queue raw data for consumer thread (Fix 1: no serialization on main thread).
+            # step_history contains concrete JAX arrays (immutable after block_until_ready)
+            # so passing by reference to the consumer thread is safe.
+            self.step_queue.put(
+                {
+                    "step": step,
+                    "step_history": step_history,
+                    "timestamp": time.time(),
+                }
             )
-
-            data = {
-                "step": step,
-                "training_config": training_config,
-                "step_history": normalized_step_history,
-                "stack": stack,
-                "timestamp": time.time(),
-            }
-            self._save_step_data(step, data)
-            self.step_queue.put(step)
 
         return async_callback
 
     def process_start_loggers(self, training_config: object, stack: object) -> None:
         """Process start-only loggers (period=0)."""
+        # Cache immutable objects early (before any steps are queued)
+        if self._cached_stack is None:
+            self._cached_stack = stack
+        if self._cached_training_config is None:
+            self._cached_training_config = training_config
+
         logger.info("Processing start loggers...")
         for period, callback, logger_obj in self.logger_callbacks:
             if self._should_run_callback(period, 0, "start"):
@@ -582,6 +675,28 @@ class AsyncLoggerHandler(BaseModel):
                 except Exception as e:
                     logger.error(f"Start logger {name} failed: {e}")
                     raise
+
+        # New-pattern dispatch: call on_start for loggers with 0 in call_at
+        from biocomptools.logger_history import LoggerContext
+
+        for logger_obj in self.logger_objects:
+            if not getattr(logger_obj, "_uses_new_pattern", False):
+                continue
+            if 0 not in getattr(logger_obj, "call_at", [-1]):
+                continue
+            name = type(logger_obj).__name__
+            try:
+                context = LoggerContext(
+                    training_config=training_config,
+                    stack=stack,
+                    output_dir=self.base_dir,
+                    current_step=0,
+                )
+                logger_obj.on_start(context)
+                logger.debug(f"Start new-pattern logger {name} completed")
+            except Exception as e:
+                logger.error(f"Start new-pattern logger {name} failed: {e}")
+                raise
 
     def process_end_loggers(
         self,
@@ -612,20 +727,23 @@ class AsyncLoggerHandler(BaseModel):
                     logger.error(f"End logger {name} failed: {e}")
                     raise
 
-        # New-pattern dispatch: call on_end for loggers with call_at_end=True
+        # New-pattern dispatch: call on_end for loggers with -1 in call_at
         new_pattern_end_loggers = [
             lg
             for lg in self.logger_objects
-            if getattr(lg, "_uses_new_pattern", False) and getattr(lg, "call_at_end", False)
+            if getattr(lg, "_uses_new_pattern", False) and -1 in getattr(lg, "call_at", [-1])
         ]
         if new_pattern_end_loggers:
+            required = set()
+            for lg in new_pattern_end_loggers:
+                required.update(getattr(lg, "required_extra", []))
             context = LoggerContext(
                 training_config=training_config,
                 stack=stack,
                 output_dir=self.base_dir,
                 current_step=step,
                 is_final=True,
-                extra={"embedding_snapshots": list(self.embedding_snapshots)},
+                extra=self._build_extra(required),
             )
             batch = BatchData.from_step_history(step, dict(normalized_step_history))
             view = HistoryView([batch])

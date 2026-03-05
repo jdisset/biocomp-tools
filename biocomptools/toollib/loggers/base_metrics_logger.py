@@ -1,13 +1,19 @@
 ## {{{                          --     imports     --
 
+from __future__ import annotations
+
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.metrics_models import LoggerMetricsHistory, ReplicateMetrics
 from biocomptools.toollib.loggers.plotting_utils import MetricsPlotter
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
-from biocomptools.run_training import TrainingProgram
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import TYPE_CHECKING, Any
+from pydantic import PrivateAttr
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from biocomptools.run_training import TrainingProgram
 
 logger = get_logger(__name__)
 
@@ -17,19 +23,18 @@ logger = get_logger(__name__)
 class BaseMetricsLogger(Logger):
     """Base class for loggers that compute and optionally plot metrics."""
 
-    name: Optional[str] = None
-    only_metrics: bool = False  # If True, compute metrics but don't plot during training
-    plot_at_the_end: bool = False  # If True, only plot during finalize()
+    name: str | None = None
+    only_metrics: bool = False
+    plot_at_the_end: bool = False
     save_plots: bool = True
     plot_dpi: int = 300
     plot_training_losses: bool = False
+    required_arrays: list[str] = ["y", "yhat", "latest_params"]
 
-    # Internal state
-    _training_program: Optional[TrainingProgram] = None
-    _console: Optional[Console] = None
-    _metrics_history: Optional[LoggerMetricsHistory] = None
-
-    _plot_save_dir: Optional[Path] = None
+    _training_program: TrainingProgram | None = PrivateAttr(default=None)
+    _console: Console | None = PrivateAttr(default=None)
+    _metrics_history: LoggerMetricsHistory | None = PrivateAttr(default=None)
+    _plot_save_dir: Path | None = PrivateAttr(default=None)
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -60,23 +65,37 @@ class BaseMetricsLogger(Logger):
         # We'll use MetricsPlotter as a static class, no need to instantiate
 
         self.metadata = {
-            'logger_name': self.name,
-            'logger_type': self.__class__.__name__,
-            'only_metrics': self.only_metrics,
-            'plot_at_the_end': self.plot_at_the_end,
+            "logger_name": self.name,
+            "logger_type": self.__class__.__name__,
+            "only_metrics": self.only_metrics,
+            "plot_at_the_end": self.plot_at_the_end,
         }
 
         logger.info(f"{self.__class__.__name__} {self.name}: Initialized")
 
-    def _compute_metrics(self, step_data: Dict[str, Any]) -> List[ReplicateMetrics]:
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step_history = view.to_step_history()
+        if "y" not in step_history or "yhat" not in step_history:
+            if context.current_step > 0:
+                logger.debug(
+                    f"{type(self).__name__} {self.name}: y/yhat not available at step {context.current_step}"
+                )
+            return
+        training_loss = step_history.get("loss")
+        self._log_metrics_step(context.current_step, step_history, training_loss)
+
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        self.on_batch(view, context)
+
+    def _compute_metrics(self, step_data: dict[str, Any]) -> list[ReplicateMetrics]:
         """Override this method to compute metrics from step data."""
         raise NotImplementedError("Subclasses must implement _compute_metrics")
 
-    def _print_metrics(self, step: int, metrics: List[ReplicateMetrics]):
+    def _print_metrics(self, step: int, metrics: list[ReplicateMetrics]):
         """Override this method to print metrics in a formatted way."""
         raise NotImplementedError("Subclasses must implement _print_metrics")
 
-    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_metrics(self, replicate: int | None = None) -> dict[str, Any] | None:
         """Return the latest metrics."""
         if self._metrics_history is None:
             return None
@@ -90,9 +109,7 @@ class BaseMetricsLogger(Logger):
             return False
         return True
 
-    def _log_metrics_step(
-        self, step: int, step_data: Dict[str, Any], training_loss: Optional[Any] = None
-    ):
+    def _log_metrics_step(self, step: int, step_data: dict[str, Any], training_loss: Any = None):
         """Common logic for logging metrics at a step."""
         try:
             # Compute metrics
