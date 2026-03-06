@@ -125,6 +125,7 @@ class LoggerContext:
     dmanager: Any = None
     model: Any = None
     training_program: Any = None
+    db: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -140,6 +141,7 @@ class LoggerContext:
         training_config: object | None = None,
         is_replay: bool = False,
         is_final: bool = False,
+        db: object | None = None,
         extra: dict[str, Any] | None = None,
     ) -> "LoggerContext":
         """Factory that extracts fields from training_program with consistent defaults."""
@@ -154,6 +156,7 @@ class LoggerContext:
             dmanager=dmanager or (getattr(tp, "_dmanager", None) if tp else None),
             model=model or (getattr(tp, "_model", None) if tp else None),
             training_program=tp,
+            db=db,
             extra=extra or {},
         )
 

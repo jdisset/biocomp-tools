@@ -59,6 +59,14 @@ def _extract_loss(raw: Any) -> float | None:
     return None
 
 
+def partition_required_keys(
+    required: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split required key names into (array_keys, blob_keys) by DB table."""
+    req = set(required)
+    return sorted(req & ARRAY_KEYS), sorted(req & BLOB_KEYS)
+
+
 def triage_step_history(step_history: dict[str, Any]) -> TriagedStepData:
     """Route step_history keys to the correct DB table.
 

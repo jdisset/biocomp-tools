@@ -355,7 +355,9 @@ class RunHistoryDB:
         return steps, losses
 
     def load_scalars(self, step: int, keys: list[str] | None = None) -> dict[str, float]:
-        if keys:
+        if keys is not None:
+            if not keys:
+                return {}
             placeholders = ",".join("?" * len(keys))
             rows = self._conn.execute(
                 f"SELECT key, value FROM step_scalar WHERE step=? AND key IN ({placeholders})",
@@ -375,7 +377,9 @@ class RunHistoryDB:
         return json.loads(row[0]) if row else None
 
     def load_dicts(self, step: int, keys: list[str] | None = None) -> dict[str, dict]:
-        if keys:
+        if keys is not None:
+            if not keys:
+                return {}
             placeholders = ",".join("?" * len(keys))
             rows = self._conn.execute(
                 f"SELECT key, value_json FROM step_dict WHERE step=? AND key IN ({placeholders})",
@@ -397,7 +401,9 @@ class RunHistoryDB:
         return np.load(io.BytesIO(row[0]))
 
     def load_arrays(self, step: int, keys: list[str] | None = None) -> dict[str, np.ndarray]:
-        if keys:
+        if keys is not None:
+            if not keys:
+                return {}
             placeholders = ",".join("?" * len(keys))
             rows = self._conn.execute(
                 f"SELECT key, array_blob FROM step_array WHERE step=? AND key IN ({placeholders})",
@@ -417,7 +423,9 @@ class RunHistoryDB:
         return dill.loads(row[0]) if row else None
 
     def load_blobs(self, step: int, keys: list[str] | None = None) -> dict[str, Any]:
-        if keys:
+        if keys is not None:
+            if not keys:
+                return {}
             placeholders = ",".join("?" * len(keys))
             rows = self._conn.execute(
                 f"SELECT key, blob_pickle FROM step_blob WHERE step=? AND key IN ({placeholders})",

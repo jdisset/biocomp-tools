@@ -93,6 +93,7 @@ class DesignHeatmapLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    history_window: int | None = 1  # only need current step
     required_arrays: list[str] = ["yhatdep", "latest_params"]
     execution_mode: Literal["inline", "thread", "process"] = "inline"
     xres: int = Field(default=40, description="Horizontal resolution for ASCII heatmap")
@@ -203,6 +204,9 @@ class DesignHeatmapLogger(Logger):
             post_stack = getattr(tp, '_post_stack', None)
             if post_stack is not None:
                 return post_stack
+        # In replay mode (no training_program), reuse the stack built during init
+        if tp is None and self._stack is not None:
+            return self._stack
         dmanager = self._get_live_dmanager()
         model = self._get_live_model()
         if dmanager is None or model is None:
@@ -461,7 +465,8 @@ class DesignHeatmapLogger(Logger):
 
         Y_pred_grid = None
         params = step_history.get('latest_params')
-        force_fresh_for_final = is_final and params is not None
+        has_live_context = self._training_program is not None
+        force_fresh_for_final = is_final and params is not None and has_live_context
         use_fresh_prediction = (self.use_fresh_predictions or force_fresh_for_final) and (
             params is not None
         )
@@ -920,7 +925,67 @@ class DesignHeatmapLogger(Logger):
             f"{len(committed_networks)} committed network sets"
         )
 
+    def _initialize_from_db(self, db: Any) -> None:
+        """Lazy init from DB artifacts for replay mode."""
+        if self._dmanager is not None:
+            return
+        model = db.load_artifact("model")
+        dmanager = db.load_artifact("dmanager")
+        dconfig = db.load_artifact("dconfig")
+        if model is None or dmanager is None:
+            logger.warning("DB missing model/dmanager artifacts — heatmap replay unavailable")
+            return
+
+        self._model = model
+        self._dmanager = dmanager
+        self._design_conf = dconfig
+
+        if hasattr(dmanager, "grid_resolution") and dmanager.grid_resolution:
+            self._grid_resolution = dmanager.grid_resolution
+        if hasattr(dmanager, "n_targets"):
+            self._n_targets = dmanager.n_targets
+        if hasattr(dmanager, "networks"):
+            self._network_names = [n.name for n in dmanager.networks]
+
+        if dconfig is not None:
+            if hasattr(dconfig, "n_epochs") and hasattr(dconfig, "n_batches_per_epoch"):
+                batches_per_step = getattr(dconfig, "batches_per_step", 1)
+                self._total_steps = dconfig.n_epochs * max(
+                    1, dconfig.n_batches_per_epoch // batches_per_step
+                )
+            if hasattr(dconfig, "loss_function"):
+                glw = GridLossWeights.from_design_config(dconfig)
+                self._loss_weights = glw.to_dict()
+
+        if self._dmanager and self._model:
+            try:
+                self._stack = self._build_fresh_stack()
+            except Exception as e:
+                logger.warning(f"Failed to build stack from DB artifacts: {e}")
+
+        if self._dmanager and self._grid_resolution:
+            targets = self._dmanager.targets
+            if self.target_idx < len(targets):
+                target = targets[self.target_idx]
+                try:
+                    _, Y_grid = target.get_lattice(resolution=self._grid_resolution, seed=0)
+                    xres, yres = self._grid_resolution
+                    self._cached_target_grid = np.asarray(Y_grid).reshape(yres, xres)
+                except Exception as e:
+                    logger.warning(f"Failed to cache target grid from DB: {e}")
+
+        logger.info(
+            "DesignHeatmapLogger initialized from DB "
+            f"(grid={self._grid_resolution}, networks={len(self._network_names)})"
+        )
+
+    def _ensure_initialized(self, context: LoggerContext) -> None:
+        """Lazily initialize from DB if live context is unavailable."""
+        if self._dmanager is None and context.db is not None:
+            self._initialize_from_db(context.db)
+
     def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        self._ensure_initialized(context)
         step = context.current_step
         step_history = view.to_step_history()
         output = self._render_heatmaps(step, step_history, is_final=False, stack=context.stack)
@@ -929,6 +994,7 @@ class DesignHeatmapLogger(Logger):
             print()
 
     def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        self._ensure_initialized(context)
         step = context.current_step
         batch = view.latest()
         if batch is None:

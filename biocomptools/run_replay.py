@@ -29,6 +29,7 @@ from biocomptools.logger_history import (
 )
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
+from biocomptools.toollib.loggers.designheatmaplogger import DesignHeatmapLogger
 from biocomptools.toollib.common import config
 
 logger = get_logger(__name__)
@@ -215,6 +216,7 @@ def _dispatch_replay_legacy(
 DEFAULT_TYPES = [
     Logger,
     DesignDiagnosticLogger,
+    DesignHeatmapLogger,
 ]
 
 
@@ -314,11 +316,12 @@ class ReplayJob(BaseModel):
             logger.warning("No loggers specified - nothing to replay")
             return {"status": "no_loggers", "output_dir": str(output_dir)}
 
-        # Configure loggers for replay
+        # Override call_at_interval/history_window only if CLI is more restrictive.
         for lg in loggers:
-            if hasattr(lg, "call_at_interval"):
+            if self.period > (lg.call_at_interval or self.period):
                 lg.call_at_interval = self.period
-            if hasattr(lg, "history_window"):
+            lg_window = lg.history_window or float("inf")
+            if self.max_history_len < lg_window:
                 lg.history_window = self.max_history_len
             if hasattr(lg, "final_figure_only"):
                 lg.final_figure_only = self.final_only

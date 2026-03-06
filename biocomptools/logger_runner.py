@@ -102,6 +102,12 @@ class LoggerRunner:
                 )
                 future.add_done_callback(_make_done_callback(type(lg).__name__, step))
                 self._pending_futures.append(future)
+            elif lg.execution_mode == "inline":
+                # Inline mode — run directly in dispatch loop (no thread overhead)
+                try:
+                    self._run_logger_in_thread(lg, step)
+                except Exception as e:
+                    logger.error(f"on_batch failed for {type(lg).__name__} at step {step}: {e}")
             else:
                 # Thread mode (default) — run in thread pool
                 future = self._thread_pool.submit(self._run_logger_in_thread, lg, step)
@@ -110,14 +116,22 @@ class LoggerRunner:
 
     def _run_logger_in_thread(self, lg: Logger, step: int) -> None:
         """Run a logger in thread mode — shares process, reads from DB."""
+        t0 = time.time()
         view = self._build_view(lg, step)
+        t_load = time.time() - t0
         context = LoggerContext.build(
             step=step,
             training_program=self._training_program,
             output_dir=self._output_dir,
             is_replay=(self._mode == "replay"),
+            db=self._db,
         )
+        t1 = time.time()
         lg.on_batch(view, context)
+        t_run = time.time() - t1
+        t_total = t_load + t_run
+        name = type(lg).__name__
+        logger.debug(f"{t_total:.2f}s {name}@{step} (load={t_load:.2f}s)")
 
     def _build_view(self, lg: Logger, step: int) -> HistoryView:
         """Load data from DB into HistoryView for this logger."""
@@ -129,13 +143,22 @@ class LoggerRunner:
 
         # Determine required keys from logger declarations
         scalar_keys = lg.required_metrics or None
-        array_keys = lg.required_arrays or None
+
+        # Route required_arrays into correct DB tables (array vs blob).
+        # None = "load all" (no filter), [] = "load nothing".
+        array_keys: list[str] | None = None
+        blob_keys: list[str] | None = None
+        if lg.required_arrays:
+            from biocomptools.step_history_triage import partition_required_keys
+
+            array_keys, blob_keys = partition_required_keys(lg.required_arrays)
 
         batches = self._db.load_step_range_data(
             start,
             step,
             scalar_keys=scalar_keys,
             array_keys=array_keys,
+            blob_keys=blob_keys,
         )
         return HistoryView(batches)
 
@@ -155,6 +178,7 @@ class LoggerRunner:
                 output_dir=self._output_dir,
                 is_replay=(self._mode == "replay"),
                 is_final=True,
+                db=self._db,
             )
             name = type(lg).__name__
             try:
@@ -182,6 +206,7 @@ class LoggerRunner:
                 training_program=self._training_program,
                 output_dir=self._output_dir,
                 is_replay=(self._mode == "replay"),
+                db=self._db,
             )
             try:
                 lg.on_start(context)
@@ -254,12 +279,18 @@ def _run_logger_in_process(
     window = lg.history_window
     start = max(0, step - (window or step))
     scalar_keys = lg.required_metrics or None
-    array_keys = lg.required_arrays or None
+    array_keys: list[str] | None = None
+    blob_keys: list[str] | None = None
+    if lg.required_arrays:
+        from biocomptools.step_history_triage import partition_required_keys
+
+        array_keys, blob_keys = partition_required_keys(lg.required_arrays)
     batches = db.load_step_range_data(
         start,
         step,
         scalar_keys=scalar_keys,
         array_keys=array_keys,
+        blob_keys=blob_keys,
     )
     view = HistoryView(batches)
 
