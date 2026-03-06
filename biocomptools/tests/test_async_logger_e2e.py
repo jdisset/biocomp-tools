@@ -336,3 +336,56 @@ def test_disk_save_excludes_stack(tmp_path):
         assert "training_config" not in data, f"{pkl_file.name} contains 'training_config'"
         assert "step" in data
         assert "timestamp" in data
+
+
+def test_step_offset_produces_global_filenames(tmp_path):
+    """Two hard-pruning segments writing to same dir produce non-overlapping step files.
+
+    Segment 0: steps 0-9 (offset=0) → step_000000..step_000009
+    Segment 1: steps 10-14 (offset=10) → step_000010..step_000014
+    No filename collisions.
+    """
+    store_dir = str(tmp_path / "step_history")
+    fake_stack = {"layers": [1, 2, 3]}
+    fake_config = {"lr": 0.01}
+
+    # Segment 0: steps 0..9
+    lg0 = _ParamsVerifierLogger()
+    d0 = LoggerDispatcher(
+        [lg0],
+        training_program=object(),
+        async_logging=True,
+        keep_history_on_disk=True,
+        save_all_steps=True,
+        async_store_location=store_dir,
+        n_workers=2,
+    )
+    d0.on_start(fake_config, fake_stack)
+    last_sh: dict[str, Any] = {}
+    for step in range(10):
+        last_sh = _make_step_history(step)
+        d0.on_step(step, fake_config, last_sh, fake_stack)
+    d0.on_end(9, fake_config, last_sh, fake_stack)
+    d0.shutdown((None, list(range(10)), last_sh))
+
+    # Segment 1: steps 10..14 (same directory, different dispatcher)
+    lg1 = _ParamsVerifierLogger()
+    d1 = LoggerDispatcher(
+        [lg1],
+        training_program=object(),
+        async_logging=True,
+        keep_history_on_disk=True,
+        save_all_steps=True,
+        async_store_location=store_dir,
+        n_workers=2,
+    )
+    d1.on_start(fake_config, fake_stack)
+    for step in range(10, 15):
+        last_sh = _make_step_history(step)
+        d1.on_step(step, fake_config, last_sh, fake_stack)
+    d1.on_end(14, fake_config, last_sh, fake_stack)
+    d1.shutdown((None, list(range(5)), last_sh))
+
+    files = sorted((tmp_path / "step_history").glob("step_*.pkl"))
+    steps = [int(f.stem.split("_")[1]) for f in files]
+    assert steps == list(range(15)), f"Expected 0..14, got {steps}"

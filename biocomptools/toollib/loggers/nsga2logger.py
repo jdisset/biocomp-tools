@@ -1,15 +1,14 @@
 """NSGA2 Design Logger: tracks multi-objective optimization with pareto front visualization."""
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -200,57 +199,51 @@ class NSGA2DesignLogger(Logger):
             f"pareto_size={pareto_size} min_loss={pareto_min_loss:.4f}"
         )
 
-    def get_callbacks(self, training_program=None) -> list[tuple[int, Callable]]:
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        step_history = view.to_step_history()
 
-            metrics = self._extract_metrics(step_history)
-            metrics["step"] = step
-            self._history.append(metrics)
+        metrics = self._extract_metrics(step_history)
+        metrics["step"] = step
+        self._history.append(metrics)
 
-            pareto_fitness = step_history.get("pareto_fitness")
-            if pareto_fitness is not None:
-                pareto_fitness = np.asarray(pareto_fitness)
+        pareto_fitness = step_history.get("pareto_fitness")
+        if pareto_fitness is not None:
+            pareto_fitness = np.asarray(pareto_fitness)
 
-            self._print_generation_summary(step, metrics, pareto_fitness)
+        self._print_generation_summary(step, metrics, pareto_fitness)
 
-            if self.print_pareto and pareto_fitness is not None and step % 10 == 0:
-                print(self._format_pareto_ascii(pareto_fitness))
+        if self.print_pareto and pareto_fitness is not None and step % 10 == 0:
+            print(self._format_pareto_ascii(pareto_fitness))
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        batch = view.latest()
+        if batch is None:
+            return
+        step_history = view.to_step_history()
 
-            pareto_fitness = step_history.get("pareto_fitness")
-            pareto_front = step_history.get("pareto_front")
+        pareto_fitness = step_history.get("pareto_fitness")
+        pareto_front = step_history.get("pareto_front")
 
-            if pareto_fitness is not None:
-                pareto_fitness = np.asarray(pareto_fitness)
-                print("\n" + "=" * 60)
-                print("FINAL PARETO FRONT")
-                print("=" * 60)
-                print(self._format_pareto_ascii(pareto_fitness, width=70, height=25))
+        if pareto_fitness is not None:
+            pareto_fitness = np.asarray(pareto_fitness)
+            print("\n" + "=" * 60)
+            print("FINAL PARETO FRONT")
+            print("=" * 60)
+            print(self._format_pareto_ascii(pareto_fitness, width=70, height=25))
 
-                sorted_idx = np.argsort(pareto_fitness[:, 0])
-                print("\nTop solutions by pattern loss:")
-                print("-" * 50)
-                for i, idx in enumerate(sorted_idx[:10]):
-                    loss, tu = pareto_fitness[idx]
-                    print(f"  {i + 1:2d}. Loss={loss:.4f}, TU_count={tu:.0f}")
+            sorted_idx = np.argsort(pareto_fitness[:, 0])
+            print("\nTop solutions by pattern loss:")
+            print("-" * 50)
+            for i, idx in enumerate(sorted_idx[:10]):
+                loss, tu = pareto_fitness[idx]
+                print(f"  {i + 1:2d}. Loss={loss:.4f}, TU_count={tu:.0f}")
 
-            if self._save_dir and pareto_fitness is not None:
-                self._save_pareto_data(pareto_front, pareto_fitness)
+        if self._save_dir and pareto_fitness is not None:
+            self._save_pareto_data(pareto_front, pareto_fitness)
 
-            if self.print_predictions and step_history.get("yhatdep") is not None:
-                self._print_top_predictions(step_history, pareto_fitness)
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+        if self.print_predictions and step_history.get("yhatdep") is not None:
+            self._print_top_predictions(step_history, pareto_fitness)
 
     def _save_pareto_data(self, pareto_front: np.ndarray | None, pareto_fitness: np.ndarray):
         """Save pareto front data to files."""

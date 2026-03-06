@@ -3,10 +3,26 @@
 import pytest
 import numpy as np
 
+from biocomptools.logger_history import HistoryView, BatchData, LoggerContext
+
 
 @pytest.fixture
 def tmp_output_dir(tmp_path):
     return tmp_path / "diagnostics"
+
+
+def _make_view(step_history: dict, step: int = 1) -> HistoryView:
+    batch = BatchData.from_step_history(step, step_history)
+    return HistoryView([batch])
+
+
+def _make_context(step: int = 1) -> LoggerContext:
+    return LoggerContext(
+        training_config=None,
+        stack=None,
+        output_dir=None,
+        current_step=step,
+    )
 
 
 class TestHelperFunctions:
@@ -109,27 +125,24 @@ class TestDesignDiagnosticLogger:
         logger.initialize()
         assert tmp_output_dir.exists()
 
-    def test_get_callbacks_returns_two(self, tmp_output_dir):
+    def test_has_on_batch_and_on_end(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
         logger = DesignDiagnosticLogger(output_dir=str(tmp_output_dir))
-        logger.initialize()
-        callbacks = logger.get_callbacks()
-        assert len(callbacks) == 2
-        assert callbacks[0][0] == logger.call_at_interval  # periodic
-        assert callbacks[1][0] == -1  # final
+        assert hasattr(logger, 'on_batch')
+        assert hasattr(logger, 'on_end')
+        assert logger.call_at_interval is not None
+        assert -1 in logger.call_at
 
     def test_extract_metrics(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
         logger = DesignDiagnosticLogger(output_dir=str(tmp_output_dir))
         logger._total_steps = 100
 
-        # all_losses: 3D array (replicate, target, network) -> arr[0, target_id, network_id]
-        # per_network metrics: 4D arrays (replicate, batch, target, network) -> arr[0, 0, target_id, network_id]
         step_history = {
             "loss": 0.5,
-            "all_losses": np.array([[[0.4, 0.5, 0.6]]]),  # (1, 1, 3) -> network_loss = arr[0, 0, 0] = 0.4
+            "all_losses": np.array([[[0.4, 0.5, 0.6]]]),
             "sublosses": {
-                "sinkhorn_per_network": np.array([[[[0.1, 0.2, 0.3]]]]),  # (1, 1, 1, 3)
+                "sinkhorn_per_network": np.array([[[[0.1, 0.2, 0.3]]]]),
                 "lncc_per_network": np.array([[[[0.15, 0.25, 0.35]]]]),
             },
             "tu_stats": {
@@ -145,11 +158,11 @@ class TestDesignDiagnosticLogger:
         assert metrics["step"] == 50
         assert metrics["progress"] == 0.5
         assert metrics["loss"] == 0.5
-        assert metrics["network_loss"] == 0.4  # from all_losses[0, 0, 0]
-        assert metrics["sinkhorn"] == 0.1  # from sublosses.sinkhorn_per_network[0, 0, 0, 0]
-        assert metrics["tu_enabled_count"] == 3.0  # from tu_stats.enabled_count_per_network[0, 0, 0, 0]
-        assert metrics["l0_penalty"] == 0.01  # from l0_penalty_per_network[0, 0, 0, 0]
-        assert metrics["tucount_penalty"] == 0.05  # global penalty
+        assert metrics["network_loss"] == 0.4
+        assert metrics["sinkhorn"] == 0.1
+        assert metrics["tu_enabled_count"] == 3.0
+        assert metrics["l0_penalty"] == 0.01
+        assert metrics["tucount_penalty"] == 0.05
 
     def test_append_to_history(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
@@ -192,63 +205,56 @@ class TestUnrollParams:
 
 
 class TestIntegration:
-    """Integration tests for the logger with mock step_history."""
+    """Integration tests for the logger with on_batch/on_end."""
 
-    def test_periodic_callback_with_valid_data(self, tmp_output_dir):
+    def test_on_batch_with_valid_data(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
 
-        logger = DesignDiagnosticLogger(
+        lg = DesignDiagnosticLogger(
             output_dir=str(tmp_output_dir),
             call_at_interval=1,
-            generate_plots=False,  # skip plotting for speed
+            generate_plots=False,
         )
-        logger.initialize()
-        logger._grid_resolution = (4, 4)  # 16 points
-        logger._total_steps = 10
+        lg.initialize()
+        lg._grid_resolution = (4, 4)
+        lg._total_steps = 10
 
-        callbacks = logger.get_callbacks()
-        periodic_cb = callbacks[0][1]
-
-        # Mock step_history with correct shapes
         step_history = {
             "loss": 0.5,
-            "all_losses": np.array([[[0.4, 0.5]]]),  # (1, 1, 2)
-            "yhatdep": np.random.rand(16, 1, 2),  # (batch, targets, networks)
+            "all_losses": np.array([[[0.4, 0.5]]]),
+            "yhatdep": np.random.rand(16, 1, 2),
             "sublosses": {"sinkhorn": 0.1, "lncc": 0.2},
             "tu_stats": {"enabled_count": 3, "total_count": 5},
             "ratio_stats": {"min": 0.1, "max": 0.9},
         }
 
-        # Call callback
-        periodic_cb(step=1, training_config=None, step_history=step_history)
+        view = _make_view(step_history, step=1)
+        context = _make_context(step=1)
+        lg.on_batch(view, context)
 
-        # Check history was updated
-        assert (0, 0) in logger._history
-        assert len(logger._history[(0, 0)]) == 1
+        assert (0, 0) in lg._history
+        assert len(lg._history[(0, 0)]) == 1
 
-    def test_finalize_saves_history(self, tmp_output_dir):
+    def test_on_end_saves_history(self, tmp_output_dir):
         from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
 
-        logger = DesignDiagnosticLogger(
+        lg = DesignDiagnosticLogger(
             output_dir=str(tmp_output_dir),
             generate_plots=False,
             save_history=True,
         )
-        logger.initialize()
-        logger._history = {(0, 0): [{"step": 1}]}
-
-        logger.finalize()
-
-        # finalize just logs, final_callback saves the pickle
-        callbacks = logger.get_callbacks()
-        final_cb = callbacks[1][1]
+        lg.initialize()
+        lg._history = {(0, 0): [{"step": 1}]}
+        lg._grid_resolution = (4, 4)
 
         step_history = {
             "loss": 0.3,
             "yhatdep": np.random.rand(16, 1, 1),
         }
-        logger._grid_resolution = (4, 4)
-        final_cb(step=10, training_config=None, step_history=step_history)
+
+        view = _make_view(step_history, step=10)
+        context = _make_context(step=10)
+        lg.on_end(view, context)
 
         final_dir = tmp_output_dir / "final"
         assert final_dir.exists()

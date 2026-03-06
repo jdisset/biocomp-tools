@@ -9,11 +9,12 @@ Enables:
 import dill as pickle
 import jax
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional, Dict, Any
+from typing import Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.utils import extract_design_step_metrics
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -40,11 +41,11 @@ class DesignCheckpointLogger(Logger):
         default=5, description="Maximum checkpoints to keep (0 = unlimited)"
     )
 
-    _save_dir: Optional[Path] = None
-    _aux_history: List[Dict] = []
-    _saved_checkpoints: List[Path] = []
+    _save_dir: Path | None = None
+    _aux_history: list[dict] = []
+    _saved_checkpoints: list[Path] = []
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._aux_history = []
         self._saved_checkpoints = []
@@ -59,7 +60,7 @@ class DesignCheckpointLogger(Logger):
             self._save_dir.mkdir(exist_ok=True, parents=True)
             logger.info(f"DesignCheckpointLogger saving to {self._save_dir}")
 
-    def _save_checkpoint(self, step: int, step_history: Dict, training_config: Any):
+    def _save_checkpoint(self, step: int, step_history: dict, training_config: Any) -> None:
         if self._save_dir is None:
             return
 
@@ -117,45 +118,35 @@ class DesignCheckpointLogger(Logger):
                 old_checkpoint.unlink()
                 logger.debug(f"Removed old checkpoint: {old_checkpoint}")
 
-    def _collect_aux_entry(self, step: int, step_history: Dict):
-        """Collect condensed aux data for history tracking."""
+    def _collect_aux_entry(self, step: int, step_history: dict) -> None:
         entry = extract_design_step_metrics(step_history)
         entry["step"] = step
         self._aux_history.append(entry)
 
-    def get_callbacks(self, training_program=None) -> List[Tuple[int, Callable]]:
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None or step == 0:
-                return
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        if step == 0:
+            return
+        step_history = view.to_step_history()
+        self._collect_aux_entry(step, step_history)
+        self._save_checkpoint(step, step_history, context.training_config)
 
-            # collect aux data every step for history
-            self._collect_aux_entry(step, step_history)
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        batch = view.latest()
+        if batch is None:
+            return
+        step_history = view.to_step_history()
+        self._collect_aux_entry(step, step_history)
+        self._save_checkpoint(step, step_history, context.training_config)
 
-            # save checkpoint at period intervals
-            self._save_checkpoint(step, step_history, training_config)
+        if self._save_dir and self._aux_history:
+            history_path = self._save_dir / "aux_history_full.pickle"
+            with open(history_path, 'wb') as f:
+                pickle.dump(self._aux_history, f)
+            logger.info(f"Saved full aux history to {history_path}")
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
-
-            self._collect_aux_entry(step, step_history)
-            self._save_checkpoint(step, step_history, training_config)
-
-            # save final aux history separately
-            if self._save_dir and self._aux_history:
-                history_path = self._save_dir / "aux_history_full.pickle"
-                with open(history_path, 'wb') as f:
-                    pickle.dump(self._aux_history, f)
-                logger.info(f"Saved full aux history to {history_path}")
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
-
-    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_metrics(self, replicate: int | None = None) -> dict[str, Any] | None:
         return {
             'checkpoints_saved': len(self._saved_checkpoints),
             'aux_history_entries': len(self._aux_history),
@@ -169,7 +160,7 @@ class DesignCheckpointLogger(Logger):
         )
 
 
-def load_design_checkpoint(checkpoint_path: str | Path) -> Dict[str, Any]:
+def load_design_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
     """Load a design checkpoint from pickle file.
 
     Returns dict with:
@@ -185,7 +176,7 @@ def load_design_checkpoint(checkpoint_path: str | Path) -> Dict[str, Any]:
         return pickle.load(f)
 
 
-def load_aux_history(history_path: str | Path) -> List[Dict[str, Any]]:
+def load_aux_history(history_path: str | Path) -> list[dict[str, Any]]:
     """Load aux history from pickle file.
 
     Returns list of dicts, each containing:

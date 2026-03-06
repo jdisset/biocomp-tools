@@ -145,6 +145,8 @@ class LoggerContext:
     is_replay: bool = False
     is_final: bool = False
     dmanager: Any = None  # design manager if available
+    model: Any = None  # BiocompModel for prediction
+    training_program: Any = None  # full program reference
     extra: dict[str, Any] = field(default_factory=dict)
 
 

@@ -12,11 +12,12 @@ See biocomp-doc/for-ml-collaborators/tu_masking_introduction.md for context.
 import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from collections import deque
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -82,7 +83,7 @@ class TUMaskingDiagLogger(Logger):
     _history: list[StepDiag] = []
     _prev_probs: np.ndarray | None = None
     _revival_count_window: deque = deque(maxlen=100)
-    _save_dir: Optional[Path] = None
+    _save_dir: Path | None = None
     _total_revivals: int = 0
     _legend_printed: bool = False
     _network_names: list[str] = []
@@ -261,43 +262,35 @@ class TUMaskingDiagLogger(Logger):
 
         return "\n".join(lines)
 
-    def get_callbacks(self, training_program=None):
-        """Legacy pattern: return (period, callback) tuples."""
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        step_history = view.to_step_history()
+        tu_stats = step_history.get("tu_stats", {})
+        diag = self._extract_diagnostics(step, tu_stats, step_history)
 
-        def periodic_callback(step, training_config, step_history=None, **kwargs):
-            if step_history is None:
-                return
+        self._history.append(diag)
+        if len(self._history) > self.history_len:
+            self._history = self._history[-self.history_len :]
 
+        if self.console_output:
+            print(self._format_console_output(diag))
+
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        batch = view.latest()
+        if batch is not None:
+            step_history = view.to_step_history()
             tu_stats = step_history.get("tu_stats", {})
             diag = self._extract_diagnostics(step, tu_stats, step_history)
-
             self._history.append(diag)
-            if len(self._history) > self.history_len:
-                self._history = self._history[-self.history_len :]
-
             if self.console_output:
                 print(self._format_console_output(diag))
 
-        def final_callback(step, training_config, step_history=None, **kwargs):
-            if step_history is not None:
-                tu_stats = step_history.get("tu_stats", {})
-                diag = self._extract_diagnostics(step, tu_stats, step_history)
-                self._history.append(diag)
-                if self.console_output:
-                    print(self._format_console_output(diag))
-
-            if self._save_dir:
-                self._save_summary()
-                self._save_history_pickle()
-                if len(self._history) > 10:
-                    self._generate_plots()
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+        if self._save_dir:
+            self._save_summary()
+            self._save_history_pickle()
+            if len(self._history) > 10:
+                self._generate_plots()
 
     def _save_summary(self):
         """Save text summary of TU masking diagnostics with per-network breakdown."""

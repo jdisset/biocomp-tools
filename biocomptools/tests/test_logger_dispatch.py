@@ -35,36 +35,6 @@ def test_extract_final_step_index_uses_loss_history_length():
     assert _extract_final_step_index(result) == 3
 
 
-def test_shutdown_raises_sync_callback_error_and_still_shuts_down():
-    from biocomptools.logger_dispatch import LoggerDispatcher
-
-    class _StubAsyncHandler:
-        def __init__(self) -> None:
-            self.shutdown_called = False
-
-        def process_end_loggers(self, **kwargs) -> None:
-            return None
-
-        def shutdown(self) -> None:
-            self.shutdown_called = True
-
-    def failing_callback(step, config, step_history=None, stack=None):
-        raise RuntimeError("boom")
-
-    dispatcher = LoggerDispatcher.__new__(LoggerDispatcher)
-    stub_handler = _StubAsyncHandler()
-    dispatcher._async_handler = cast(Any, stub_handler)
-    dispatcher._sync_callbacks = []
-
-    with pytest.raises(RuntimeError, match="boom"):
-        dispatcher.shutdown(
-            (object(), [0.1], {"loss": 0.1}),
-            sync_callbacks=[(-1, failing_callback)],
-        )
-
-    assert stub_handler.shutdown_called is True
-
-
 def test_shutdown_still_shuts_down_on_invalid_step_history_result():
     from biocomptools.logger_dispatch import LoggerDispatcher
 
@@ -81,7 +51,8 @@ def test_shutdown_still_shuts_down_on_invalid_step_history_result():
     dispatcher = LoggerDispatcher.__new__(LoggerDispatcher)
     stub_handler = _StubAsyncHandler()
     dispatcher._async_handler = cast(Any, stub_handler)
-    dispatcher._sync_callbacks = []
+    dispatcher._sync_loggers = []
+    dispatcher._last_config = None
 
     with pytest.raises(TypeError, match="result\\[2\\]"):
         dispatcher.shutdown((object(), [0.1], [{"loss": 0.1}]))
@@ -89,27 +60,23 @@ def test_shutdown_still_shuts_down_on_invalid_step_history_result():
     assert stub_handler.shutdown_called is True
 
 
-def test_integration_shutdown_end_callback_receives_snapshot():
+def test_integration_on_end_dispatches_to_sync_logger():
     from biocomptools.logger_dispatch import LoggerDispatcher
 
     class _CaptureEndLogger(Logger):
         async_ok: bool = False
+        call_at: list[int] = [-1]
         captured_loss: float | None = None
-        captured_type: str | None = None
         captured_step: int | None = None
 
-        def get_callbacks(self, training_program: object):
-            def end_callback(step, training_config, step_history=None, stack=None, **kwargs):
-                assert step_history is not None
-                self.captured_step = step
-                self.captured_type = type(step_history).__name__
-                self.captured_loss = float(step_history.get("loss"))
+        def on_end(self, view, context):
+            self.captured_step = context.current_step
+            sh = view.to_step_history()
+            self.captured_loss = float(sh.get("loss"))
 
-            return [(-1, end_callback)]
-
-    logger = _CaptureEndLogger()
+    lg = _CaptureEndLogger()
     dispatcher = LoggerDispatcher(
-        [logger],
+        [lg],
         training_program=object(),
         async_logging=False,
         n_workers=1,
@@ -120,6 +87,5 @@ def test_integration_shutdown_end_callback_receives_snapshot():
         StepHistorySnapshot.from_raw({"loss": 0.1}),
         None,
     )
-    assert logger.captured_step == 3
-    assert logger.captured_type == "StepHistorySnapshot"
-    assert logger.captured_loss == pytest.approx(0.1)
+    assert lg.captured_step == 3
+    assert lg.captured_loss == pytest.approx(0.1)

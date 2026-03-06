@@ -1,11 +1,9 @@
 """Design summary logger: saves metrics and generates plots via batched evaluation."""
 
-from __future__ import annotations
-
 import numpy as np
 import jax.numpy as jnp
 from pathlib import Path
-from typing import Callable, Any, TYPE_CHECKING
+from typing import Any
 from pydantic import ConfigDict
 import csv
 
@@ -16,7 +14,7 @@ from biocomptools.toollib.design_results import (
     compute_design_metrics,
     NREMetrics,
 )
-from biocomptools.toollib.design_eval import is_valid_network
+from biocomptools.toollib.design_eval import is_valid_network, EvaluatedDesign
 from biocomptools.toollib.design_pipeline import (
     CommitCache,
     CommitRequest,
@@ -30,10 +28,8 @@ from biocomptools.toollib.design_pipeline import (
 )
 from biocomptools.toollib.design_selection import normalize_losses_for_ranking
 from biocomptools.toollib.design_data import prepare_target_data
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from biocomptools.toollib.design_eval import EvaluatedDesign
 
 logger = get_logger(__name__)
 
@@ -409,42 +405,32 @@ class DesignSummaryLogger(Logger):
         if self._loss_history:
             (comp_dir / 'loss_history.json').write_text(json.dumps(self._loss_history, indent=2))
 
-    def get_callbacks(self, training_program=None) -> list[tuple[int, Callable]]:
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            if step_history and 'loss' in step_history:
-                lv = step_history['loss']
-                self._loss_history.append(
-                    lv.item()
-                    if hasattr(lv, 'item')
-                    else float(np.mean(lv))
-                    if isinstance(lv, np.ndarray)
-                    else lv
-                )
-            if step_history is None:
-                return
-            all_losses, params = step_history.get('all_losses'), step_history.get('latest_params')
-            if all_losses is None or params is None:
-                return
-            self._generate_summaries(step, params, stack, all_losses, is_final=False)
-
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
-            all_losses, params = (
-                step_history.get('all_losses'),
-                step_history.get('latest_params'),
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        step_history = view.to_step_history()
+        if 'loss' in step_history:
+            lv = step_history['loss']
+            self._loss_history.append(
+                lv.item()
+                if hasattr(lv, 'item')
+                else float(np.mean(lv))
+                if isinstance(lv, np.ndarray)
+                else lv
             )
-            if all_losses is None or params is None:
-                return
-            self._generate_summaries(step, params, stack, all_losses, is_final=True)
+        all_losses, params = step_history.get('all_losses'), step_history.get('latest_params')
+        if all_losses is None or params is None:
+            return
+        self._generate_summaries(step, params, context.stack, all_losses, is_final=False)
 
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step_history = view.to_step_history()
+        all_losses, params = step_history.get('all_losses'), step_history.get('latest_params')
+        if all_losses is None or params is None:
+            return
+        self._generate_summaries(
+            context.current_step, params, context.stack, all_losses, is_final=True
+        )
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         return {

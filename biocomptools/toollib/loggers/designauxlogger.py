@@ -10,11 +10,12 @@ import numpy as np
 import json
 import dill as pickle
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional, Any, Dict
+from typing import Any
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.utils import extract_design_step_metrics
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -33,24 +34,23 @@ class DesignAuxLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    output_dir: Optional[str] = None
+    output_dir: str | None = None
     save_pickle: bool = Field(default=True, description="Save raw aux history as pickle")
     save_json: bool = Field(default=True, description="Save summary metrics as JSON")
     generate_plots: bool = Field(default=True, description="Generate visual summary plots")
     plot_period: int = Field(default=100, description="How often to generate interim plots")
 
-    _history: List[Dict[str, Any]] = []
+    _history: list[dict[str, Any]] = []
     _step_count: int = 0
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._history = []
         self._step_count = 0
 
-    _save_dir: Optional[Path] = None
+    _save_dir: Path | None = None
 
-    def initialize(self, training_program=None):
-        # get output_dir from training_program if not provided
+    def initialize(self, training_program: object = None) -> None:
         if self.output_dir:
             self._save_dir = Path(self.output_dir)
         elif training_program and hasattr(training_program, '_save_dir'):
@@ -61,11 +61,11 @@ class DesignAuxLogger(Logger):
         self._save_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"DesignAuxLogger initialized: {self._save_dir}")
 
-    def _extract_aux_metrics(self, step_history: Dict) -> Dict[str, Any]:
+    def _extract_aux_metrics(self, step_history: dict) -> dict[str, Any]:
         """Extract scalar metrics from step_history for tracking."""
         return extract_design_step_metrics(step_history)
 
-    def _update_history(self, step: int, step_history: Dict):
+    def _update_history(self, step: int, step_history: dict):
         metrics = self._extract_aux_metrics(step_history)
         metrics["step"] = step
         self._history.append(metrics)
@@ -257,64 +257,49 @@ class DesignAuxLogger(Logger):
         output_path.write_text(json.dumps(summary, indent=2, default=str))
         logger.info(f"Saved JSON summary to {output_path}")
 
-    def get_callbacks(self, training_program=None) -> List[Tuple[int, Callable]]:
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            logger.debug(
-                f"DesignAuxLogger periodic_callback: step={step}, "
-                f"step_history_keys={list(step_history.keys()) if step_history else None}"
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        batch = view.latest()
+        if batch is None:
+            logger.warning(f"DesignAuxLogger: no batch data at step {step}")
+            return
+        step_history = view.to_step_history()
+        self._update_history(step, step_history)
+
+        if self.generate_plots and self._save_dir and step % self.plot_period == 0:
+            self._generate_visual_summary(
+                self._save_dir / f"aux_summary_step{step:06d}.png",
+                title_suffix=f" (Step {step})",
             )
-            if step_history is None:
-                logger.warning(f"DesignAuxLogger: step_history is None at step {step}")
-                return
+
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        batch = view.latest()
+        if batch is not None:
+            step_history = view.to_step_history()
             self._update_history(step, step_history)
 
-            # generate interim plots if requested
-            if self.generate_plots and self._save_dir and step % self.plot_period == 0:
+        if self._save_dir:
+            self._save_dir.mkdir(parents=True, exist_ok=True)
+
+            if self.save_pickle:
+                self._save_pickle_history(self._save_dir / "aux_history.pickle")
+
+            if self.save_json:
+                self._save_json_summary(self._save_dir / "aux_summary.json")
+
+            if self.generate_plots:
                 self._generate_visual_summary(
-                    self._save_dir / f"aux_summary_step{step:06d}.png",
-                    title_suffix=f" (Step {step})",
+                    self._save_dir / "aux_summary_final.png", title_suffix=" (Final)"
                 )
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            logger.info(
-                f"DesignAuxLogger final_callback: step={step}, "
-                f"step_history={'None' if step_history is None else f'keys={list(step_history.keys())}'}, "
-                f"current_history_len={len(self._history)}"
-            )
-            if step_history is not None:
-                self._update_history(step, step_history)
-            else:
-                logger.warning("DesignAuxLogger: step_history is None in final_callback")
+            text_summary = self._generate_text_summary()
+            (self._save_dir / "aux_summary.txt").write_text(text_summary)
+            logger.info(f"Saved text summary to {self._save_dir / 'aux_summary.txt'}")
 
-            if self._save_dir:
-                self._save_dir.mkdir(parents=True, exist_ok=True)
-
-                if self.save_pickle:
-                    self._save_pickle_history(self._save_dir / "aux_history.pickle")
-
-                if self.save_json:
-                    self._save_json_summary(self._save_dir / "aux_summary.json")
-
-                if self.generate_plots:
-                    self._generate_visual_summary(
-                        self._save_dir / "aux_summary_final.png", title_suffix=" (Final)"
-                    )
-
-                # save text summary
-                text_summary = self._generate_text_summary()
-                (self._save_dir / "aux_summary.txt").write_text(text_summary)
-                logger.info(f"Saved text summary to {self._save_dir / 'aux_summary.txt'}")
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
-
-    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_metrics(self, replicate: int | None = None) -> dict[str, Any] | None:
         if not self._history:
             return None
         return {

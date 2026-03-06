@@ -9,6 +9,7 @@ from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.utils import to_scalar as _to_scalar
 from biocomptools.toollib.design_pipeline import CommitCache, precommit_pairs
 from biocomptools.toollib.design_selection import normalize_losses_for_ranking
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 from biocomp.plotting.ascii_heatmap import heatmap
 from biocomp.designloss import GridLossWeights
@@ -919,35 +920,30 @@ class DesignHeatmapLogger(Logger):
             f"{len(committed_networks)} committed network sets"
         )
 
-    def get_callbacks(self, training_program=None):
-        def callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
-            output = self._render_heatmaps(step, step_history, is_final=False, stack=stack)
-            if output:
-                print(output)
-                print()
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        step_history = view.to_step_history()
+        output = self._render_heatmaps(step, step_history, is_final=False, stack=context.stack)
+        if output:
+            print(output)
+            print()
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
-            output = self._render_heatmaps(step, step_history, is_final=True, stack=stack)
-            if output:
-                print("\n" + "═" * 60)
-                print(" FINAL RESULT ".center(60, "═"))
-                print("═" * 60)
-                print(output)
-                print()
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        batch = view.latest()
+        if batch is None:
+            return
+        step_history = view.to_step_history()
+        output = self._render_heatmaps(step, step_history, is_final=True, stack=context.stack)
+        if output:
+            print("\n" + "═" * 60)
+            print(" FINAL RESULT ".center(60, "═"))
+            print("═" * 60)
+            print(output)
+            print()
 
-            if self.save_reproduction_pickle:
-                self._save_reproduction_pickle(step, step_history)
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+        if self.save_reproduction_pickle:
+            self._save_reproduction_pickle(step, step_history)
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         return None

@@ -17,6 +17,7 @@ from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.utils import extract_design_step_metrics
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -691,68 +692,59 @@ class DesignSublossLogger(Logger):
             with open(step_dir / "raw_step_history.pickle", 'wb') as f:
                 pickle.dump(raw_data, f)
 
-    def get_callbacks(self, training_program=None):
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            if step_history is None:
-                return
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        batch = view.latest()
+        if batch is None:
+            return
+        step_history = view.to_step_history()
+        data = self._extract_subloss_data(step, step_history)
+        self._history.append(data)
 
-            data = self._extract_subloss_data(step, step_history)
-            self._history.append(data)
+        if self._save_dir and step % self.plot_period == 0:
+            step_dir = self._save_dir / f"step_{step:06d}"
+            step_dir.mkdir(parents=True, exist_ok=True)
 
-            if self._save_dir and step % self.plot_period == 0:
-                step_dir = self._save_dir / f"step_{step:06d}"
-                step_dir.mkdir(parents=True, exist_ok=True)
+            report = self._generate_text_report(step, data)
+            (step_dir / "subloss_report.txt").write_text(report)
+            self._save_step_data(step, data, step_history)
 
-                # Text report
-                report = self._generate_text_report(step, data)
-                (step_dir / "subloss_report.txt").write_text(report)
+            if self.generate_plots:
+                self._generate_diagnostic_plot(
+                    step, step_history, data, step_dir / "diagnostic.png"
+                )
 
-                # Save data
-                self._save_step_data(step, data, step_history)
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        batch = view.latest()
+        if batch is None:
+            return
+        step_history = view.to_step_history()
+        data = self._extract_subloss_data(step, step_history)
+        self._history.append(data)
 
-                # Diagnostic plot
-                if self.generate_plots:
-                    self._generate_diagnostic_plot(
-                        step, step_history, data, step_dir / "diagnostic.png"
-                    )
+        if self._save_dir:
+            final_dir = self._save_dir / "final"
+            final_dir.mkdir(parents=True, exist_ok=True)
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            if step_history is not None:
-                data = self._extract_subloss_data(step, step_history)
-                self._history.append(data)
+            report = self._generate_text_report(step, data)
+            (final_dir / "subloss_report.txt").write_text(report)
+            self._save_step_data(step, data, step_history)
 
-                if self._save_dir:
-                    final_dir = self._save_dir / "final"
-                    final_dir.mkdir(parents=True, exist_ok=True)
+            if self.generate_plots:
+                self._generate_diagnostic_plot(
+                    step, step_history, data, final_dir / "diagnostic.png"
+                )
 
-                    report = self._generate_text_report(step, data)
-                    (final_dir / "subloss_report.txt").write_text(report)
+            if self.save_pickle:
+                import dill as pickle
 
-                    self._save_step_data(step, data, step_history)
+                with open(self._save_dir / "subloss_history.pickle", 'wb') as f:
+                    pickle.dump(self._history, f)
 
-                    if self.generate_plots:
-                        self._generate_diagnostic_plot(
-                            step, step_history, data, final_dir / "diagnostic.png"
-                        )
-
-                    # Save history
-                    if self.save_pickle:
-                        import dill as pickle
-
-                        with open(self._save_dir / "subloss_history.pickle", 'wb') as f:
-                            pickle.dump(self._history, f)
-
-                    # Trajectory plots
-                    self._generate_trajectory_plots()
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+            self._generate_trajectory_plots()
 
     def _generate_trajectory_plots(self):
         if not self._history or not self.generate_plots:

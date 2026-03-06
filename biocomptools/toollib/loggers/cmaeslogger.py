@@ -8,11 +8,11 @@ Tracks and visualizes:
 """
 
 import numpy as np
-from typing import Callable
 
 from pydantic import ConfigDict, Field
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -171,68 +171,58 @@ class CMAESLogger(Logger):
 
         plt.show()
 
-    def get_callbacks(self, training_program=None) -> list[tuple[int, Callable]]:
-        def log_ec_step(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step_history = view.to_step_history()
+        if "sigma" not in step_history and "gen_best_loss" not in step_history:
+            return
 
-            if "sigma" not in step_history and "gen_best_loss" not in step_history:
-                return
+        metrics = self._extract_ec_metrics(context.current_step, step_history)
+        self._history.append(metrics)
 
-            metrics = self._extract_ec_metrics(step, step_history)
-            self._history.append(metrics)
+        if self.show_table:
+            self._print_ec_stats(metrics)
 
-            if self.show_table:
-                self._print_ec_stats(metrics)
+        if self.show_plots:
+            self._plot_ec_history()
 
-            if self.show_plots:
-                self._plot_ec_history()
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        if not self._history:
+            return
 
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if not self._history:
-                return
+        from rich.console import Console
+        from rich.panel import Panel
 
-            from rich.console import Console
-            from rich.panel import Panel
+        console = Console()
 
-            console = Console()
+        first = self._history[0]
+        last = self._history[-1]
 
-            first = self._history[0]
-            last = self._history[-1]
+        summary_lines = [
+            "[bold]CMA-ES Optimization Summary[/bold]",
+            "",
+            f"Total Generations: {len(self._history)}",
+            f"Initial Loss: {first['gen_best_loss']:.6f}",
+            f"Final Loss: {last['best_loss']:.6f}",
+        ]
 
-            summary_lines = [
-                "[bold]CMA-ES Optimization Summary[/bold]",
-                "",
-                f"Total Generations: {len(self._history)}",
-                f"Initial Loss: {first['gen_best_loss']:.6f}",
-                f"Final Loss: {last['best_loss']:.6f}",
-            ]
-
-            if first["gen_best_loss"] > 0:
-                improvement = (
-                    (first["gen_best_loss"] - last["best_loss"]) / first["gen_best_loss"] * 100
-                )
-                summary_lines.append(f"Improvement: {improvement:.1f}%")
-
-            summary_lines.extend(
-                [
-                    "",
-                    f"Final σ: {last['sigma']:.6f}",
-                    f"σ Range: [{min(h['sigma'] for h in self._history):.4f}, {max(h['sigma'] for h in self._history):.4f}]",
-                ]
+        if first["gen_best_loss"] > 0:
+            improvement = (
+                (first["gen_best_loss"] - last["best_loss"]) / first["gen_best_loss"] * 100
             )
+            summary_lines.append(f"Improvement: {improvement:.1f}%")
 
-            console.print(Panel("\n".join(summary_lines), title="[cyan]CMA-ES Complete[/cyan]"))
+        summary_lines.extend(
+            [
+                "",
+                f"Final σ: {last['sigma']:.6f}",
+                f"σ Range: [{min(h['sigma'] for h in self._history):.4f}, {max(h['sigma'] for h in self._history):.4f}]",
+            ]
+        )
 
-            if self.show_plots:
-                self._plot_ec_history()
+        console.print(Panel("\n".join(summary_lines), title="[cyan]CMA-ES Complete[/cyan]"))
 
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, log_ec_step))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
+        if self.show_plots:
+            self._plot_ec_history()
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         if not self._history:

@@ -1,19 +1,16 @@
-from __future__ import annotations
 import json
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, Literal
 
 from pydantic import ConfigDict, PrivateAttr
 
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.utils import to_scalar as _to_scalar
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from biocomptools.logger_history import HistoryView, LoggerContext
-    from biocomp.compute import ComputeStack
+from biocomp.compute import ComputeStack
 
 logger = get_logger(__name__)
 
@@ -1187,201 +1184,6 @@ class DesignDiagnosticLogger(Logger):
             if val is not None:
                 summary[pname] = _to_scalar(val)
         output_path.write_text(json.dumps(summary, indent=2, default=str))
-
-    def get_callbacks(self, training_program=None):
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            if step_history is None:
-                return
-
-            if stack and not self._network_names:
-                self._network_names = self._extract_network_names(stack)
-            if stack and self._param_metadata is None:
-                self._build_param_metadata(stack)
-
-            yhatdep = _squeeze_to_3d(step_history.get("yhatdep"))
-            all_losses = step_history.get("all_losses")
-            n_targets, n_networks, batch_size = 1, 1, None
-
-            if yhatdep is not None and yhatdep.ndim == 3:
-                batch_size, n_targets, n_networks = yhatdep.shape
-            elif all_losses is not None:
-                arr = np.asarray(all_losses)
-                if arr.ndim >= 3:
-                    n_targets = arr.shape[1] if arr.ndim >= 2 else 1
-                    n_networks = arr.shape[2] if arr.ndim >= 3 else 1
-
-            targets = self._dmanager.targets if self._dmanager else []
-            params = step_history.get("latest_params") or step_history.get("params")
-            grad = step_history.get("grad")
-
-            for tid in range(min(n_targets, self.max_targets_to_plot)):
-                selected_nets = self._get_selected_networks(tid, n_networks, step_history)
-                for nid in selected_nets:
-                    metrics = self._extract_metrics(step, step_history, tid, nid)
-                    self._append_to_history(tid, nid, metrics)
-                    if params is not None:
-                        self._append_param_history(
-                            tid,
-                            nid,
-                            unroll_params(
-                                params, 0, tid, nid, self._tu_idx_to_id, self._param_metadata
-                            ),
-                        )
-                    if grad is not None:
-                        self._append_grad_history(
-                            tid,
-                            nid,
-                            unroll_grads(
-                                grad, 0, tid, nid, self._tu_idx_to_id, self._param_metadata
-                            ),
-                        )
-
-            # Skip figure generation if final_figure_only mode (figures generated in final_callback)
-            if self.generate_plots and step > 0 and not self.final_figure_only:
-                step_dir = self._save_dir / f"step_{step:06d}"
-                step_dir.mkdir(parents=True, exist_ok=True)
-                self._save_summary_json(step, step_history, step_dir / "summary.json")
-
-                X_hist = _squeeze_to_3d(step_history.get("X"))
-                Y_hist = _squeeze_to_3d(step_history.get("Y"))
-
-                for tid in range(min(n_targets, self.max_targets_to_plot)):
-                    target = targets[tid] if tid < len(targets) else None
-                    target_name = (
-                        getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
-                    )
-                    selected_nets = self._get_selected_networks(tid, n_networks, step_history)
-
-                    for nid in selected_nets:
-                        history = self._history.get((tid, nid), [])
-                        param_history = self._param_history.get((tid, nid), [])
-                        grad_history = self._grad_history.get((tid, nid), [])
-
-                        X, Y, Yhat = None, None, None
-                        if X_hist is not None and X_hist.ndim == 3:
-                            n_inputs = 2
-                            X = X_hist[:, tid, nid * n_inputs : (nid + 1) * n_inputs]
-                        if Y_hist is not None and Y_hist.ndim == 3:
-                            Y = Y_hist[:, tid, 0]
-                        if yhatdep is not None and yhatdep.ndim == 3:
-                            Yhat = yhatdep[:, tid, nid]
-
-                        output_path = self._get_figure_output_path(
-                            step, tid, nid, target_name, step_dir
-                        )
-
-                        try:
-                            self._generate_network_figure(
-                                step,
-                                tid,
-                                nid,
-                                history,
-                                param_history,
-                                grad_history,
-                                X,
-                                Y,
-                                Yhat,
-                                target_name,
-                                output_path,
-                                network_name=self._get_network_name(nid),
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"DiagnosticLogger: failed to generate figure: {e}", exc_info=True
-                            )
-
-        def final_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            # First accumulate this step's data
-            periodic_callback(step, training_config, step_history, stack, **kwargs)
-
-            final_dir = self._save_dir / "final"
-            final_dir.mkdir(parents=True, exist_ok=True)
-
-            # In final_figure_only mode, generate the consolidated figure here
-            if self.final_figure_only and self.generate_plots and step_history:
-                yhatdep = _squeeze_to_3d(step_history.get("yhatdep"))
-                all_losses = step_history.get("all_losses")
-                n_targets, n_networks = 1, 1
-
-                if yhatdep is not None and yhatdep.ndim == 3:
-                    _, n_targets, n_networks = yhatdep.shape
-                elif all_losses is not None:
-                    arr = np.asarray(all_losses)
-                    if arr.ndim >= 3:
-                        n_targets = arr.shape[1] if arr.ndim >= 2 else 1
-                        n_networks = arr.shape[2] if arr.ndim >= 3 else 1
-
-                targets = self._dmanager.targets if self._dmanager else []
-                X_hist = _squeeze_to_3d(step_history.get("X"))
-                Y_hist = _squeeze_to_3d(step_history.get("Y"))
-
-                for tid in range(min(n_targets, self.max_targets_to_plot)):
-                    target = targets[tid] if tid < len(targets) else None
-                    target_name = (
-                        getattr(target, 'name', f'target_{tid}') if target else f'target_{tid}'
-                    )
-                    selected_nets = self._get_selected_networks(tid, n_networks, step_history)
-
-                    for nid in selected_nets:
-                        history = self._history.get((tid, nid), [])
-                        param_history = self._param_history.get((tid, nid), [])
-                        grad_history = self._grad_history.get((tid, nid), [])
-
-                        X, Y, Yhat = None, None, None
-                        if X_hist is not None and X_hist.ndim == 3:
-                            n_inputs = 2
-                            X = X_hist[:, tid, nid * n_inputs : (nid + 1) * n_inputs]
-                        if Y_hist is not None and Y_hist.ndim == 3:
-                            Y = Y_hist[:, tid, 0]
-                        if yhatdep is not None and yhatdep.ndim == 3:
-                            Yhat = yhatdep[:, tid, nid]
-
-                        output_path = self._get_figure_output_path(
-                            step, tid, nid, target_name, final_dir
-                        )
-
-                        try:
-                            self._generate_network_figure(
-                                step,
-                                tid,
-                                nid,
-                                history,
-                                param_history,
-                                grad_history,
-                                X,
-                                Y,
-                                Yhat,
-                                target_name,
-                                output_path,
-                                network_name=self._get_network_name(nid),
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"DiagnosticLogger: failed to generate final figure: {e}",
-                                exc_info=True,
-                            )
-
-            if self.save_history:
-                import dill as pickle
-
-                with open(final_dir / "full_history.pickle", 'wb') as f:
-                    pickle.dump(
-                        {
-                            "metrics_history": dict(self._history),
-                            "param_history": dict(self._param_history),
-                            "grad_history": dict(self._grad_history),
-                        },
-                        f,
-                    )
-                if step_history:
-                    self._save_summary_json(step, step_history, final_dir / "summary.json")
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, final_callback))
-        return callbacks
 
     def get_metrics(self, replicate: int | None = None) -> dict | None:
         if not self._history:

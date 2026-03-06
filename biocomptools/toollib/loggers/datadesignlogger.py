@@ -3,10 +3,11 @@
 import numpy as np
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Callable, Optional, Any
+from typing import Any
 from pydantic import ConfigDict
 
 from biocomptools.toollib.loggers.logger import Logger
+from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,19 +25,19 @@ class DataDesignLogger(Logger):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    output_dir: Optional[str] = None
-    baseline_r2: Optional[float] = None
-    baseline_rmse: Optional[float] = None
-    baseline_loss: Optional[float] = None
+    output_dir: str | None = None
+    baseline_r2: float | None = None
+    baseline_rmse: float | None = None
+    baseline_loss: float | None = None
     top_k: int = 5
     save_interval: int = 100
 
-    _loss_history: List[Tuple[int, np.ndarray]] = []
-    _best_loss_per_target: Dict[int, float] = {}
-    _best_config_per_target: Dict[int, Tuple[int, int]] = {}
-    _final_params: Optional[Any] = None
+    _loss_history: list[tuple[int, np.ndarray]] = []
+    _best_loss_per_target: dict[int, float] = {}
+    _best_config_per_target: dict[int, tuple[int, int]] = {}
+    _final_params: Any = None
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._loss_history = []
         self._best_loss_per_target = {}
@@ -167,45 +168,38 @@ class DataDesignLogger(Logger):
         output_path.write_text(json.dumps(summary, indent=2))
         logger.info(f"Saved design summary to {output_path}")
 
-    def get_callbacks(self, training_program=None) -> List[Tuple[int, Callable]]:
-        def periodic_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-            if step_history is None:
-                return
-            all_losses = step_history.get('all_losses')
-            if all_losses is None:
-                return
+    def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        step_history = view.to_step_history()
+        all_losses = step_history.get('all_losses')
+        if all_losses is None:
+            return
+        self._update_history(step, all_losses)
+        self._final_params = step_history.get('latest_params')
 
-            self._update_history(step, all_losses)
+        if self.output_dir and step % self.save_interval == 0:
+            output_path = Path(self.output_dir)
+            self._save_loss_history(output_path / f'loss_history_step{step:06d}.json')
+
+    def on_end(self, view: HistoryView, context: LoggerContext) -> None:
+        step = context.current_step
+        self._step_count = step
+        batch = view.latest()
+        if batch is not None:
+            step_history = view.to_step_history()
+            all_losses = step_history.get('all_losses')
+            if all_losses is not None:
+                self._update_history(step, all_losses)
             self._final_params = step_history.get('latest_params')
 
-            if self.output_dir and step % self.save_interval == 0:
-                output_path = Path(self.output_dir)
-                self._save_loss_history(output_path / f'loss_history_step{step:06d}.json')
+        if self.output_dir:
+            output_path = Path(self.output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            self._save_loss_history(output_path / 'final_loss_history.json')
+            self._save_final_summary(output_path / 'final_summary.json')
 
-        def end_callback(step, training_config, step_history=None, stack=None, **kwargs):
-            self._step_count = step
-
-            if step_history is not None:
-                all_losses = step_history.get('all_losses')
-                if all_losses is not None:
-                    self._update_history(step, all_losses)
-                self._final_params = step_history.get('latest_params')
-
-            if self.output_dir:
-                output_path = Path(self.output_dir)
-                output_path.mkdir(parents=True, exist_ok=True)
-                self._save_loss_history(output_path / 'final_loss_history.json')
-                self._save_final_summary(output_path / 'final_summary.json')
-
-        callbacks = []
-        if self.call_at_interval is not None:
-            callbacks.append((self.call_at_interval, periodic_callback))
-        if -1 in self.call_at:
-            callbacks.append((-1, end_callback))
-        return callbacks
-
-    def get_metrics(self, replicate: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def get_metrics(self, replicate: int | None = None) -> dict[str, Any] | None:
         if not self._loss_history:
             return None
 

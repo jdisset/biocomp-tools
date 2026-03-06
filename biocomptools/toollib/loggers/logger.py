@@ -1,11 +1,9 @@
 ## {{{                          --     imports     --
 
-from __future__ import annotations
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import Callable, Literal
 from pydantic import BaseModel, ConfigDict
 
-if TYPE_CHECKING:
-    from biocomptools.logger_history import HistoryView, LoggerContext
+from biocomptools.logger_history import HistoryView, LoggerContext
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -13,9 +11,7 @@ if TYPE_CHECKING:
 class Logger(BaseModel):
     """Base class for all loggers.
 
-    Supports two patterns:
-    1. Legacy: Override get_callbacks() to return (period, callback) tuples
-    2. New: Set declarative attributes and override on_batch/on_end methods
+    Override on_batch() and/or on_end() to implement logger behavior.
 
     Scheduling:
         call_at_interval: Periodic firing every N steps. None = no periodic calls.
@@ -23,7 +19,7 @@ class Logger(BaseModel):
                  positive = after that step. Default [-1] (end only).
         The final call schedule is the union of both.
 
-    New pattern attributes:
+    Declarative attributes:
         history_window: Number of steps to retain in history (None = all)
         history_mode: "window" (last N), "since_last" (since last callback), "all"
         required_metrics: Metric keys to include in HistoryView
@@ -46,7 +42,7 @@ class Logger(BaseModel):
     callback_mode: Literal["thread", "process"] = "thread"
     metadata: dict[str, object] = {}
 
-    # new declarative attributes
+    # declarative attributes
     history_window: int | None = None  # number of steps to keep (None = all)
     history_mode: Literal["window", "since_last", "all"] = "window"
     required_metrics: list[str] = []
@@ -55,66 +51,39 @@ class Logger(BaseModel):
 
     # internal tracking
     _last_callback_step: int = -1
-    _uses_new_pattern: bool = False
+    _call_at_set: frozenset[int] = frozenset()
 
-    def model_post_init(self, __context):
-        # detect if subclass uses new pattern (overrides on_batch or on_end)
-        cls = type(self)
-        self._uses_new_pattern = (
-            cls.on_batch is not Logger.on_batch or cls.on_end is not Logger.on_end
-        )
+    def model_post_init(self, __context: object) -> None:
+        self._call_at_set = frozenset(self.call_at)
+
+    def should_fire(self, step: int) -> bool:
+        """Whether this logger should fire at the given step (excluding start/end)."""
+        if step <= 0:
+            return False
+        interval = self.call_at_interval
+        if interval is not None and interval > 0 and step % interval == 0:
+            return True
+        return step in self._call_at_set
 
     def initialize(self, training_program: object) -> None:
-        """Optional initialization before training starts."""
         pass
 
-    def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
-        """Return a list of (period, callback_function) tuples for the training loop.
-
-        Legacy pattern - override this for custom callback behavior.
-        For new pattern, override on_batch and/or on_end instead.
-        """
-        if self._uses_new_pattern:
-            # return empty - handler will call on_batch/on_end directly
-            return []
-        raise NotImplementedError("Subclass must implement get_callbacks or on_batch/on_end")
-
     def on_batch(self, view: HistoryView, context: LoggerContext) -> None:
-        """Called every `call_at_interval` steps (and at specific `call_at` steps).
-
-        New pattern - override this instead of get_callbacks for simpler code.
-
-        Args:
-            view: HistoryView containing requested metrics/arrays
-            context: LoggerContext with training state
-        """
         pass
 
     def on_start(self, context: LoggerContext) -> None:
-        """Called at training start if 0 is in call_at."""
         pass
 
     def on_end(self, view: HistoryView, context: LoggerContext) -> None:
-        """Called at training end if -1 is in call_at.
-
-        Receives full history (or windowed based on history_window).
-        """
         pass
 
     def get_metrics(self, replicate: int | None = None) -> dict[str, object] | None:
-        """Return a dictionary of the latest metrics from this logger."""
         return None
 
     def finalize(self) -> None:
-        """Optional cleanup after training ends."""
         pass
 
     def find_myself(self, training_program: object = None) -> int:
-        """Find this logger's index in the training program's logger list.
-
-        Useful for generating unique names when multiple loggers of the same
-        type are used, e.g., f"loss_{self.find_myself(training_program)}".
-        """
         if not training_program:
             return 0
         loggers = getattr(training_program, "loggers", [])
@@ -125,13 +94,18 @@ class Logger(BaseModel):
 
 
 class FunctionLogger(Logger):
+    """Legacy logger that wraps raw callback functions.
+
+    Retained for backward compatibility with HyperoptTrainingLogger and
+    direct get_callbacks() usage outside LoggerDispatcher.
+    """
+
     call_at_interval: int | dict[str, int] | None = None
     functions: list[Callable[..., object]] = []
 
     def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
         interval = self.call_at_interval
         if isinstance(interval, dict):
-            # Map function name → interval; pair each function with its interval
             callbacks: list[tuple[int, Callable[..., object]]] = []
             for fn in self.functions:
                 fn_interval = interval.get(fn.__name__)
@@ -141,5 +115,4 @@ class FunctionLogger(Logger):
         elif isinstance(interval, int):
             return [(interval, fn) for fn in self.functions]
         else:
-            # No periodic interval; check call_at for end-only dispatch
             return []

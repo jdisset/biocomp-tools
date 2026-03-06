@@ -50,41 +50,46 @@ from abc import ABC, abstractmethod
 
 logger = get_logger(__name__)
 
-T = TypeVar('T')
+T = TypeVar("T")
 MaybeDeferred = DeferredNode[T] | T
 
 
 class BaseOptimizationProgram(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    base_dir: Annotated[str, Arg(help='Base directory to save outputs')] = (
+    base_dir: Annotated[str, Arg(help="Base directory to save outputs")] = (
         config.paths.training_output
     )
-    experiment_name: Annotated[str, Arg(help='Name of the experiment')] = 'default_xp'
-    run_name_suffix: str = ''
+    experiment_name: Annotated[str, Arg(help="Name of the experiment")] = "default_xp"
+    run_name_suffix: str = ""
     metadata: dict[str, Any] = {}
 
-    loggers: Annotated[list[Union[MaybeDeferred[Logger], Logger]], Arg(help='Loggers to use')] = (
+    loggers: Annotated[list[Union[MaybeDeferred[Logger], Logger]], Arg(help="Loggers to use")] = (
         Field(default_factory=lambda: [])
     )
 
     async_logging: bool = True
     async_store_location: Optional[Path] = Field(
-        default_factory=lambda: Path('step_history_data'),
-        description='Location to store async logger data.',
+        default_factory=lambda: Path("step_history_data"),
+        description="Location to store async logger data.",
     )
     keep_history_on_disk: bool = Field(
-        default=False, description='Whether to keep step history files on disk for replay mode.'
+        default=False, description="Whether to keep step history files on disk for replay mode."
     )
     save_all_steps: bool = Field(
-        default=False, description='Whether to save step history for every step.'
+        default=False, description="Whether to save step history for every step."
+    )
+    use_history_db: bool = Field(
+        default=True,
+        description="Use per-run SQLite DB for step history (enables full-fidelity replay).",
     )
     n_workers: int = 8
 
     _lib: Optional[Any] = None
-    _yamldump: str = ''
+    _history_db: Optional[Any] = None
+    _yamldump: str = ""
     _modeldump: dict = {}
-    _save_dir: Path = Path('.')
+    _save_dir: Path = Path(".")
     _run_name: Optional[str] = None
     _unique_id: Optional[str] = None
 
@@ -172,22 +177,54 @@ class BaseOptimizationProgram(BaseModel, ABC):
         self.loggers = new_loggers
 
     def _get_logger_context(self) -> dict:
-        return {'save_dir': self._save_dir}
+        return {"save_dir": self._save_dir}
+
+    def _create_history_db(self) -> Any:
+        """Create RunHistoryDB and save initial run info."""
+        if not self.use_history_db:
+            return None
+
+        from biocomptools.history_db import RunHistoryDB
+
+        db = RunHistoryDB(self._save_dir / "run_history.db")
+        metadata = self._metadata if hasattr(self, "_metadata") else {}
+
+        model = getattr(self, "_model", None)
+        dmanager = getattr(self, "_dmanager", None)
+        dconfig = getattr(self, "design_conf", None)
+        run_type = "design" if dmanager is not None else "training"
+
+        db.save_run_info(
+            run_type=run_type,
+            config=metadata,
+            commit_hashes={
+                pkg: metadata.get(f"{pkg}_hash", "unknown")
+                for pkg in ("dracon", "biocomp", "biocomptools")
+            },
+            host=metadata.get("host", "unknown"),
+            model=model,
+            dmanager=dmanager,
+            dconfig=dconfig,
+            model_signature=getattr(model, "signature", None),
+        )
+        logger.info(f"Created history DB: {db.path}")
+        self._history_db = db
+        return db
 
     def gen_metadata(self):
         import os
         import socket
 
-        starttime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        hashes = get_package_git_hashes(['dracon', 'biocomp', 'biocomptools'])
+        starttime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        hashes = get_package_git_hashes(["dracon", "biocomp", "biocomptools"])
 
         self._metadata = {
-            f'{self.__class__.__name__.lower()}_id': self.unique_id,
-            'start_time': starttime,
-            'host': f"{os.environ.get('USER')}@{socket.gethostname()}",
-            'biocomp_hash': hashes.get('biocomp', 'unknown'),
-            'biocomptools_hash': hashes.get('biocomptools', 'unknown'),
-            'dracon_hash': hashes.get('dracon', 'unknown'),
+            f"{self.__class__.__name__.lower()}_id": self.unique_id,
+            "start_time": starttime,
+            "host": f"{os.environ.get('USER')}@{socket.gethostname()}",
+            "biocomp_hash": hashes.get("biocomp", "unknown"),
+            "biocomptools_hash": hashes.get("biocomptools", "unknown"),
+            "dracon_hash": hashes.get("dracon", "unknown"),
         }
 
         self._metadata.update(self.metadata)
@@ -198,7 +235,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         output_dir = self._save_dir / self.get_output_subdir()
         output_dir.mkdir(exist_ok=True, parents=True)
 
-        with open(output_dir / f'{self.__class__.__name__.lower()}_dump.yaml', 'w') as f:
+        with open(output_dir / f"{self.__class__.__name__.lower()}_dump.yaml", "w") as f:
             f.write(self._yamldump)
 
         self.enrich_metadata()
@@ -214,10 +251,12 @@ class BaseOptimizationProgram(BaseModel, ABC):
             m for m in (lg.metadata for lg in self.loggers if isinstance(lg, Logger)) if m
         ]
         if logger_metadata:
-            self._metadata['loggers'] = make_json_ready(logger_metadata)
+            self._metadata["loggers"] = make_json_ready(logger_metadata)
 
-        log_file = output_dir / 'output.log.txt'
+        log_file = output_dir / "output.log.txt"
         log_file.parent.mkdir(exist_ok=True, parents=True)
+
+        history_db = self._create_history_db()
 
         dispatch = LoggerDispatcher(
             self.loggers,
@@ -228,20 +267,21 @@ class BaseOptimizationProgram(BaseModel, ABC):
             keep_history_on_disk=self.keep_history_on_disk,
             save_all_steps=self.save_all_steps,
             n_workers=self.n_workers,
+            history_db=history_db,
         )
 
         result = await self.execute_optimization(dispatch)
 
         dispatch.shutdown(result)
 
-        self._metadata['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self._metadata["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         self.save_outputs(*result if isinstance(result, tuple) else [result])
 
         dispatch.finalize(self.loggers)
 
     def save_metadata(self, save_dir: Path):
-        with open(save_dir / 'metadata.json', 'w') as f:
+        with open(save_dir / "metadata.json", "w") as f:
             import json
 
             json.dump(make_json_ready(self._metadata), f, indent=2)
@@ -252,7 +292,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         assert self._run_name, "Run name not set"
 
         fig = print_matadata(fig, ax, self._metadata, run_name=self._run_name)
-        fig.savefig(save_dir / 'summary_loss_plot.pdf')
+        fig.savefig(save_dir / "summary_loss_plot.pdf")
         logger.debug(f"Saved summary plot to {save_dir / 'summary_loss_plot.pdf'}")
 
 
@@ -326,7 +366,7 @@ async def run_optimization_program(
 
     context = {
         **make_context_from_types(default_types),
-        'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+        "BIOCOMP_ROOT": Path(config.paths.root).expanduser().resolve(),
     }
     if context_additions:
         context.update(context_additions)
