@@ -86,6 +86,8 @@ def triage_step_history(step_history: dict[str, Any]) -> TriagedStepData:
             continue
 
         # Auto-triage unknown keys by type
+        if v is None:
+            continue
         if isinstance(v, dict):
             dicts[k] = v
         elif hasattr(v, "shape"):

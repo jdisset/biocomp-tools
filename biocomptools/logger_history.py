@@ -21,6 +21,21 @@ if not hasattr(np, "float"):
     np.float = np.float64  # type: ignore[attr-defined]
 
 
+def _unwrap_triage_dict(v: Any) -> Any:
+    """Unwrap internal triage wrappers back to original types.
+
+    {"_list": [...]} → np.asarray(list)  (small array wrapper)
+    {"_value": "None"} → None            (None wrapper)
+    """
+    if not isinstance(v, dict):
+        return v
+    if "_list" in v and len(v) == 1:
+        return np.asarray(v["_list"])
+    if "_value" in v and len(v) == 1 and v["_value"] == "None":
+        return None
+    return v
+
+
 @dataclass
 class BatchData:
     """Data from a single batch (forward/backward pass)."""
@@ -78,13 +93,8 @@ class BatchData:
 
         metrics: dict[str, Any] = {}
         metrics.update(triaged.scalars)
-        # Unwrap {"_list": [...]} wrappers — those are a DB serialization
-        # detail, in-memory callers should see original numpy arrays.
         for k, v in triaged.dicts.items():
-            if isinstance(v, dict) and "_list" in v and len(v) == 1:
-                metrics[k] = np.asarray(v["_list"])
-            else:
-                metrics[k] = v
+            metrics[k] = _unwrap_triage_dict(v)
 
         arrays: dict[str, Any] = {}
         arrays.update(triaged.arrays)
@@ -217,18 +227,14 @@ class HistoryView:
     def to_step_history(self) -> dict[str, Any]:
         """Convert latest batch to flat step_history dict for backward compat.
 
-        Unwraps internal serialization wrappers ({"_list": [...]}) back to
-        numpy arrays so callers see the original types.
+        Unwraps internal serialization wrappers back to original types.
         """
         if not self._batches:
             return {}
         b = self._batches[-1]
         result: dict[str, Any] = {"loss": b.loss}
         for k, v in b.metrics.items():
-            if isinstance(v, dict) and "_list" in v and len(v) == 1:
-                result[k] = np.asarray(v["_list"])
-            else:
-                result[k] = v
+            result[k] = _unwrap_triage_dict(v)
         result.update(b.arrays)
         return result
 
