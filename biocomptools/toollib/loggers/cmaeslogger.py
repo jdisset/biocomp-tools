@@ -7,6 +7,8 @@ Tracks and visualizes:
 - Convergence indicators
 """
 
+from typing import Literal
+
 import numpy as np
 
 from pydantic import ConfigDict, Field
@@ -31,7 +33,7 @@ class CMAESLogger(Logger):
     plot_width: int = Field(default=80, description="Width of plotext graphs")
     show_table: bool = Field(default=True, description="Show rich table with stats")
     show_plots: bool = Field(default=True, description="Show plotext graphs")
-    async_ok: bool = False
+    execution_mode: Literal["inline", "thread", "process"] = "inline"
 
     _history: list[dict] = []
     _best_loss_ever: float = float("inf")

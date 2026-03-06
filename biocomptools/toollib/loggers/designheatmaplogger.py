@@ -1,7 +1,7 @@
 """Design Heatmap Logger: Rich ASCII visualization of target vs prediction during optimization."""
 
 import numpy as np
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field
 
@@ -94,7 +94,7 @@ class DesignHeatmapLogger(Logger):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     required_arrays: list[str] = ["yhatdep", "latest_params"]
-    async_ok: bool = False
+    execution_mode: Literal["inline", "thread", "process"] = "inline"
     xres: int = Field(default=40, description="Horizontal resolution for ASCII heatmap")
     yres: int = Field(default=20, description="Vertical resolution for ASCII heatmap")
     show_stats: bool = Field(default=True, description="Show statistics below heatmaps")

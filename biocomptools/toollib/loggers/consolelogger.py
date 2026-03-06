@@ -31,7 +31,7 @@ class EnhancedConsoleLogger(Logger):
     plot_height: int = 22
     plot_width: int = 100
     top_k_designs: int = 5
-    async_ok: bool = False
+    execution_mode: Literal["inline", "thread", "process"] = "inline"
 
     # internal state
     _design_mode: bool = PrivateAttr(default=False)
@@ -264,7 +264,7 @@ class ConsoleLogger(Logger):
     """Logs the training loss to console."""
 
     call_at_interval: int = 1
-    async_ok: bool = False
+    execution_mode: Literal["inline", "thread", "process"] = "inline"
     required_arrays: list[str] = ["loss"]
 
     def on_batch(self, view: HistoryView, context: LoggerContext) -> None:

@@ -9,7 +9,7 @@ class HyperoptTrainingLogger(Logger):
     """Live training progress logger for hyperopt using rich."""
 
     call_at_interval: int = 1  # log every step
-    async_ok: bool = False  # must be sync for live display
+    execution_mode: str = "inline"  # must be inline for live display
     n_replicates: int = 4
 
     def __init__(self, n_replicates: int = 4, **kwargs):

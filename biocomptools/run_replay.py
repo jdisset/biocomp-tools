@@ -1,22 +1,19 @@
 """Replay saved step history through loggers without re-running optimization.
 
 Supports two storage backends (auto-detected):
-- **DB mode** (``run_history.db``): full-fidelity replay with model, dmanager,
-  and ComputeStack reconstruction so every logger works at full capability.
+- **DB mode** (``run_history.db``): Unified replay via LoggerRunner reading from DB.
 - **Legacy pkl mode** (``step_*.pkl`` files): degraded replay without stack/model
-  context (backward compat).
+  context (backward compat, will be removed).
 
 Usage:
     biocomp-replay +biocomp-jobs/replay/diagnostic.yaml ++history_dir=/path/to/run
     biocomp-replay +replay_config.yaml --last-n 100 --final-only
 """
 
-from __future__ import annotations
-
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,15 +51,9 @@ def _get_all_steps(history_dir: Path) -> list[int]:
 
 
 def _detect_history_source(history_dir: Path) -> str:
-    """Detect whether history_dir contains a DB or legacy pkl files.
-
-    Returns ``"db"`` if ``run_history.db`` is found, ``"pkl"`` if step pkl
-    files are found, or raises FileNotFoundError.
-    """
     db_path = history_dir / "run_history.db"
     if db_path.exists():
         return "db"
-    # Also check parent dir (history_dir might point to step_history_data/)
     parent_db = history_dir.parent / "run_history.db"
     if parent_db.exists():
         return "db"
@@ -72,7 +63,6 @@ def _detect_history_source(history_dir: Path) -> str:
 
 
 def _resolve_db_path(history_dir: Path) -> Path:
-    """Return the actual path to run_history.db."""
     db_path = history_dir / "run_history.db"
     if db_path.exists():
         return db_path
@@ -90,11 +80,7 @@ def replay_history(
     final_only: bool = False,
     max_history_len: int = 10000,
 ) -> None:
-    """Replay step history through loggers, auto-detecting DB vs pkl source.
-
-    When a ``run_history.db`` is found, rebuilds full context (model, stack,
-    dmanager) so all loggers — including those needing ComputeStack — work.
-    """
+    """Replay step history through loggers, auto-detecting DB vs pkl source."""
     source = _detect_history_source(history_dir)
 
     if source == "db":
@@ -112,9 +98,10 @@ def _replay_from_db(
     max_history_len: int,
 ) -> None:
     from biocomptools.history_db import RunHistoryDB
+    from biocomptools.logger_runner import LoggerRunner
 
     db_path = _resolve_db_path(history_dir)
-    db = RunHistoryDB(db_path)
+    db = RunHistoryDB(db_path, read_only=True)
 
     info = db.load_run_info()
     assert info is not None, f"Empty RunInfo in {db_path}"
@@ -124,33 +111,14 @@ def _replay_from_db(
     if commit_hashes:
         logger.info(f"  Commit hashes: {commit_hashes}")
 
-    # Reconstruct context objects
-    model = db.load_model()
-    dmanager = db.load_dmanager()
-    dconfig = db.load_dconfig()
-    stack = None
-
-    if model is not None and dmanager is not None:
-        stack = _rebuild_stack(dmanager, dconfig, model)
-        logger.info(f"  Rebuilt ComputeStack: {stack.get_nb_networks()} networks")
-    else:
-        logger.warning("  No model/dmanager in DB — replay without stack context")
-
-    # Load steps
-    batches = db.load_steps(step_filter=step_filter, show_progress=True)
-    logger.info(f"  Loaded {len(batches)} steps from DB")
-
-    _dispatch_replay(
-        batches,
-        loggers,
-        output_dir,
-        final_only,
-        max_history_len,
-        stack=stack,
-        model=model,
-        dmanager=dmanager,
-        extra={"commit_hashes": commit_hashes, "run_type": info.run_type},
+    # Use LoggerRunner in replay mode — same code path as live
+    runner = LoggerRunner(
+        db=db,
+        loggers=loggers,
+        mode="replay",
+        output_dir=output_dir,
     )
+    runner.run()
 
 
 def _replay_from_pkl(
@@ -161,58 +129,36 @@ def _replay_from_pkl(
     final_only: bool,
     max_history_len: int,
 ) -> None:
+    """Legacy pkl replay — degraded, no stack/model context."""
     logger.info("Replay from legacy pkl files (degraded — no stack/model context)")
     batches = HistoryManager.load_from_step_files(
         history_dir, step_filter=step_filter, show_progress=True
     )
     logger.info(f"  Loaded {len(batches)} steps from pkl files")
 
-    _dispatch_replay(
+    _dispatch_replay_legacy(
         batches,
         loggers,
         output_dir,
         final_only,
         max_history_len,
-        stack=None,
-        model=None,
-        dmanager=None,
-        extra={},
     )
 
 
-def _rebuild_stack(
-    dmanager: Any,
-    dconfig: Any,
-    model: Any,
-) -> Any:
-    """Rebuild ComputeStack from stored model + dmanager, using dconfig params."""
-    if dconfig is not None:
-        from biocomp.design_prune_controller import build_stack_from_dconf
-
-        return build_stack_from_dconf(dmanager, dconfig, model, lock_ratios=True)
-    return dmanager.build_stack(model, unlock_ratios=False)
-
-
-def _dispatch_replay(
+def _dispatch_replay_legacy(
     batches: list[BatchData],
     loggers: list[Logger],
     output_dir: Path,
     final_only: bool,
     max_history_len: int,
-    *,
-    stack: Any,
-    model: Any,
-    dmanager: Any,
-    extra: dict[str, Any],
 ) -> None:
-    """Iterate batches and dispatch to loggers, honoring scheduling rules."""
+    """Iterate batches and dispatch to loggers (legacy pkl path)."""
     if not batches:
         logger.warning("No steps to replay")
         return
 
     history = HistoryManager(max_batches=max_history_len)
 
-    # Initialize loggers
     for lg in loggers:
         try:
             lg.initialize(None)
@@ -229,14 +175,10 @@ def _dispatch_replay(
                     continue
 
                 view = history.get_view(window=lg.history_window)
-                ctx = LoggerContext(
-                    stack=stack,
+                ctx = LoggerContext.build(
+                    step=step,
                     output_dir=output_dir,
-                    current_step=step,
                     is_replay=True,
-                    dmanager=dmanager,
-                    model=model,
-                    extra=extra,
                 )
                 try:
                     lg.on_batch(view, ctx)
@@ -246,20 +188,16 @@ def _dispatch_replay(
         for batch in batches:
             history.append_batch(batch)
 
-    # Dispatch on_end for loggers with -1 in call_at
-    end_loggers = [lg for lg in loggers if -1 in lg.call_at]
+    # Dispatch on_end
+    end_loggers = [lg for lg in loggers if lg.should_fire_end()]
     if end_loggers and batches:
         final_batch = batches[-1]
         view = HistoryView([final_batch])
-        ctx = LoggerContext(
-            stack=stack,
+        ctx = LoggerContext.build(
+            step=final_batch.step_index,
             output_dir=output_dir,
-            current_step=final_batch.step_index,
             is_replay=True,
             is_final=True,
-            dmanager=dmanager,
-            model=model,
-            extra=extra,
         )
         for lg in end_loggers:
             try:
@@ -267,7 +205,6 @@ def _dispatch_replay(
             except Exception as e:
                 logger.error(f"on_end failed for {type(lg).__name__}: {e}")
 
-    # Finalize loggers
     for lg in loggers:
         try:
             lg.finalize()
@@ -324,7 +261,6 @@ class ReplayJob(BaseModel):
         return self
 
     def _build_step_filter(self, history_dir: Path) -> Callable[[int], bool] | None:
-        """Build step filter function based on selection options."""
         if self.last_n is not None:
             steps = _get_all_steps(history_dir)
             if not steps or self.last_n >= len(steps):
@@ -346,7 +282,6 @@ class ReplayJob(BaseModel):
         return None
 
     def _construct_loggers(self, output_dir: Path) -> list[Logger]:
-        """Construct deferred loggers with output directory context."""
         constructed = []
         for lg in self.loggers:
             if isinstance(lg, DeferredNode):
@@ -357,7 +292,6 @@ class ReplayJob(BaseModel):
         return constructed
 
     def run(self) -> dict:
-        """Execute replay and return summary."""
         if self.history_dir is None:
             raise ValueError("history_dir is required. Use --history-dir or ++history_dir")
 

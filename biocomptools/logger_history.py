@@ -3,7 +3,6 @@
 Provides batch-level data storage and windowed views for logger callbacks.
 """
 
-from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,11 +13,11 @@ import dill
 
 # numpy compatibility shim for older pickle files created with np.bool, np.int, etc.
 # In NumPy 2.0, np.bool_, np.int_, np.float_ were removed - use Python/NumPy equivalents
-if not hasattr(np, 'bool'):
+if not hasattr(np, "bool"):
     np.bool = bool  # type: ignore[attr-defined]
-if not hasattr(np, 'int'):
+if not hasattr(np, "int"):
     np.int = np.intp  # type: ignore[attr-defined]
-if not hasattr(np, 'float'):
+if not hasattr(np, "float"):
     np.float = np.float64  # type: ignore[attr-defined]
 
 
@@ -28,39 +27,35 @@ class BatchData:
 
     batch_index: int
     step_index: int
-    batch_in_step: int  # index within step (0 to batches_per_step-1)
     timestamp: float = 0.0
-    loss: float = float('nan')
+    loss: float = float("nan")
     metrics: dict[str, Any] = field(default_factory=dict)
     arrays: dict[str, np.ndarray] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         def _safe_array(v):
-            # Preserve ParameterTree objects
-            if hasattr(v, 'data') and hasattr(v.data, 'iter_leaves'):
+            if hasattr(v, "data") and hasattr(v.data, "iter_leaves"):
                 return v
             return np.asarray(v)
 
         return {
-            'batch_index': self.batch_index,
-            'step_index': self.step_index,
-            'batch_in_step': self.batch_in_step,
-            'timestamp': self.timestamp,
-            'loss': self.loss,
-            'metrics': self.metrics,
-            'arrays': {k: _safe_array(v) for k, v in self.arrays.items()},
+            "batch_index": self.batch_index,
+            "step_index": self.step_index,
+            "timestamp": self.timestamp,
+            "loss": self.loss,
+            "metrics": self.metrics,
+            "arrays": {k: _safe_array(v) for k, v in self.arrays.items()},
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> BatchData:
+    def from_dict(cls, d: dict) -> "BatchData":
         return cls(
-            batch_index=d['batch_index'],
-            step_index=d['step_index'],
-            batch_in_step=d['batch_in_step'],
-            timestamp=d.get('timestamp', 0.0),
-            loss=d.get('loss', float('nan')),
-            metrics=d.get('metrics', {}),
-            arrays=d.get('arrays', {}),
+            batch_index=d.get("batch_index", d.get("step_index", 0)),
+            step_index=d["step_index"],
+            timestamp=d.get("timestamp", 0.0),
+            loss=d.get("loss", float("nan")),
+            metrics=d.get("metrics", {}),
+            arrays=d.get("arrays", {}),
         )
 
     @classmethod
@@ -68,61 +63,32 @@ class BatchData:
         cls,
         step: int,
         step_history: dict,
-        batch_in_step: int = 0,
-        batches_per_step: int = 1,
         timestamp: float = 0.0,
-    ) -> BatchData:
-        """Convert legacy step_history dict to BatchData."""
-        batch_index = step * batches_per_step + batch_in_step
-        raw_loss = step_history.get('loss')
-        if raw_loss is None:
-            loss = float('nan')
-        elif hasattr(raw_loss, 'shape'):
-            # Handle arrays (including JAX arrays) - check shape before __float__
-            arr = np.asarray(raw_loss)
-            loss = float(arr.item()) if arr.size == 1 else float(np.nanmean(arr))
-        elif hasattr(raw_loss, '__float__'):
-            loss = float(raw_loss)
-        else:
-            loss = float('nan')
+    ) -> "BatchData":
+        """Convert legacy step_history dict to BatchData.
 
-        # separate metrics (scalars/small) from arrays (large)
-        metrics = {}
-        arrays = {}
-        array_keys = {'yhatdep', 'X', 'Y', 'params', 'latest_params', 'grad', 'all_losses'}
-        # Keys that should be preserved as-is (not converted to numpy)
-        preserve_keys = {'params', 'latest_params', 'grad'}
+        Delegates to triage_step_history() for consistent routing.
+        ParameterTree objects in blob keys are preserved as-is for in-memory use.
+        """
+        from biocomptools.step_history_triage import triage_step_history
 
-        for k, v in step_history.items():
-            if k in array_keys:
-                if v is not None:
-                    # Preserve ParameterTree and similar objects as-is
-                    if k in preserve_keys and hasattr(v, 'data') and hasattr(v.data, 'iter_leaves'):
-                        arrays[k] = v  # Store ParameterTree directly
-                    else:
-                        arrays[k] = np.asarray(v)
-            elif k == 'loss':
-                continue  # handled above
-            elif isinstance(v, dict):
-                metrics[k] = v
-            elif hasattr(v, 'shape'):
-                # Handle arrays - check shape before __float__
-                arr = np.asarray(v)
-                if arr.size == 1:
-                    metrics[k] = float(arr.item())
-                elif arr.size <= 100:
-                    metrics[k] = arr.tolist()  # small arrays as lists
-                else:
-                    arrays[k] = arr  # large arrays go to arrays dict
-            elif hasattr(v, '__float__'):
-                metrics[k] = float(v)
-            else:
-                metrics[k] = v
+        triaged = triage_step_history(step_history)
+
+        loss = triaged.loss if triaged.loss is not None else float("nan")
+
+        metrics: dict[str, Any] = {}
+        metrics.update(triaged.scalars)
+        metrics.update(triaged.dicts)
+
+        arrays: dict[str, Any] = {}
+        arrays.update(triaged.arrays)
+
+        for k, v in triaged.blobs.items():
+            arrays[k] = v
 
         return cls(
-            batch_index=batch_index,
+            batch_index=step,
             step_index=step,
-            batch_in_step=batch_in_step,
             timestamp=timestamp,
             loss=loss,
             metrics=metrics,
@@ -137,17 +103,43 @@ class LoggerContext:
     training_config: Any = None
     stack: Any = None
     output_dir: Path | None = None
-    current_batch: int = 0
     current_step: int = 0
-    total_batches: int | None = None
-    total_steps: int | None = None
-    batches_per_step: int = 1
     is_replay: bool = False
     is_final: bool = False
-    dmanager: Any = None  # design manager if available
-    model: Any = None  # BiocompModel for prediction
-    training_program: Any = None  # full program reference
+    dmanager: Any = None
+    model: Any = None
+    training_program: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        step: int,
+        training_program: object | None = None,
+        output_dir: Path | None = None,
+        stack: object | None = None,
+        model: object | None = None,
+        dmanager: object | None = None,
+        training_config: object | None = None,
+        is_replay: bool = False,
+        is_final: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> "LoggerContext":
+        """Factory that extracts fields from training_program with consistent defaults."""
+        tp = training_program
+        return cls(
+            training_config=training_config or (getattr(tp, "_last_config", None) if tp else None),
+            stack=stack or (getattr(tp, "_stack", None) if tp else None),
+            output_dir=output_dir or (getattr(tp, "_save_dir", None) if tp else None),
+            current_step=step,
+            is_replay=is_replay,
+            is_final=is_final,
+            dmanager=dmanager or (getattr(tp, "_dmanager", None) if tp else None),
+            model=model or (getattr(tp, "_model", None) if tp else None),
+            training_program=tp,
+            extra=extra or {},
+        )
 
 
 class HistoryView:
@@ -221,7 +213,7 @@ class HistoryView:
         if not self._batches:
             return {}
         b = self._batches[-1]
-        result: dict[str, Any] = {'loss': b.loss}
+        result: dict[str, Any] = {"loss": b.loss}
         result.update(b.metrics)
         result.update(b.arrays)
         return result
@@ -243,16 +235,11 @@ class HistoryManager:
         self,
         step: int,
         step_history: dict,
-        batches_per_step: int = 1,
         timestamp: float = 0.0,
     ):
-        """Append step data as one or more batches."""
-        # for now, treat each step as one batch (could expand later)
         batch = BatchData.from_step_history(
             step=step,
             step_history=step_history,
-            batch_in_step=0,
-            batches_per_step=batches_per_step,
             timestamp=timestamp,
         )
         batch.batch_index = self._batch_index
@@ -270,21 +257,20 @@ class HistoryManager:
 
         Used for every-step accumulation without full step_history serialization overhead.
         """
-        if hasattr(loss, 'shape'):
+        if hasattr(loss, "shape"):
             loss_arr = np.asarray(loss)
             loss_scalar = float(np.nanmean(loss_arr))
         else:
             loss_scalar = float(loss)
             loss_arr = np.array(loss)
 
-        arrays: dict[str, np.ndarray] = {'loss': loss_arr}
+        arrays: dict[str, np.ndarray] = {"loss": loss_arr}
         if all_losses is not None:
-            arrays['all_losses'] = np.asarray(all_losses)
+            arrays["all_losses"] = np.asarray(all_losses)
 
         batch = BatchData(
             batch_index=self._batch_index,
             step_index=step,
-            batch_in_step=0,
             timestamp=timestamp,
             loss=loss_scalar,
             metrics={},
@@ -321,35 +307,11 @@ class HistoryManager:
     def clear(self):
         self._batches.clear()
 
-    @property
-    def current_batch_index(self) -> int:
-        return self._batch_index
-
-    def save_batch(self, batch: BatchData, output_dir: Path):
-        """Save a batch to disk."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"batch_{batch.batch_index:08d}.pkl"
-        with open(path, 'wb') as f:
-            dill.dump(batch.to_dict(), f)
-
-    @classmethod
-    def load_batches(cls, history_dir: Path) -> list[BatchData]:
-        """Load all batches from a directory."""
-        batches = []
-        for path in sorted(history_dir.glob("batch_*.pkl")):
-            try:
-                with open(path, 'rb') as f:
-                    d = dill.load(f)
-                batches.append(BatchData.from_dict(d))
-            except Exception:
-                continue
-        return batches
-
     @classmethod
     def load_from_step_files(
         cls,
         history_dir: Path,
-        step_filter: 'Callable[[int], bool] | None' = None,
+        step_filter: "Callable[[int], bool] | None" = None,
         show_progress: bool = True,
     ) -> list[BatchData]:
         """Load batches from legacy step_*.pkl files.
@@ -364,10 +326,10 @@ class HistoryManager:
         # First pass: get all step files and their step numbers (fast - no loading)
         step_files: list[tuple[int, Path]] = []
         for path in history_dir.glob("step_*.pkl"):
-            parts = path.stem.split('_')
+            parts = path.stem.split("_")
             if len(parts) < 2:
                 continue
-            if len(parts) > 2 and parts[2] in ('start', 'end'):
+            if len(parts) > 2 and parts[2] in ("start", "end"):
                 continue
             try:
                 step = int(parts[1])
@@ -386,10 +348,10 @@ class HistoryManager:
         iterator = tqdm(step_files, desc="Loading steps", disable=not show_progress)
         for step, path in iterator:
             try:
-                with open(path, 'rb') as f:
+                with open(path, "rb") as f:
                     data = dill.load(f)
-                step_history = data.get('step_history', {})
-                timestamp = data.get('timestamp', 0.0)
+                step_history = data.get("step_history", {})
+                timestamp = data.get("timestamp", 0.0)
                 batch = BatchData.from_step_history(
                     step=step,
                     step_history=step_history,

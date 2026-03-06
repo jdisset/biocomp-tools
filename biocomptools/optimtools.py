@@ -83,6 +83,10 @@ class BaseOptimizationProgram(BaseModel, ABC):
         default=True,
         description="Use per-run SQLite DB for step history (enables full-fidelity replay).",
     )
+    write_policy: Optional[Any] = Field(
+        default=None,
+        description="WritePolicy for step data persistence (None = default policy).",
+    )
     n_workers: int = 8
 
     _lib: Optional[Any] = None
@@ -180,7 +184,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         return {"save_dir": self._save_dir}
 
     def _create_history_db(self) -> Any:
-        """Create RunHistoryDB and save initial run info."""
+        """Create RunHistoryDB and save initial run info + artifacts."""
         if not self.use_history_db:
             return None
 
@@ -202,11 +206,17 @@ class BaseOptimizationProgram(BaseModel, ABC):
                 for pkg in ("dracon", "biocomp", "biocomptools")
             },
             host=metadata.get("host", "unknown"),
-            model=model,
-            dmanager=dmanager,
-            dconfig=dconfig,
             model_signature=getattr(model, "signature", None),
         )
+
+        # Save large objects as separate artifacts (not in RunInfo row)
+        if model is not None:
+            db.save_artifact("model", model)
+        if dmanager is not None:
+            db.save_artifact("dmanager", dmanager)
+        if dconfig is not None:
+            db.save_artifact("dconfig", dconfig)
+
         logger.info(f"Created history DB: {db.path}")
         self._history_db = db
         return db
@@ -262,12 +272,10 @@ class BaseOptimizationProgram(BaseModel, ABC):
             self.loggers,
             training_program=self,
             async_logging=self.async_logging,
-            async_store_location=self.async_store_location,
             base_dir=self._save_dir,
-            keep_history_on_disk=self.keep_history_on_disk,
-            save_all_steps=self.save_all_steps,
             n_workers=self.n_workers,
             history_db=history_db,
+            write_policy=self.write_policy,
         )
 
         result = await self.execute_optimization(dispatch)

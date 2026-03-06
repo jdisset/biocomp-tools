@@ -179,18 +179,9 @@ class AsyncLoggerHandler(BaseModel):
                     timestamp=timestamp,
                 )
 
-            # Save to DB if configured
+            # Save to DB if configured (granular schema)
             if self.history_db is not None and sh_snapshot is not None:
-                self.history_db.save_step(step, timestamp, sh_dict)
-
-            # Save to disk if configured (legacy pkl fallback)
-            if self.keep_history_on_disk or self.save_all_steps:
-                disk_data: dict[str, object] = {
-                    "step": step,
-                    "step_history": sh_snapshot,
-                    "timestamp": timestamp,
-                }
-                self._save_step_data(step, disk_data)
+                self.history_db.save_step_legacy(step, timestamp, sh_dict)
 
             # Dispatch on_batch for async loggers
             self._dispatch_on_batch(step)

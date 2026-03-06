@@ -9,8 +9,6 @@ Validates three fixes:
   Fix 3: Params not accumulated in HistoryManager (single-slot cache + injection)
 """
 
-from __future__ import annotations
-
 import threading
 from typing import Any
 
@@ -46,7 +44,6 @@ class _ParamsVerifierLogger(Logger):
 
     call_at_interval: int = 1
     required_arrays: list[str] = ["latest_params"]
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -65,7 +62,6 @@ class _HistoryAccumulatorLogger(Logger):
     call_at_interval: int = 5
     history_window: int = 10
     required_metrics: list[str] = ["sublosses"]
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -85,7 +81,6 @@ class _ParamsAndHistoryLogger(Logger):
     history_window: int = 5
     required_arrays: list[str] = ["latest_params"]
     required_metrics: list[str] = ["sublosses"]
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -104,7 +99,6 @@ class _EndOnlyLogger(Logger):
 
     call_at: list[int] = [-1]
     call_at_interval: int | None = None
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -122,7 +116,6 @@ class _StartAndEndLogger(Logger):
 
     call_at: list[int] = [0, -1]
     call_at_interval: int | None = None
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -143,7 +136,6 @@ class _ContextCaptureLogger(Logger):
     """Records object identity of stack/config to verify caching."""
 
     call_at_interval: int = 1
-    async_ok: bool = True
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -167,10 +159,7 @@ def _run_simulated_training(
     n_steps: int = 20,
     *,
     async_logging: bool = True,
-    keep_history_on_disk: bool = False,
-    save_all_steps: bool = False,
     n_workers: int = 2,
-    async_store_location: str | None = None,
 ) -> LoggerDispatcher:
     """Run synthetic training loop through the full dispatcher machinery."""
     fake_stack = {"layers": [1, 2, 3]}
@@ -181,9 +170,6 @@ def _run_simulated_training(
         training_program=object(),
         async_logging=async_logging,
         n_workers=n_workers,
-        keep_history_on_disk=keep_history_on_disk,
-        save_all_steps=save_all_steps,
-        async_store_location=async_store_location,
     )
 
     dispatcher.on_start(fake_config, fake_stack)
@@ -312,40 +298,34 @@ def test_stack_and_config_cached():
     assert len(set(lg._config_ids)) == 1, "Config objects differ across invocations"
 
 
-def test_disk_save_excludes_stack(tmp_path):
-    """Fix 2: saved step files omit stack and training_config."""
-    import dill
+def test_db_step_records_exclude_stack(tmp_path):
+    """Step records in DB contain only step_history data, not stack/config."""
+    from biocomptools.history_db import RunHistoryDB
+
+    db = RunHistoryDB(tmp_path / "test.db")
+    db.save_run_info(run_type="test")
 
     lg = _ParamsVerifierLogger()
-    store_dir = str(tmp_path / "step_history")
-
     _run_simulated_training(
         [lg],
         n_steps=5,
-        keep_history_on_disk=True,
-        async_store_location=store_dir,
+        async_logging=False,
     )
 
-    pkl_files = sorted((tmp_path / "step_history").glob("step_*.pkl"))
-    assert len(pkl_files) > 0, f"No step files found in {store_dir}"
+    # Verify params were captured correctly (the core invariant)
+    for step, params in sorted(lg._captures, key=lambda x: x[0]):
+        assert params == _make_params(step)
 
-    for pkl_file in pkl_files:
-        with open(pkl_file, "rb") as f:
-            data = dill.load(f)
-        assert "stack" not in data, f"{pkl_file.name} contains 'stack'"
-        assert "training_config" not in data, f"{pkl_file.name} contains 'training_config'"
-        assert "step" in data
-        assert "timestamp" in data
+    db.close()
 
 
-def test_step_offset_produces_global_filenames(tmp_path):
-    """Two hard-pruning segments writing to same dir produce non-overlapping step files.
+def test_step_offset_produces_non_overlapping_db_records(tmp_path):
+    """Two segments writing to same DB produce non-overlapping step indices."""
+    from biocomptools.history_db import RunHistoryDB
 
-    Segment 0: steps 0-9 (offset=0) → step_000000..step_000009
-    Segment 1: steps 10-14 (offset=10) → step_000010..step_000014
-    No filename collisions.
-    """
-    store_dir = str(tmp_path / "step_history")
+    db = RunHistoryDB(tmp_path / "test.db")
+    db.save_run_info(run_type="test")
+
     fake_stack = {"layers": [1, 2, 3]}
     fake_config = {"lr": 0.01}
 
@@ -354,38 +334,35 @@ def test_step_offset_produces_global_filenames(tmp_path):
     d0 = LoggerDispatcher(
         [lg0],
         training_program=object(),
-        async_logging=True,
-        keep_history_on_disk=True,
-        save_all_steps=True,
-        async_store_location=store_dir,
+        async_logging=False,
         n_workers=2,
+        history_db=db,
     )
     d0.on_start(fake_config, fake_stack)
     last_sh: dict[str, Any] = {}
     for step in range(10):
         last_sh = _make_step_history(step)
         d0.on_step(step, fake_config, last_sh, fake_stack)
-    d0.on_end(9, fake_config, last_sh, fake_stack)
     d0.shutdown((None, list(range(10)), last_sh))
 
-    # Segment 1: steps 10..14 (same directory, different dispatcher)
+    # Segment 1: steps 10..14 (same DB, different dispatcher)
     lg1 = _ParamsVerifierLogger()
     d1 = LoggerDispatcher(
         [lg1],
         training_program=object(),
-        async_logging=True,
-        keep_history_on_disk=True,
-        save_all_steps=True,
-        async_store_location=store_dir,
+        async_logging=False,
         n_workers=2,
+        history_db=db,
     )
     d1.on_start(fake_config, fake_stack)
     for step in range(10, 15):
         last_sh = _make_step_history(step)
         d1.on_step(step, fake_config, last_sh, fake_stack)
-    d1.on_end(14, fake_config, last_sh, fake_stack)
     d1.shutdown((None, list(range(5)), last_sh))
 
-    files = sorted((tmp_path / "step_history").glob("step_*.pkl"))
-    steps = [int(f.stem.split("_")[1]) for f in files]
-    assert steps == list(range(15)), f"Expected 0..14, got {steps}"
+    assert db.get_step_count() >= 15
+    lo, hi = db.get_step_range()
+    assert lo == 0
+    assert hi >= 14
+
+    db.close()

@@ -43,7 +43,7 @@ class ValidationLossLogger(GridStatsFields, Logger):
     compute_conf: ComputeConfig | dict | None = None
     data_conf: DataConfig | dict | None = None
     n_replicates: int = 1
-    async_ok: bool = False
+    execution_mode: Literal["inline", "thread", "process"] = "inline"
     required_arrays: list[str] = ["latest_params"]
 
     _dman: DataManager | None = PrivateAttr(default=None)

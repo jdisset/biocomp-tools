@@ -46,7 +46,7 @@ class TestHelperFunctions:
     def test_to_scalar_with_none(self):
         from biocomptools.toollib.loggers.designheatmaplogger import _to_scalar
 
-        assert _to_scalar(None) == 0.0
+        assert np.isnan(_to_scalar(None))
 
     def test_to_scalar_with_scalar(self):
         from biocomptools.toollib.loggers.designheatmaplogger import _to_scalar

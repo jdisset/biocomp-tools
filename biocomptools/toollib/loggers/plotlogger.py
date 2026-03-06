@@ -6,7 +6,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 from dracon.deferred import DeferredNode
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from pathlib import Path
 from pydantic import PrivateAttr
 from biocomptools.plot import PlotJob
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 class PlotLogger(Logger):
     jobs: list[DeferredNode[PlotJob]] = []
-    parallel_ok: bool = True
+    execution_mode: Literal["inline", "thread", "process"] = "process"
     extra_context: dict = {}
     required_arrays: list[str] = ["loss", "latest_params"]
     required_extra: list[str] = ["embedding_snapshots"]

@@ -1,6 +1,4 @@
-"""Round-trip tests for RunHistoryDB."""
-
-from __future__ import annotations
+"""Round-trip tests for RunHistoryDB (v2 granular schema)."""
 
 import json
 import time
@@ -53,7 +51,7 @@ def test_save_and_load_steps(db):
             "sublosses": {"mse": 0.5 - step * 0.05, "l0": 0.1},
             "lr": 0.001,
         }
-        db.save_step(step, time.time(), sh)
+        db.save_step_legacy(step, time.time(), sh)
 
     assert db.step_count() == 5
     assert db.step_range() == (0, 4)
@@ -75,7 +73,7 @@ def test_step_filter(db):
     db.save_run_info(run_type="training")
 
     for step in range(10):
-        db.save_step(step, time.time(), {"loss": float(step)})
+        db.save_step_legacy(step, time.time(), {"loss": float(step)})
 
     evens = db.load_steps(step_filter=lambda s: s % 2 == 0)
     assert len(evens) == 5
@@ -91,7 +89,7 @@ def test_params_stored_separately(db):
         "latest_params": params,
         "yhatdep": np.zeros((5, 2)),
     }
-    db.save_step(0, time.time(), sh)
+    db.save_step_legacy(0, time.time(), sh)
 
     batches = db.load_steps()
     assert len(batches) == 1
@@ -112,8 +110,7 @@ def test_update_end_time(db):
 
 
 def test_model_pickle_roundtrip(db):
-    """Test that arbitrary objects can be stored and loaded via dill."""
-    import dill
+    """Test that arbitrary objects can be stored and loaded via artifacts."""
 
     class FakeModel:
         def __init__(self):
@@ -121,22 +118,18 @@ def test_model_pickle_roundtrip(db):
             self.weights = np.random.randn(3, 3)
 
     model = FakeModel()
-    db.save_run_info(
-        run_type="design",
-        model=model,
-        model_signature="fake-sig",
-    )
+    db.save_run_info(run_type="design", model_signature="fake-sig")
+    db.save_artifact("model", model)
 
-    loaded = db.load_run_info()
-    assert loaded.model_pickle is not None
-    restored = dill.loads(loaded.model_pickle)
+    restored = db.load_artifact("model")
+    assert restored is not None
     assert restored.signature == "fake-sig"
     np.testing.assert_array_equal(restored.weights, model.weights)
 
 
 def test_empty_step_history(db):
     db.save_run_info(run_type="training")
-    db.save_step(0, time.time(), {})
+    db.save_step_legacy(0, time.time(), {})
     batches = db.load_steps()
     assert len(batches) == 1
     assert batches[0].metrics == {}
@@ -150,7 +143,7 @@ def test_numpy_scalar_metrics(db):
         "accuracy": np.float64(0.95),
         "epoch": np.int32(10),
     }
-    db.save_step(0, time.time(), sh)
+    db.save_step_legacy(0, time.time(), sh)
     batches = db.load_steps()
     assert batches[0].loss == pytest.approx(0.5, abs=1e-5)
     assert batches[0].metrics["accuracy"] == pytest.approx(0.95, abs=1e-10)
@@ -161,7 +154,7 @@ def test_large_array_goes_to_arrays(db):
     db.save_run_info(run_type="training")
     big = np.random.randn(200, 50)
     sh = {"loss": 0.1, "big_data": big}
-    db.save_step(0, time.time(), sh)
+    db.save_step_legacy(0, time.time(), sh)
     batches = db.load_steps()
     assert "big_data" in batches[0].arrays
     np.testing.assert_array_almost_equal(batches[0].arrays["big_data"], big)
@@ -171,7 +164,7 @@ def test_small_array_goes_to_metrics(db):
     db.save_run_info(run_type="training")
     small = np.array([1.0, 2.0, 3.0])
     sh = {"loss": 0.1, "small_vec": small}
-    db.save_step(0, time.time(), sh)
+    db.save_step_legacy(0, time.time(), sh)
     batches = db.load_steps()
     assert "small_vec" in batches[0].metrics
-    assert batches[0].metrics["small_vec"] == [1.0, 2.0, 3.0]
+    assert batches[0].metrics["small_vec"]["_list"] == [1.0, 2.0, 3.0]

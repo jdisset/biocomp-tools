@@ -21,7 +21,6 @@ class Logger(BaseModel):
 
     Declarative attributes:
         history_window: Number of steps to retain in history (None = all)
-        history_mode: "window" (last N), "since_last" (since last callback), "all"
         required_metrics: Metric keys to include in HistoryView
         required_arrays: Array keys to include in HistoryView
     """
@@ -37,20 +36,15 @@ class Logger(BaseModel):
     call_at: list[int] = [-1]
 
     # execution mode
-    async_ok: bool = True
-    parallel_ok: bool = False
-    callback_mode: Literal["thread", "process"] = "thread"
+    execution_mode: Literal["inline", "thread", "process"] = "thread"
     metadata: dict[str, object] = {}
 
     # declarative attributes
     history_window: int | None = None  # number of steps to keep (None = all)
-    history_mode: Literal["window", "since_last", "all"] = "window"
     required_metrics: list[str] = []
     required_arrays: list[str] = []
-    required_extra: list[str] = []  # extra context keys to request from handler
+    required_extra: list[str] = []
 
-    # internal tracking
-    _last_callback_step: int = -1
     _call_at_set: frozenset[int] = frozenset()
 
     def model_post_init(self, __context: object) -> None:
@@ -64,6 +58,12 @@ class Logger(BaseModel):
         if interval is not None and interval > 0 and step % interval == 0:
             return True
         return step in self._call_at_set
+
+    def should_fire_start(self) -> bool:
+        return 0 in self._call_at_set
+
+    def should_fire_end(self) -> bool:
+        return -1 in self._call_at_set
 
     def initialize(self, training_program: object) -> None:
         pass
