@@ -78,7 +78,13 @@ class BatchData:
 
         metrics: dict[str, Any] = {}
         metrics.update(triaged.scalars)
-        metrics.update(triaged.dicts)
+        # Unwrap {"_list": [...]} wrappers — those are a DB serialization
+        # detail, in-memory callers should see original numpy arrays.
+        for k, v in triaged.dicts.items():
+            if isinstance(v, dict) and "_list" in v and len(v) == 1:
+                metrics[k] = np.asarray(v["_list"])
+            else:
+                metrics[k] = v
 
         arrays: dict[str, Any] = {}
         arrays.update(triaged.arrays)
@@ -209,12 +215,20 @@ class HistoryView:
         yield from self._batches
 
     def to_step_history(self) -> dict[str, Any]:
-        """Convert latest batch to legacy step_history format for backward compat."""
+        """Convert latest batch to flat step_history dict for backward compat.
+
+        Unwraps internal serialization wrappers ({"_list": [...]}) back to
+        numpy arrays so callers see the original types.
+        """
         if not self._batches:
             return {}
         b = self._batches[-1]
         result: dict[str, Any] = {"loss": b.loss}
-        result.update(b.metrics)
+        for k, v in b.metrics.items():
+            if isinstance(v, dict) and "_list" in v and len(v) == 1:
+                result[k] = np.asarray(v["_list"])
+            else:
+                result[k] = v
         result.update(b.arrays)
         return result
 
