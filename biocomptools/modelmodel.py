@@ -304,7 +304,10 @@ class NetworkModel(BaseModel):
             import jax
 
             self._stack = cmp.ComputeStack(networks=self.network)
-            self._stack.build(self.model.compute_config)
+            config = self.model.compute_config.model_copy(deep=True)
+            config.backfill_from_defaults()
+            config.detect_output_compat(self.model.shared_params)
+            self._stack.build(config)
 
             # create a general batch apply function
             # using same signature as training code: (params, inputs, quantiles, keys)
