@@ -42,6 +42,7 @@ from biocomp.jaxutils import tree_to_np, tree_get
 from dracon.commandline import Arg, dracon_program
 from biocomptools.optimtools import DEFAULT_TYPES
 from biocomptools.toollib.common import config
+from biocomptools.write_policy import DESIGN_DEFAULT, WritePolicy
 import asyncio
 
 import sys
@@ -89,6 +90,8 @@ def _create_swapped_network(network: Network) -> Network | None:
     context={'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve()},
 )
 class DesignProgram(BaseOptimizationProgram):
+    write_policy: WritePolicy | None = Field(default_factory=lambda: DESIGN_DEFAULT)
+
     design_conf: Annotated[DesignConfig, Arg(help='Design optimization config')] = Field(
         default_factory=lambda: DesignConfig()
     )
@@ -143,9 +146,10 @@ class DesignProgram(BaseOptimizationProgram):
     ] = False
 
     def model_post_init(self, __context):
-        self._model = None
-        self._dmanager = None
-        self._design_id = None
+        self._model: BiocompModel | None = None
+        self._dmanager: DesignManager | None = None
+        self._effective_dconf: DesignConfig | None = None
+        self._design_id: str | None = None
         super().model_post_init(__context)
 
     @property
@@ -371,9 +375,11 @@ class DesignProgram(BaseOptimizationProgram):
         if self.design_conf.hard_pruning_enabled:
             from biocomp.design_pruning import run_with_hard_pruning
 
-            final_params, loss_history, step_history, self._dmanager = run_with_hard_pruning(
-                self._dmanager, self.design_conf, self._model,
-                dispatch=dispatch, lock_ratios=self.lock_ratios,
+            final_params, loss_history, step_history, self._dmanager, self._effective_dconf = (
+                run_with_hard_pruning(
+                    self._dmanager, self.design_conf, self._model,
+                    dispatch=dispatch, lock_ratios=self.lock_ratios,
+                )
             )
         else:
             final_params, loss_history, step_history = start(
@@ -383,6 +389,7 @@ class DesignProgram(BaseOptimizationProgram):
                 dispatch=dispatch,
                 lock_ratios=self.lock_ratios,
             )
+            self._effective_dconf = self.design_conf
 
         logger.info(
             f"Optimization completed. Final loss: {loss_history[-1]:.4f}"
@@ -407,13 +414,14 @@ class DesignProgram(BaseOptimizationProgram):
         assert self._dmanager is not None
         assert self._model is not None
 
+        eval_dconf = self._effective_dconf or self.design_conf
         eval_key = jax.random.key(self.eval_seed)
 
         t0 = time.perf_counter()
         logger.info(f"[1/3] Sampling {self.n_eval_samples} evaluation points...")
         xraw, yraw = sample_for_evaluation(
             dmanager=self._dmanager,
-            dconf=self.design_conf,
+            dconf=eval_dconf,
             final_params=final_params,
             n_eval_samples=self.n_eval_samples,
             key=eval_key,
@@ -428,7 +436,7 @@ class DesignProgram(BaseOptimizationProgram):
         )
         yhatdep, losses = evaluate_design(
             dmanager=self._dmanager,
-            dconf=self.design_conf,
+            dconf=eval_dconf,
             model=self._model,
             final_params=final_params,
             xraw=xraw,
@@ -452,7 +460,7 @@ class DesignProgram(BaseOptimizationProgram):
         topk = get_topk_replicate_network_pairs(
             losses=losses,
             dmanager=self._dmanager,
-            dconf=self.design_conf,
+            dconf=eval_dconf,
             k=self.topk_n * topk_candidate_pool,
         )
         logger.info(f"  -> Top-k found in {time.perf_counter() - t2:.2f}s")
@@ -620,7 +628,7 @@ class DesignProgram(BaseOptimizationProgram):
 
         n_targets = len(self._targets_list())
         n_networks = len(self._dmanager.networks)
-        n_replicates = self.design_conf.n_replicates
+        n_replicates = (self._effective_dconf or self.design_conf).n_replicates
 
         assert len(topk) == n_targets, f"topk length {len(topk)} != n_targets {n_targets}"
 
