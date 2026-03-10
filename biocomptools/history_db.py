@@ -17,6 +17,7 @@ from typing import Any, Literal
 import dill
 import numpy as np
 from sqlalchemy import Column, LargeBinary
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from biocomptools.logger_history import BatchData
@@ -140,11 +141,12 @@ class RunHistoryDB:
         if version < 2 and not read_only:
             self._conn.executescript(_STEP_TABLES_SCHEMA)
 
-        # SQLAlchemy engine sharing the same connection pool
+        # SQLAlchemy engine sharing the same underlying sqlite3 connection
         self._engine = create_engine(
-            f"sqlite:///{self._path}",
+            "sqlite://",
+            creator=lambda: self._conn,
             echo=False,
-            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
         )
         tables_to_create = [RunInfo.__table__, RunArtifact.__table__]
         if not read_only:
@@ -299,8 +301,25 @@ class RunHistoryDB:
         for k, arr in arrays.items():
             self.save_array(step, k, arr)
 
+    _SQLITE_MAX_BLOB = 1_000_000_000  # 1 GB default
+
     def save_blob(self, step: int, key: str, obj: object) -> None:
+        if not hasattr(self, "_oversized_blob_keys"):
+            self._oversized_blob_keys: dict[str, int] = {}
+        if key in self._oversized_blob_keys:
+            self._oversized_blob_keys[key] += 1
+            if self._oversized_blob_keys[key] % 100 == 0:
+                logger.warning(f"Key '{key}': skipped {self._oversized_blob_keys[key]} times (too large)")
+            return
         blob = dill.dumps(obj)
+        if len(blob) >= self._SQLITE_MAX_BLOB:
+            logger.warning(
+                f"Step {step}, key '{key}': blob too large for SQLite "
+                f"({len(blob)/1e6:.0f} MB >= {self._SQLITE_MAX_BLOB/1e6:.0f} MB limit), "
+                f"skipping all future saves for this key"
+            )
+            self._oversized_blob_keys[key] = 1
+            return
         self._conn.execute(
             "INSERT OR REPLACE INTO step_blob VALUES (?,?,?,?)",
             (step, key, blob, len(blob)),
@@ -585,6 +604,8 @@ def _json_default(obj: Any) -> Any:
         return float(obj)
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
     if isinstance(obj, Path):
         return str(obj)
     if hasattr(obj, "__jax_array__") or type(obj).__module__.startswith("jaxlib"):

@@ -1,6 +1,6 @@
 ## {{{                          --     imports     --
 
-from typing import Callable, Literal
+from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from biocomptools.logger_history import HistoryView, LoggerContext
@@ -92,27 +92,3 @@ class Logger(BaseModel):
                 return i
         return 0
 
-
-class FunctionLogger(Logger):
-    """Legacy logger that wraps raw callback functions.
-
-    Retained for backward compatibility with HyperoptTrainingLogger and
-    direct get_callbacks() usage outside LoggerDispatcher.
-    """
-
-    call_at_interval: int | dict[str, int] | None = None
-    functions: list[Callable[..., object]] = []
-
-    def get_callbacks(self, training_program: object) -> list[tuple[int, Callable[..., object]]]:
-        interval = self.call_at_interval
-        if isinstance(interval, dict):
-            callbacks: list[tuple[int, Callable[..., object]]] = []
-            for fn in self.functions:
-                fn_interval = interval.get(fn.__name__)
-                if fn_interval is not None:
-                    callbacks.append((fn_interval, fn))
-            return callbacks
-        elif isinstance(interval, int):
-            return [(interval, fn) for fn in self.functions]
-        else:
-            return []

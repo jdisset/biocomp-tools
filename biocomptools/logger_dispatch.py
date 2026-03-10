@@ -182,10 +182,6 @@ class LoggerDispatcher(LoggerDispatch):
             final_step = _extract_final_step_index(result)
             config = self._last_config
 
-            # Write final step to DB
-            if self._step_writer is not None:
-                self._step_writer.write_step_from_raw(final_step, step_history)
-
             # Mark run as finished — signals LoggerRunner to exit
             if self._history_db is not None:
                 self._history_db.mark_finished()

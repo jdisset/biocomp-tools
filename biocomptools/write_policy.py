@@ -6,7 +6,7 @@ Loggers declare what they *need*; WritePolicy declares what gets *saved*.
 
 from pydantic import BaseModel, ConfigDict
 
-from biocomptools.step_history_triage import PARAMS_KEYS
+from biocomptools.step_history_triage import BLOB_KEYS, PARAMS_KEYS
 
 
 class WritePolicy(BaseModel):
@@ -43,7 +43,7 @@ class WritePolicy(BaseModel):
             return 1
         if key in self.periodic_arrays:
             return self.periodic_arrays[key]
-        if key in PARAMS_KEYS:
+        if key in BLOB_KEYS:
             return self.params_interval
         return 1
 

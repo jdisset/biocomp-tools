@@ -4,7 +4,7 @@ from biocomptools.toollib.hashutils import get_package_git_hashes
 from biocomptools.trainutils import make_unique_dir, make_json_ready, plot_loss, print_matadata
 from biocomp.utils import PartialFunction
 from biocomp.library import load_lib
-from biocomptools.toollib.loggers.logger import Logger, FunctionLogger
+from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.plotlogger import PlotLogger
 from biocomptools.toollib.loggers.consolelogger import EnhancedConsoleLogger, ConsoleLogger
 from biocomptools.toollib.loggers.checkpointlogger import CheckpointLogger
@@ -40,6 +40,8 @@ from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot
 # Import plot types
 from biocomptools.plot import DEFAULT_TYPES as PLOT_TYPES
 from biocomptools.plot import NetworkPrediction
+
+from biocomptools.write_policy import WritePolicy
 
 from pathlib import Path
 from typing import Optional, Annotated, TypeVar, Any, Union
@@ -83,7 +85,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         default=True,
         description="Use per-run SQLite DB for step history (enables full-fidelity replay).",
     )
-    write_policy: Optional[Any] = Field(
+    write_policy: WritePolicy | None = Field(
         default=None,
         description="WritePolicy for step data persistence (None = default policy).",
     )
@@ -149,6 +151,18 @@ class BaseOptimizationProgram(BaseModel, ABC):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         logger.debug(f"{self.__class__.__name__} post init")
+
+        # Bridge legacy fields → WritePolicy
+        if self.save_all_steps and self.write_policy is None:
+            logger.warning(
+                "save_all_steps is deprecated, use write_policy=WritePolicy(save_all=True)"
+            )
+            self.write_policy = WritePolicy(save_all=True)
+        elif self.keep_history_on_disk and self.write_policy is None:
+            logger.warning(
+                "keep_history_on_disk is deprecated, use write_policy directly"
+            )
+
         self._lib = load_lib()
         self.base_dir = str(Path(self.base_dir).expanduser().resolve())
 
@@ -335,7 +349,6 @@ DEFAULT_TYPES = list(
             NetworkPrediction,
             # Loggers
             Logger,
-            FunctionLogger,
             PlotLogger,
             EnhancedConsoleLogger,
             ConsoleLogger,
@@ -352,6 +365,7 @@ DEFAULT_TYPES = list(
             Network,
             # Utility types
             PartialFunction,
+            WritePolicy,
         ]
         + PLOT_TYPES
     )
