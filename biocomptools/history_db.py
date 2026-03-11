@@ -522,6 +522,14 @@ class RunHistoryDB:
 
     # ---- Introspection ----
 
+    def get_blob_steps(self, key: str) -> list[int]:
+        """Return sorted list of steps that have a blob stored under *key*."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT step FROM step_blob WHERE key=? ORDER BY step",
+            (key,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     _AVAILABLE_KEY_TABLES = frozenset({"step_scalar", "step_dict", "step_array", "step_blob"})
 
     def available_keys(

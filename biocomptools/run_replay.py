@@ -30,6 +30,7 @@ from biocomptools.logger_history import (
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
 from biocomptools.toollib.loggers.designheatmaplogger import DesignHeatmapLogger
+from biocomptools.toollib.loggers.designcardlogger import DesignCardLogger
 from biocomptools.toollib.common import config
 
 logger = get_logger(__name__)
@@ -217,6 +218,7 @@ DEFAULT_TYPES = [
     Logger,
     DesignDiagnosticLogger,
     DesignHeatmapLogger,
+    DesignCardLogger,
 ]
 
 

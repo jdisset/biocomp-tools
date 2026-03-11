@@ -29,12 +29,15 @@ class WritePolicy(BaseModel):
             "commitment_penalty",
         }
     )
+    never_save: frozenset[str] = frozenset()
     every_step_arrays: frozenset[str] = frozenset({"yhatdep"})
     periodic_arrays: dict[str, int] = {}
     params_interval: int = 100
     save_all: bool = False
 
     def get_interval(self, key: str) -> int:
+        if key in self.never_save:
+            return 0
         if self.save_all:
             return 1
         if key in self.always_save:
@@ -49,13 +52,17 @@ class WritePolicy(BaseModel):
 
     def should_save_key(self, key: str, step: int) -> bool:
         interval = self.get_interval(key)
-        if interval <= 1:
+        if interval <= 0:
+            return False
+        if interval == 1:
             return True
         return step % interval == 0
 
 
 DESIGN_DEFAULT = WritePolicy(
-    periodic_arrays={"apply_aux": 50, "all_losses": 10},
+    never_save=frozenset({"z", "apply_aux"}),
+    periodic_arrays={"all_losses": 10},
+    params_interval=1,
 )
 
 TRAINING_DEFAULT = WritePolicy(
