@@ -1,7 +1,7 @@
 """Network compute diagram figure for biocomp networks using jeanplot primitives."""
 
-from typing import Any
-from pydantic import Field, PrivateAttr
+from typing import Any, Literal
+from pydantic import BaseModel, Field, PrivateAttr
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import matplotlib.axes
@@ -9,7 +9,7 @@ import matplotlib.axes
 from jeanplot.core.component import AnchorComponent
 from jeanplot.core.connection_label import ConnectionLabel
 from jeanplot.core.container import Container
-from jeanplot.core.models import BoxStyle, LayoutConstraints, Offset
+from jeanplot.core.models import BoxStyle, LayoutConstraints, Offset, Size
 from jeanplot.core.connector import Connection, OrthogonalCurve, SimpleBezierCurve
 from jeanplot.core.svg import LineEndFlat
 from jeanplot.core.text import Text
@@ -21,6 +21,131 @@ from biocomptools.toollib.plot import Figure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+class LayoutSpec(BaseModel):
+    """Declarative alignment constraints for consistent network diagram layouts.
+
+    Constrains the layout engine to produce consistent results across different
+    networks, enabling side-by-side visual comparison.
+    """
+
+    canvas_size: Size | None = None
+    ern_slot_order: list[str] | list[list[str]] | None = None
+    max_ern_layers: int | None = None
+    column_widths: dict[str, float] | None = None
+    layer_min_height: float | None = None
+
+    def get_slot_order_for_layer(self, layer_idx: int) -> list[str] | None:
+        """Get the ERN slot order for a specific topological layer.
+
+        - None → no slot ordering (use default sort)
+        - flat list[str] → same order for all layers
+        - list[list[str]] → per-layer order; out-of-range layers get None
+        """
+        if self.ern_slot_order is None:
+            return None
+        if not self.ern_slot_order:
+            return None
+        if isinstance(self.ern_slot_order[0], list):
+            per_layer = self.ern_slot_order
+            return per_layer[layer_idx] if layer_idx < len(per_layer) else None
+        return self.ern_slot_order
+
+    @classmethod
+    def from_networks(cls, networks: list[Any]) -> "LayoutSpec":
+        """Compute a shared LayoutSpec from multiple networks.
+
+        Inspects all networks to derive:
+        - ern_slot_order: per-layer union of ERN type names (sorted alphabetically)
+        - max_ern_layers: max ERN topological depth across all networks
+
+        Does NOT auto-compute canvas_size — set that manually.
+        """
+        max_layers = 0
+        per_layer_types: dict[int, set[str]] = {}
+
+        for net in networks:
+            graph = net.compute_graph
+            if graph is None:
+                continue
+            ern_ids = [
+                n.node_id
+                for n in graph.nodes.values()
+                if n.node_type == "sequestron_ERN"
+            ]
+            if not ern_ids:
+                continue
+            layers = list(graph.topological_order(ern_ids))
+            max_layers = max(max_layers, len(layers))
+            for i, layer in enumerate(layers):
+                for eid in layer:
+                    node = graph.nodes[eid]
+                    ern_name = node.extra.get("seq_name", "").split("::")[-1].split("#")[0]
+                    if ern_name:
+                        per_layer_types.setdefault(i, set()).add(ern_name)
+
+        if not per_layer_types:
+            return cls()
+
+        ern_slot_order = [
+            sorted(per_layer_types.get(i, set()))
+            for i in range(max_layers)
+        ]
+
+        return cls(
+            ern_slot_order=ern_slot_order,
+            max_ern_layers=max_layers if max_layers > 0 else None,
+        )
+
+
+def semantic_key(node: Any, graph: Any) -> str:
+    """Compute a stable semantic identifier for a network graph node.
+
+    These keys enable cross-network node correspondence for layout alignment.
+    """
+    ntype = node.node_type
+    nid = node.node_id
+
+    if ntype == "aggregation":
+        cotx = node.extra.get("cotx_group", str(nid))
+        return f"agg:{cotx}"
+
+    if ntype == "sequestron_ERN":
+        ern_name = node.extra.get("seq_name", "").split("::")[-1].split("#")[0]
+        return f"ern:{ern_name or nid}"
+
+    if ntype == "output":
+        output_proteins = []
+        for n in graph.nodes.values():
+            if n.node_type == "output":
+                output_proteins.append(n.node_id)
+        idx = output_proteins.index(nid) if nid in output_proteins else 0
+        return f"output:{idx}"
+
+    if ntype == "input":
+        idx = node.extra.get("input_from_output")
+        return f"input:{idx}" if idx is not None else f"input:{nid}"
+
+    if ntype == "bias":
+        cotx = node.extra.get("cotx_group", str(nid))
+        return f"bias:{cotx}"
+
+    if ntype == "transcription":
+        return f"tx:{nid}"
+
+    if ntype == "translation":
+        return f"tl:{nid}"
+
+    return f"{ntype}:{nid}"
+
+
+def _format_ratio_proportion(val: float) -> str:
+    pct = val * 100
+    if abs(pct - round(pct)) < 0.1:
+        return f"({int(round(pct))}%)"
+    return f"({pct:.1f}%)"
+
 
 EMBEDDING_CATEGORY: dict[str, str] = {
     "tc_rate": "promoters",
@@ -208,11 +333,21 @@ class NetworkDiagram(Container):
         default_factory=set, description="TU IDs to style as disabled"
     )
     show_ratios: bool = Field(default=False, description="Show ratio text labels on edges")
-    variable_thickness: bool = Field(default=False, description="Scale edge width by ratio or embedding")
+    ratio_normalization: Literal["min", "sum"] = Field(
+        default="sum",
+        description="'min' = divide by min (xN labels), 'sum' = divide by sum (% labels)",
+    )
+    variable_thickness: bool = Field(
+        default=False, description="Scale edge width by ratio or embedding"
+    )
     show_edge_parts: bool = Field(default=False, description="Show embedding part names on edges")
     thickness_range: tuple[float, float] = Field(
         default=(0.5, 4.0),
         description="(min, max) multiplier on base line_width for variable-thickness edges",
+    )
+    ratio_thickness_range: tuple[float, float] = Field(
+        default=(0.25, 7.0),
+        description="(min, max) multiplier on base line_width for ratio-driven edges.",
     )
     embedding_thickness_map: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
@@ -232,6 +367,10 @@ class NetworkDiagram(Container):
             },
         },
         description="Embedding name -> (part name -> numeric value) for thickness. Case-insensitive.",
+    )
+    layout_spec: LayoutSpec | None = Field(
+        default=None,
+        description="Declarative layout constraints for consistent cross-diagram alignment",
     )
     layout: LayoutConstraints = Field(
         default_factory=lambda: LayoutConstraints(
@@ -266,6 +405,9 @@ class NetworkDiagram(Container):
         self._cotx_marker_map = self._build_cotx_marker_map()
         self._marker_only_nodes = self._find_marker_only_nodes()
         self._build()
+        if self.layout_spec and self.layout_spec.canvas_size:
+            self.min_dimensions = self.layout_spec.canvas_size.model_copy()
+            self.max_dimensions = self.layout_spec.canvas_size.model_copy()
 
     @property
     def _graph(self):
@@ -538,14 +680,22 @@ class NetworkDiagram(Container):
                 continue
             raw_ratios = [float(e.get("ratio", 1.0)) for e in entries]
             positive = [r for r in raw_ratios if r > 0]
-            min_r = min(positive) if positive else 1.0
+            if self.ratio_normalization == "sum":
+                divisor = sum(positive) if positive else 1.0
+            else:
+                divisor = min(positive) if positive else 1.0
             for entry, raw_r in zip(entries, raw_ratios, strict=True):
                 sid = str(entry["source_id"])
                 nid = source_id_to_nid.get(sid)
                 if nid is not None:
-                    norm_r = raw_r / min_r if min_r > 0 else 1.0
+                    norm_r = raw_r / divisor if divisor > 0 else 1.0
                     ratio_map[nid] = (raw_r, norm_r)
         return ratio_map
+
+    def _format_ratio_label(self, norm_r: float) -> str:
+        if self.ratio_normalization == "sum":
+            return _format_ratio_proportion(norm_r)
+        return _format_ratio_multiplier(norm_r)
 
     def _get_marker_ratio(self, cotx: str) -> float | None:
         """Get normalized ratio for the marker source in a cotransfection group."""
@@ -673,7 +823,7 @@ class NetworkDiagram(Container):
                 _, norm_r = self._ratio_map[src]
                 self._connection_labels.append(
                     ConnectionLabel(
-                        text=_format_ratio_multiplier(norm_r),
+                        text=self._format_ratio_label(norm_r),
                         style_class=["edge_ratio", *base_label_classes],
                         connection=conn_id,
                         font_size=5.0,
@@ -692,9 +842,7 @@ class NetworkDiagram(Container):
                 if parts_text:
                     embed_classes = [f"embed-{k}" for k in filtered]
                     cat_classes = [
-                        f"cat-{EMBEDDING_CATEGORY[k]}"
-                        for k in filtered
-                        if k in EMBEDDING_CATEGORY
+                        f"cat-{EMBEDDING_CATEGORY[k]}" for k in filtered if k in EMBEDDING_CATEGORY
                     ]
                     self._connection_labels.append(
                         ConnectionLabel(
@@ -720,24 +868,38 @@ class NetworkDiagram(Container):
         Called after jstyle.apply() so that self.thickness_range reflects the
         theme value rather than the field default.
         """
-        min_t, max_t = self.thickness_range
+        emb_min_t, emb_max_t = self.thickness_range
+        ratio_min_t, ratio_max_t = self.ratio_thickness_range
         conn_multipliers: dict[str, float] = {}
         for group_name, entries in self._thickness_raw.items():
-            # For embedding groups, normalize against the full map range
             part_map = self.embedding_thickness_map.get(group_name)
             if part_map is not None:
+                # Embedding groups: normalize against the full map range
                 all_values = list(part_map.values())
                 min_v, max_v = min(all_values), max(all_values)
+                for conn_id, raw_v in entries:
+                    if max_v == min_v:
+                        mult = (emb_min_t + emb_max_t) / 2
+                    else:
+                        t = (raw_v - min_v) / (max_v - min_v)
+                        mult = emb_min_t + t * (emb_max_t - emb_min_t)
+                    conn_multipliers[conn_id] = mult
+                continue
+            # Ratio group
+            if self.ratio_normalization == "sum":
+                # norm_r is already a proportion (sums to 1); scale proportionally
+                for conn_id, proportion in entries:
+                    conn_multipliers[conn_id] = max(ratio_min_t, proportion * ratio_max_t)
             else:
                 values = [v for _, v in entries]
                 min_v, max_v = min(values), max(values)
-            for conn_id, raw_v in entries:
-                if max_v == min_v:
-                    mult = (min_t + max_t) / 2
-                else:
-                    t = (raw_v - min_v) / (max_v - min_v)
-                    mult = min_t + t * (max_t - min_t)
-                conn_multipliers[conn_id] = mult
+                for conn_id, raw_v in entries:
+                    if max_v == min_v:
+                        mult = (ratio_min_t + ratio_max_t) / 2
+                    else:
+                        t = (raw_v - min_v) / (max_v - min_v)
+                        mult = ratio_min_t + t * (ratio_max_t - ratio_min_t)
+                    conn_multipliers[conn_id] = mult
         for conn in self._connections:
             if conn.id and conn.id in conn_multipliers:
                 conn.line_width *= conn_multipliers[conn.id]
@@ -862,7 +1024,7 @@ class NetworkDiagram(Container):
                 if self.show_ratios:
                     norm_r = self._get_marker_ratio(cotx)
                     if norm_r is not None:
-                        label = f"{label} {_format_ratio_multiplier(norm_r)}"
+                        label = f"{label} {self._format_ratio_label(norm_r)}"
                 input_layer.add_child(
                     Text(
                         text=label,
@@ -877,10 +1039,24 @@ class NetworkDiagram(Container):
 
         # ERN layers
         ern_in_nodes = [e for e in ern_ids if e in self._nodes]
-        for i, ern_layer in enumerate(self._graph.topological_order(ern_in_nodes)):
-            if not ern_layer:
+        actual_ern_layers = list(self._graph.topological_order(ern_in_nodes))
+        target_ern_count = (
+            self.layout_spec.max_ern_layers
+            if self.layout_spec and self.layout_spec.max_ern_layers
+            else len(actual_ern_layers)
+        )
+
+        for i in range(target_ern_count):
+            ern_layer = actual_ern_layers[i] if i < len(actual_ern_layers) else []
+            slot_order = (
+                self.layout_spec.get_slot_order_for_layer(i)
+                if self.layout_spec
+                else None
+            )
+            if not ern_layer and not slot_order:
                 continue
-            lc = Container(style_class=["main_layer", f"main_layer_{i}", "layer"])
+
+            lc = Container(style_class=["main_layer", f"main_layer_{i}", "layer", f"ern_{i}"])
             lc.add_child(
                 Text(
                     text=f"Layer {i + 1}",
@@ -891,25 +1067,75 @@ class NetworkDiagram(Container):
                     id=f"title_ern_{i}",
                 )
             )
-            for eid in sorted(ern_layer):
-                if eid not in self._nodes:
-                    continue
-                ern = self._nodes[eid]
-                lc.add_child(ern)
-                layed_out.add(eid)
-                for uid in dep_map.get(eid, []):
-                    if uid in self._nodes and uid not in ern_ids:
-                        up = self._nodes[uid]
-                        attach = (
-                            ern._tl_node
-                            if isinstance(up, TranslationNode)
-                            else (ern._tx_node if isinstance(up, TranscriptionNode) else None)
+
+            if ern_layer and slot_order:
+                ern_by_type: dict[str, int] = {}
+                for eid in ern_layer:
+                    if eid not in self._nodes:
+                        continue
+                    node = self._graph.nodes.get(eid)
+                    if node:
+                        ern_name = node.extra.get("seq_name", "").split("::")[-1].split("#")[0]
+                        ern_by_type[ern_name] = eid
+
+                for slot_name in slot_order:
+                    if slot_name in ern_by_type:
+                        eid = ern_by_type[slot_name]
+                        ern = self._nodes[eid]
+                        lc.add_child(ern)
+                        layed_out.add(eid)
+                        for uid in dep_map.get(eid, []):
+                            if uid in self._nodes and uid not in ern_ids:
+                                up = self._nodes[uid]
+                                attach = (
+                                    ern._tl_node
+                                    if isinstance(up, TranslationNode)
+                                    else (
+                                        ern._tx_node if isinstance(up, TranscriptionNode) else None
+                                    )
+                                )
+                                if attach:
+                                    up.attached_to, up.show = attach, False
+                                    lc.add_child(up)
+                                    layed_out.add(uid)
+                    else:
+                        lc.add_child(
+                            Container(
+                                style_class=["ern_spacer"],
+                                show=False,
+                            )
                         )
-                        if attach:
-                            up.attached_to, up.show = attach, False
-                            lc.add_child(up)
-                            layed_out.add(uid)
-            if len([c for c in lc.children if not isinstance(c, Text)]) > 0:
+            elif ern_layer:
+                for eid in sorted(ern_layer):
+                    if eid not in self._nodes:
+                        continue
+                    ern = self._nodes[eid]
+                    lc.add_child(ern)
+                    layed_out.add(eid)
+                    for uid in dep_map.get(eid, []):
+                        if uid in self._nodes and uid not in ern_ids:
+                            up = self._nodes[uid]
+                            attach = (
+                                ern._tl_node
+                                if isinstance(up, TranslationNode)
+                                else (ern._tx_node if isinstance(up, TranscriptionNode) else None)
+                            )
+                            if attach:
+                                up.attached_to, up.show = attach, False
+                                lc.add_child(up)
+                                layed_out.add(uid)
+            else:
+                # Empty column spacer for padding to max_ern_layers
+                for _ in slot_order or [""]:
+                    lc.add_child(
+                        Container(
+                            style_class=["ern_spacer"],
+                            show=False,
+                        )
+                    )
+
+            has_real = any(not isinstance(c, Text) for c in lc.children)
+            if has_real:
                 layers.append(lc)
 
         # Output layer
@@ -949,7 +1175,37 @@ class NetworkDiagram(Container):
                     auto.append(ac)
             layers = layers[:1] + auto + layers[1:]
 
+        # Apply layout_spec constraints to layer containers
+        if self.layout_spec:
+            for layer in layers:
+                layer_key = self._layer_key(layer)
+                if self.layout_spec.column_widths and layer_key in self.layout_spec.column_widths:
+                    layer.min_dimensions = Size(
+                        width=self.layout_spec.column_widths[layer_key],
+                        height=layer.min_dimensions.height,
+                    )
+                if self.layout_spec.layer_min_height is not None:
+                    layer.min_dimensions = Size(
+                        width=layer.min_dimensions.width,
+                        height=max(layer.min_dimensions.height, self.layout_spec.layer_min_height),
+                    )
+
         return layers
+
+    @staticmethod
+    def _layer_key(layer: Container) -> str:
+        """Derive a stable key for a layer container from its style classes."""
+        classes = layer.style_class
+        if "input_layer" in classes:
+            return "input_layer"
+        if "output_layer" in classes:
+            return "output_layer"
+        for cls in classes:
+            if cls.startswith("ern_"):
+                return cls
+        if layer.id:
+            return layer.id
+        return "unknown"
 
 
 def render_diagram_to_ax(
@@ -960,9 +1216,11 @@ def render_diagram_to_ax(
     style_overrides: dict | None = None,
     title: str | None = None,
     show_ratios: bool = False,
+    ratio_normalization: Literal["min", "sum"] = "sum",
     variable_thickness: bool = False,
     show_edge_parts: bool = False,
     thickness_range: tuple[float, float] = (0.5, 4.0),
+    layout_spec: LayoutSpec | None = None,
     **_kwargs,
 ):
     """Render a network compute diagram to an existing matplotlib axes."""
@@ -1014,9 +1272,11 @@ def render_diagram_to_ax(
         simplified=simplified,
         disabled_tu_ids=disabled_tu_ids or set(),
         show_ratios=show_ratios,
+        ratio_normalization=ratio_normalization,
         variable_thickness=variable_thickness,
         show_edge_parts=show_edge_parts,
         thickness_range=thickness_range,
+        layout_spec=layout_spec,
     )
     root = Container(
         children=[diagram],
@@ -1043,9 +1303,11 @@ class NetworkDiagramFigure(Figure):
     disabled_tu_ids: set[str] | None = None
     style_overrides: dict | None = None
     show_ratios: bool = False
+    ratio_normalization: Literal["min", "sum"] = "sum"
     variable_thickness: bool = False
     show_edge_parts: bool = False
     thickness_range: tuple[float, float] = (0.5, 4.0)
+    layout_spec: LayoutSpec | None = None
 
     def run(self, overwrite: bool = True):
         if not overwrite and self.figure_spec.output_path.exists():
@@ -1061,9 +1323,11 @@ class NetworkDiagramFigure(Figure):
             disabled_tu_ids=self.disabled_tu_ids,
             style_overrides=self.style_overrides,
             show_ratios=self.show_ratios,
+            ratio_normalization=self.ratio_normalization,
             variable_thickness=self.variable_thickness,
             show_edge_parts=self.show_edge_parts,
             thickness_range=self.thickness_range,
+            layout_spec=self.layout_spec,
         )
         self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(self.figure_spec.output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1)

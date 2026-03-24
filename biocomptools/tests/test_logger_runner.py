@@ -63,8 +63,8 @@ def test_replay_mode(db):
     runner = LoggerRunner(db=db, loggers=[recorder], mode="replay")
     runner.run()
 
-    # Should fire at steps 1-9 (should_fire skips step 0)
-    assert len(recorder._steps_seen) == 9
+    # Should fire at steps 0-9 (step 0 fires for loggers with call_at_interval)
+    assert len(recorder._steps_seen) == 10
     assert recorder._end_called
 
 
@@ -75,8 +75,8 @@ def test_replay_respects_interval(db):
     runner = LoggerRunner(db=db, loggers=[recorder], mode="replay")
     runner.run()
 
-    # Steps 3, 6, 9 fire (interval=3, skip 0); sort because thread dispatch order varies
-    assert sorted(recorder._steps_seen) == [3, 6, 9]
+    # Steps 0, 3, 6, 9 fire (interval=3, step 0 always fires with interval)
+    assert sorted(recorder._steps_seen) == [0, 3, 6, 9]
 
 
 def test_replay_on_end_fires(db):

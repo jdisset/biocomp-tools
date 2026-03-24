@@ -1,0 +1,48 @@
+# Diagram style overrides for DesignCardLogger cards.
+#
+# Usage in replay YAML:
+#   !DesignCardLogger
+#     <<{+<}: !include pkg:biocomptools:configs/themes/card_diagram_style.yaml
+
+# diagram_layout_spec: !LayoutSpec
+#   ern_slot_order: [[CasE,PgU],[Csy4]]
+#   max_ern_layers: 2
+#   layout_spec:
+#     canvas_size: [500, 300]
+
+diagram_style_overrides:
+  NetworkDiagram:
+    layout.gap: 25
+    layout.align_items: center
+
+    Container[style_class=layer]:
+      layout.gap: 10
+
+    Container[style_class=main_layer]:
+      layout.gap: 0
+      style.margin: [0, 0, 0, 0]
+
+    Container[style_class=input_layer]:
+      layout.gap: 15
+      style.padding: [0, 0, 0, 40]
+
+    Container[style_class=output_layer]:
+      style.padding: [0, 0, 0, 20]
+
+    Container[style_class=ern_spacer]:
+      min_dimensions: !Size { width: 70, height: 70 }
+      max_dimensions: !Size { width: 70, height: 70 }
+      style.margin: [2, 10, 2, 10]
+
+  ERNNode:
+    min_dimensions: !Size { width: 70, height: 70 }
+    max_dimensions: !Size { width: 70, height: 70 }
+    style.margin: [2, 10, 2, 10]
+
+  ComputeNode:
+    min_dimensions: !Size { width: 18, height: 18 }
+    style.margin: [10, 10, 10, 10]
+
+  AggregationNode[style_class=collapsed]:
+    min_dimensions: !Size { width: 20, height: 4 }
+    max_dimensions: !Size { width: 20, height: 4 }

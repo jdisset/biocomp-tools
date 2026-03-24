@@ -348,5 +348,10 @@ NetworkDiagram:
   ConnectionLabel[style_class=embed-tc_rate]:
     deny_text: "hef1a"
 
+Container[style_class=ern_spacer]:
+  min_dimensions: !Size { width: 70, height: 70 }
+  max_dimensions: !Size { width: 70, height: 70 }
+  style.margin: [10, 10, 10, 10]
+
 "[style_class=disabled]":
   opacity: 0.3

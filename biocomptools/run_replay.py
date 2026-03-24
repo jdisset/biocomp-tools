@@ -31,6 +31,9 @@ from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
 from biocomptools.toollib.loggers.designheatmaplogger import DesignHeatmapLogger
 from biocomptools.toollib.loggers.designcardlogger import DesignCardLogger
+from biocomptools.toollib.loggers.designlosshistorylogger import DesignLossHistoryLogger
+from biocomptools.toollib.figuremakers.networkdiagram import LayoutSpec
+from jeanplot.core.models import Size
 from biocomptools.toollib.common import config
 
 logger = get_logger(__name__)
@@ -219,6 +222,9 @@ DEFAULT_TYPES = [
     DesignDiagnosticLogger,
     DesignHeatmapLogger,
     DesignCardLogger,
+    DesignLossHistoryLogger,
+    LayoutSpec,
+    Size,
 ]
 
 

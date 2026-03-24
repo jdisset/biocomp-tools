@@ -52,8 +52,10 @@ class Logger(BaseModel):
 
     def should_fire(self, step: int) -> bool:
         """Whether this logger should fire at the given step (excluding start/end)."""
-        if step <= 0:
+        if step < 0:
             return False
+        if step == 0:
+            return 0 in self._call_at_set or self.call_at_interval is not None
         interval = self.call_at_interval
         if interval is not None and interval > 0 and step % interval == 0:
             return True

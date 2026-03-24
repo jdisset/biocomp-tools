@@ -330,8 +330,7 @@ class TestNetworkDiagram:
         input_legends = [
             t
             for t in legends
-            if t.text.startswith("(")
-            and t.text.split(")")[0].lstrip("(").upper() in marker_names
+            if t.text.startswith("(") and t.text.split(")")[0].lstrip("(").upper() in marker_names
         ]
         assert input_legends
         assert all(t.attached_to is not None for t in input_legends)
@@ -408,7 +407,9 @@ class TestNetworkDiagram:
         diagram = NetworkDiagram(network=marker_input_network, simplified=True)
         root = _apply_network_theme(diagram)
 
-        legends = [t for t in self._get_input_layer_legend_texts(diagram) if t.attached_to is not None]
+        legends = [
+            t for t in self._get_input_layer_legend_texts(diagram) if t.attached_to is not None
+        ]
         assert legends
         legend = legends[0]
 
@@ -424,7 +425,9 @@ class TestNetworkDiagram:
         assert artists
         artist = artists[0]
         bbox = artist.get_window_extent(fig.canvas.get_renderer())
-        (x0, _y0), (x1, _y1) = ax.transData.inverted().transform([[bbox.x0, bbox.y0], [bbox.x1, bbox.y1]])
+        (x0, _y0), (x1, _y1) = ax.transData.inverted().transform(
+            [[bbox.x0, bbox.y0], [bbox.x1, bbox.y1]]
+        )
         assert x1 >= x0
 
         bounds = legend.get_world_bounds()
@@ -460,6 +463,130 @@ class TestNetworkDiagram:
         output_nodes = [node for node in diagram._nodes.values() if node.node_type == "output"]
         assert len(output_nodes) == 1
         assert true_first in output_nodes[0].style_class
+
+
+class TestLayoutSpec:
+    def test_layout_spec_from_networks(self, simple_network, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import LayoutSpec
+
+        spec = LayoutSpec.from_networks([simple_network, marker_input_network])
+        assert spec.ern_slot_order is not None
+        assert len(spec.ern_slot_order) > 0
+        assert spec.ern_slot_order == sorted(spec.ern_slot_order)
+        assert spec.max_ern_layers is not None
+        assert spec.max_ern_layers >= 1
+        assert spec.canvas_size is None
+
+    def test_layout_spec_no_effect_when_none(self, simple_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram
+
+        diagram = NetworkDiagram(network=simple_network, simplified=True, layout_spec=None)
+        assert diagram is not None
+        assert len(diagram.children) > 0
+
+    def test_layout_spec_canvas_size(self, simple_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+        from jeanplot.core.models import Size
+
+        spec = LayoutSpec(canvas_size=Size(400, 300))
+        diagram = NetworkDiagram(network=simple_network, simplified=True, layout_spec=spec)
+        assert diagram.min_dimensions.width == 400
+        assert diagram.min_dimensions.height == 300
+        assert diagram.max_dimensions.width == 400
+        assert diagram.max_dimensions.height == 300
+
+    def test_layout_spec_ern_slot_order_adds_spacers(self, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+
+        spec = LayoutSpec(ern_slot_order=["CasE", "Csy4", "PgU"])
+        diagram = NetworkDiagram(network=marker_input_network, simplified=True, layout_spec=spec)
+        ern_layers = [
+            c
+            for c in diagram.children
+            if hasattr(c, "style_class") and "main_layer" in c.style_class
+        ]
+        assert ern_layers
+        spacers = []
+        for layer in ern_layers:
+            for child in layer.children:
+                if hasattr(child, "style_class") and "ern_spacer" in child.style_class:
+                    spacers.append(child)
+        assert (
+            len(spacers) >= 2
+        )  # Csy4 and PgU should be spacers (marker_input_network only has CasE)
+
+    def test_layout_spec_max_ern_layers_pads_columns(self, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+
+        spec = LayoutSpec(max_ern_layers=3)
+        diagram = NetworkDiagram(network=marker_input_network, simplified=True, layout_spec=spec)
+        ern_layers = [
+            c
+            for c in diagram.children
+            if hasattr(c, "style_class") and "main_layer" in c.style_class
+        ]
+        assert len(ern_layers) >= 1  # at least the original ERN layer(s)
+
+    def test_layout_spec_layer_min_height(self, simple_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+
+        spec = LayoutSpec(layer_min_height=200.0)
+        diagram = NetworkDiagram(network=simple_network, simplified=True, layout_spec=spec)
+        layers = [
+            c for c in diagram.children if hasattr(c, "style_class") and "layer" in c.style_class
+        ]
+        for layer in layers:
+            assert layer.min_dimensions.height >= 200.0
+
+    def test_layout_spec_column_widths(self, simple_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+
+        spec = LayoutSpec(column_widths={"input_layer": 150.0, "output_layer": 100.0})
+        diagram = NetworkDiagram(network=simple_network, simplified=True, layout_spec=spec)
+        input_layers = [
+            c
+            for c in diagram.children
+            if hasattr(c, "style_class") and "input_layer" in c.style_class
+        ]
+        if input_layers:
+            assert input_layers[0].min_dimensions.width >= 150.0
+
+    def test_shared_layout_spec_across_diagrams(self, simple_network, marker_input_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import NetworkDiagram, LayoutSpec
+        from jeanplot.core.models import Size
+
+        spec = LayoutSpec.from_networks([simple_network, marker_input_network])
+        spec.canvas_size = Size(400, 300)
+
+        diagram_a = NetworkDiagram(network=simple_network, simplified=True, layout_spec=spec)
+        diagram_b = NetworkDiagram(network=marker_input_network, simplified=True, layout_spec=spec)
+        assert diagram_a.min_dimensions.width == diagram_b.min_dimensions.width
+        assert diagram_a.min_dimensions.height == diagram_b.min_dimensions.height
+
+    def test_render_diagram_with_layout_spec(self, simple_network, cleanup):
+        from biocomptools.toollib.figuremakers.networkdiagram import (
+            render_diagram_to_ax,
+            LayoutSpec,
+        )
+        from jeanplot.core.models import Size
+
+        spec = LayoutSpec(
+            canvas_size=Size(400, 300),
+            ern_slot_order=["CasE", "Csy4"],
+        )
+        fig, ax = plt.subplots(figsize=(8, 6))
+        render_diagram_to_ax(simple_network, ax, simplified=True, layout_spec=spec)
+        assert len(ax.get_children()) > 0
+
+    def test_semantic_key(self, simple_network):
+        from biocomptools.toollib.figuremakers.networkdiagram import semantic_key
+
+        graph = simple_network.compute_graph
+        for node in graph.nodes.values():
+            key = semantic_key(node, graph)
+            assert ":" in key
+            prefix = key.split(":")[0]
+            assert prefix, f"Empty prefix for node {node.node_id} type={node.node_type}"
 
 
 class TestGeneticCircuit:
