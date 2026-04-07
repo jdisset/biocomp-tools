@@ -69,18 +69,24 @@ def _extract_replicate_params(all_params, replicate_id: int):
 
 
 class TrainingProgram(BaseOptimizationProgram):
-    training_conf: Annotated[TrainingConfig, Arg(help='Training config')] = Field(
+    training_conf: Annotated[TrainingConfig, Arg(help="Training config")] = Field(
         default_factory=lambda: TrainingConfig()
     )
-    compute_conf: Annotated[ComputeConfig, Arg(help='Compute config')] = DEFAULT_COMPUTE_CONFIG
-    data_conf: Annotated[DataConfig, Arg(help='Data config')] = DEFAULT_DATA_CONFIG
+    compute_conf: Annotated[ComputeConfig, Arg(help="Compute config")] = DEFAULT_COMPUTE_CONFIG
+    data_conf: Annotated[DataConfig, Arg(help="Data config")] = DEFAULT_DATA_CONFIG
 
-    training_set: Annotated[NetworkSet, Arg(help='Networks in training set')] = Field(
+    training_set: Annotated[NetworkSet, Arg(help="Networks in training set")] = Field(
         default_factory=NetworkSet
     )
 
     use_jax_sampling: bool = True
-    uniform_weights: Annotated[bool, Arg(help='Override all dataset weights to 1.0')] = False
+    uniform_weights: Annotated[bool, Arg(help="Override all dataset weights to 1.0")] = False
+    save_all_replicates: Annotated[
+        bool, Arg(help="Save a model file for every replicate, not just the best")
+    ] = False
+    init_from_model: Annotated[
+        str | None, Arg(help="Path to pretrained model (.pickle) for warm-start")
+    ] = None
 
     _training_dman: Any = None
     _training_id: Optional[str] = None
@@ -92,7 +98,7 @@ class TrainingProgram(BaseOptimizationProgram):
         return self._training_id
 
     def get_output_subdir(self) -> str:
-        return 'training'
+        return "training"
 
     def initialize_context(self):
         with self.db_session as session:
@@ -104,10 +110,10 @@ class TrainingProgram(BaseOptimizationProgram):
         context = super()._get_logger_context()
         context.update(
             {
-                'training_conf': self.training_conf,
-                'compute_conf': self.compute_conf,
-                'data_conf': self.data_conf,
-                'training_set': self.training_set,
+                "training_conf": self.training_conf,
+                "compute_conf": self.compute_conf,
+                "data_conf": self.data_conf,
+                "training_set": self.training_set,
             }
         )
         return context
@@ -140,29 +146,53 @@ class TrainingProgram(BaseOptimizationProgram):
 
         self._metadata.update(
             {
-                'training_id': self.training_id,
-                'run_name': self._run_name,
-                'experiment_name': self.experiment_name,
-                'training_set': {
-                    'content': self.training_set.content,
-                    'name': self.training_set.name,
+                "training_id": self.training_id,
+                "run_name": self._run_name,
+                "experiment_name": self.experiment_name,
+                "training_set": {
+                    "content": self.training_set.content,
+                    "name": self.training_set.name,
                 },
-                'training_conf': self.training_conf,
-                'compute_conf': self.compute_conf,
-                'data_conf': self.data_conf,
-                'data_manager_info': dataman_info,
-                'final_model_dump': self._modeldump,
+                "training_conf": self.training_conf,
+                "compute_conf": self.compute_conf,
+                "data_conf": self.data_conf,
+                "data_manager_info": dataman_info,
+                "final_model_dump": self._modeldump,
             }
         )
+
+    def _prepare_init_params(self):
+        """Build init_params from a pretrained model if init_from_model is set."""
+        if self.init_from_model is None:
+            return None
+        import jax
+        from biocomp.parameters import overlay_shared_params
+
+        logger.info(f"Warm-starting from pretrained model: {self.init_from_model}")
+        pretrained = BiocompModel.load(self.init_from_model)
+
+        assert self._training_dman is not None
+        stack = self._training_dman.build_compute_stack(self.compute_conf)
+        assert self.training_conf.seed is not None
+        key = jax.random.PRNGKey(self.training_conf.seed)
+        fresh_params = stack.init(key)
+        merged = overlay_shared_params(fresh_params, pretrained.shared_params)
+        logger.info(f"Overlaid shared params from pretrained model (sig={pretrained.signature})")
+
+        self._metadata["init_from_model"] = self.init_from_model
+        self._metadata["init_from_model_signature"] = pretrained.signature
+        return merged
 
     async def execute_optimization(self, dispatch):
         from biocomp.train import start
 
+        init_params = self._prepare_init_params()
         all_params, all_losses, step_history = start(
             self._training_dman,
             self.training_conf,
             self.compute_conf,
             dispatch=dispatch,
+            init_params=init_params,
         )
 
         return all_params, all_losses, step_history
@@ -176,9 +206,7 @@ class TrainingProgram(BaseOptimizationProgram):
             leaves = tree_leaves(all_params)
             if leaves:
                 arr = np.asarray(leaves[0])
-                logger.info(
-                    f"save_outputs: all_params leaf0 shape={arr.shape}, dtype={arr.dtype}"
-                )
+                logger.info(f"save_outputs: all_params leaf0 shape={arr.shape}, dtype={arr.dtype}")
         except Exception:
             logger.info(f"save_outputs: all_params type={type(all_params)}")
         if "debug" in self._run_name:
@@ -189,7 +217,10 @@ class TrainingProgram(BaseOptimizationProgram):
 
         self.save_best(all_params, all_losses, save_dir)
 
-        np.save(save_dir / 'loss_history.npy', all_losses)
+        if self.save_all_replicates:
+            self._save_all_replicates(all_params, all_losses, save_dir)
+
+        np.save(save_dir / "loss_history.npy", all_losses)
 
         logger_metrics = [
             m
@@ -199,7 +230,7 @@ class TrainingProgram(BaseOptimizationProgram):
             if m
         ]
         if logger_metrics:
-            self._metadata['logger_metrics_all_replicates'] = make_json_ready(logger_metrics)
+            self._metadata["logger_metrics_all_replicates"] = make_json_ready(logger_metrics)
 
         try:
             self.save_loss_plot(all_losses, save_dir)
@@ -226,6 +257,22 @@ class TrainingProgram(BaseOptimizationProgram):
         replicate_model_factory = self.get_replicate_model_func()
         return partial(get_best_model, model_factory=replicate_model_factory)
 
+    def _save_all_replicates(self, all_params, all_losses, save_dir):
+        replicate_model_factory = self.get_replicate_model_func()
+        n_replicates = self.training_conf.n_replicates
+        rep_dir = save_dir / "replicates"
+        rep_dir.mkdir(exist_ok=True)
+        for i in range(n_replicates):
+            model = replicate_model_factory(
+                all_params=all_params, all_losses=all_losses, replicate_id=i
+            )
+            if model is None:
+                logger.warning(f"Failed to create model for replicate {i}")
+                continue
+            fname = rep_dir / f"rep_{i}.model.pickle"
+            model.save(fname)
+            logger.info(f"Saved replicate {i} model to {fname}")
+
     def save_best(self, all_params, all_losses: list[np.ndarray], save_dir, name=None):
         model_factory = self.get_best_model_func()
         model = model_factory(all_params=all_params, all_losses=all_losses)
@@ -245,7 +292,7 @@ class TrainingProgram(BaseOptimizationProgram):
             return
         if name is None:
             name = f"{model.signature}.bestmodel"
-        fname = save_dir / f'{name}.pickle'
+        fname = save_dir / f"{name}.pickle"
         model.save(fname)
         logger.debug(f"Saved best model to {fname}")
 
@@ -270,17 +317,17 @@ def create_replicate_model(
         return None
 
     local_metadata = base_metadata.copy()
-    local_metadata['replicate_number'] = replicate_id
+    local_metadata["replicate_number"] = replicate_id
 
     latest_loss = get_latest_avg_loss(all_losses, replicate_id)
     if not np.isnan(latest_loss):
-        local_metadata['training_loss'] = latest_loss
+        local_metadata["training_loss"] = latest_loss
 
     rep_metrics = [
         m for m in (logger.get_metrics(replicate=replicate_id) for logger in loggers) if m
     ]
     if rep_metrics:
-        local_metadata['logger_metrics'] = make_json_ready(rep_metrics)
+        local_metadata["logger_metrics"] = make_json_ready(rep_metrics)
 
     model = BiocompModel(
         compute_config=compute_conf,
@@ -298,12 +345,12 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
     if all_params is not None and len(all_losses) > 0:
         try:
             first_loss = all_losses[0]
-            if hasattr(first_loss, 'shape') and len(first_loss.shape) > 0:
+            if hasattr(first_loss, "shape") and len(first_loss.shape) > 0:
                 n_replicates_from_loss = first_loss.shape[0]
 
-                if hasattr(all_params, 'iter_leaves'):
+                if hasattr(all_params, "iter_leaves"):
                     for _path, param in all_params.iter_leaves():
-                        if hasattr(param, 'shape') and len(param.shape) > 0:
+                        if hasattr(param, "shape") and len(param.shape) > 0:
                             n_replicates_from_params = param.shape[0]
                             if n_replicates_from_params != n_replicates_from_loss:
                                 logger.warning(
@@ -316,10 +363,10 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
     best_model_id, _, _ = get_best_smoothed_loss_replicate_id(all_losses)
     if best_model_id == -1:
         n_replicates = 0
-        if hasattr(all_params, 'iter_leaves'):
+        if hasattr(all_params, "iter_leaves"):
             try:
                 for _path, param in all_params.iter_leaves():
-                    if hasattr(param, 'shape') and len(param.shape) > 0:
+                    if hasattr(param, "shape") and len(param.shape) > 0:
                         n_replicates = int(param.shape[0])
                         break
             except Exception as e:
@@ -341,8 +388,8 @@ def get_best_model(all_params, all_losses, model_factory: Callable):
 async def main_async():
     await run_optimization_program(
         TrainingProgram,
-        'biocomp-train',
-        'Start training biocomp models.',
+        "biocomp-train",
+        "Start training biocomp models.",
         sys.argv[1:],
     )
 
@@ -351,5 +398,5 @@ def main():
     asyncio.run(main_async())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

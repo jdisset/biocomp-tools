@@ -11,11 +11,9 @@ from biocomptools.logging_config import get_logger
 import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomptools.toollib.types import InputOrderElement
-from biocomp.plotting.plotting_core import knn_stats, build_tree
 from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
 from biocomp.metric_utils import (
     grid_mse as compute_grid_mse,
-    grid_rmse as compute_grid_rmse,
     grid_r_squared as compute_grid_r_squared,
     grid_snr as compute_grid_snr,
     grid_kl_divergence as compute_grid_kl,
@@ -78,12 +76,65 @@ def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) 
     return np.vstack([g.ravel() for g in grid]).T
 
 
+def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius=3.0):
+    """Combined KNN query + adaptive Gaussian weights + mean/var computation.
+
+    Fused version of get_gaussian_weighted_knn(adaptive_sigma=True, normed_w=False)
+    followed by normalization and get_knn_mean_and_variance.
+    Returns (mean, variance, n_eff) without intermediate weight arrays.
+    """
+    eps = 1e-12
+    distances, indices = tree.query(grid, k=k, workers=-1)
+    finite_mask = np.isfinite(distances)
+    max_finite = np.where(finite_mask, distances, -np.inf).max(axis=1)
+    sigma = (max_finite / sigma_in_radius).reshape(-1, 1) + eps
+
+    if max_radius is not None:
+        valid_mask = finite_mask & (distances <= max_radius)
+    else:
+        valid_mask = finite_mask
+    nb_points = valid_mask.sum(axis=1)
+
+    Z = np.exp(-0.5 * (distances / sigma) ** 2)
+    invalid = ~valid_mask
+    Z[invalid] = 0.0
+    indices_c = indices.copy()
+    indices_c[invalid] = 0
+
+    # n_eff from unnormalized weights (no NaN yet)
+    n_eff = Z.sum(axis=1, keepdims=True)
+
+    # normalize
+    with np.errstate(divide='ignore', invalid='ignore'):
+        W = Z / n_eff
+
+    # mean and variance (fused, no NaN in W yet for valid rows)
+    y_nei = y[indices_c]
+    w = W[..., None]
+    mean = np.sum(w * y_nei, axis=1)
+    diff = y_nei - mean[:, None, :]
+    var_num = np.sum(w * (diff**2), axis=1)
+    w2sum = np.sum(W**2, axis=1, keepdims=True)
+    denom = np.maximum(1.0 - w2sum, eps)
+    variance = var_num / denom
+
+    # mark too-few-neighbors rows as NaN
+    too_few = nb_points < min_points
+    if np.any(too_few):
+        mean[too_few] = np.nan
+        variance[too_few] = np.nan
+        n_eff[too_few] = np.nan
+
+    return mean, variance, n_eff
+
+
 def _compute_split_half_nrmse(
     latent_x: NdArray,
     latent_gt: NdArray,
     params: Dict[str, Any],
     n_bootstraps: int = SPLIT_HALF_N_BOOTSTRAPS,
     seed: int = 42,
+    grid: NdArray | None = None,
 ) -> float:
     """Compute intrinsic noise floor via bootstrapped split-half nRMSE.
 
@@ -96,6 +147,8 @@ def _compute_split_half_nrmse(
     which is conceptually similar but uses different sampling strategy. This
     bootstrap version is used for prediction noise estimation.
     """
+    from scipy.spatial import cKDTree
+
     rng = np.random.RandomState(seed)
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
     n_points = len(latent_x)
@@ -111,14 +164,25 @@ def _compute_split_half_nrmse(
     if n_points < 200:
         return np.nan
 
-    grid = make_hypercube(
-        latent_x.shape[1],
-        res=params['hypercube_res'],
-        xmin=params['hypercube_min'],
-        xmax=params['hypercube_max'],
-    )
+    if grid is None:
+        grid = make_hypercube(
+            latent_x.shape[1],
+            res=params['hypercube_res'],
+            xmin=params['hypercube_min'],
+            xmax=params['hypercube_max'],
+        )
 
     subset_size = min(SPLIT_HALF_SUBSET_SIZE, n_points)
+    k = params['k']
+    min_points_param = params['min_points']
+    max_radius = params['radius']
+
+    # loop-invariant constants
+    global_var = float(np.var(latent_gt))
+    global_range = float(np.ptp(latent_gt))
+    PRIOR_STRENGTH = 100.0
+    ROBUST_EPSILON = max(0.01, 0.01 * global_range)
+    WEIGHT_CAP = 0.1 * k
 
     scores = []
     for _ in range(n_bootstraps):
@@ -128,73 +192,29 @@ def _compute_split_half_nrmse(
         x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
         x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
 
-        tree_a = build_tree(x_a)
-        tree_b = build_tree(x_b)
+        # Use cKDTree directly (data is already finite from filtering above)
+        tree_a = cKDTree(x_a)
+        tree_b = cKDTree(x_b)
 
-        indices_a, weights_a = get_gaussian_weighted_knn(
-            grid,
-            tree=tree_a,
-            k=params['k'],
-            min_points=params['min_points'],
-            adaptive_sigma=True,
-            max_radius=params['radius'],
-            normed_w=False,
-        )
-        indices_b, weights_b = get_gaussian_weighted_knn(
-            grid,
-            tree=tree_b,
-            k=params['k'],
-            min_points=params['min_points'],
-            adaptive_sigma=True,
-            max_radius=params['radius'],
-            normed_w=False,
-        )
+        mean_a, var_a, n_eff_a = _knn_mean_var_neff(tree_a, grid, y_a, k, min_points_param, max_radius)
+        mean_b, var_b, n_eff_b = _knn_mean_var_neff(tree_b, grid, y_b, k, min_points_param, max_radius)
 
-        n_eff_a = np.nansum(weights_a, axis=1, keepdims=True)
-        n_eff_b = np.nansum(weights_b, axis=1, keepdims=True)
-
-        with np.errstate(divide='ignore', invalid='ignore'):
-            norm_weights_a = weights_a / n_eff_a
-            norm_weights_b = weights_b / n_eff_b
-
-        _, std_a, mean_a = knn_stats(
-            grid,
-            y_a,
-            iw=(indices_a, norm_weights_a),
-            stats=['iw', 'std', 'mean'],
-            k=params['k'],
-            min_points=params['min_points'],
-        )
-        _, std_b, mean_b = knn_stats(
-            grid,
-            y_b,
-            iw=(indices_b, norm_weights_b),
-            stats=['iw', 'std', 'mean'],
-            k=params['k'],
-            min_points=params['min_points'],
-        )
-
-        pooled_var = (std_a**2 + std_b**2) / 2.0
+        pooled_var = (var_a + var_b) / 2.0
         sq_error = (mean_a - mean_b) ** 2
 
-        global_var = np.var(latent_gt)
-        PRIOR_STRENGTH = 100.0
         n_eff_pooled = (n_eff_a + n_eff_b) / 2.0
         smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (
             n_eff_pooled + PRIOR_STRENGTH
         )
 
-        global_range = np.ptp(latent_gt)
-        ROBUST_EPSILON = max(0.01, 0.01 * global_range)
         safe_denom = np.maximum(np.sqrt(smoothed_var), ROBUST_EPSILON)
 
         norm_sq_error = sq_error / (safe_denom**2)
 
-        WEIGHT_CAP = 0.1 * params['k']
         capped_weights = np.broadcast_to(np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape)
 
-        weights_flat = capped_weights.flatten()
-        norm_sq_flat = norm_sq_error.flatten()
+        weights_flat = capped_weights.ravel()
+        norm_sq_flat = norm_sq_error.ravel()
         mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
 
         if np.any(mask):
@@ -354,11 +374,15 @@ def _calculate_single_network_stats(
         debug_logger.debug(f"  computed MSE: {mse:.6f}, RMSE: {rmse:.6f}")
 
         if enable_gridstats:
-            grid_stats = _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
+            grid_stats, grid_cache = _calculate_grid_stats(
+                latent_yhat, latent_gt, latent_x, gridstats_params
+            )
             network_stats.update(grid_stats)
 
-            # compute data noise floor (split-half nRMSE) and noise-relative error
-            data_nrmse = _compute_split_half_nrmse(latent_x, latent_gt, gridstats_params)
+            # compute data noise floor (split-half nRMSE) reusing cached grid
+            data_nrmse = _compute_split_half_nrmse(
+                latent_x, latent_gt, gridstats_params, grid=grid_cache
+            )
             network_stats['data_nrmse'] = data_nrmse
             network_stats['noise_relative_error'] = compute_nre(
                 grid_stats['grid_nrmse'], data_nrmse
@@ -372,8 +396,10 @@ def _calculate_grid_stats(
     latent_gt: NdArray,
     latent_x: NdArray,
     params: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Calculate grid statistics with nRMSE and SNR."""
+) -> tuple[Dict[str, Any], NdArray]:
+    """Calculate grid statistics with nRMSE and SNR. Returns (stats, grid) for reuse."""
+    from scipy.spatial import cKDTree
+
     grid = make_hypercube(
         latent_x.shape[1],
         res=params['hypercube_res'],
@@ -388,16 +414,20 @@ def _calculate_grid_stats(
     valid_latent_x = np.asarray(latent_x[valid_x_mask])
     valid_latent_yhat = np.asarray(latent_yhat[valid_x_mask])
     valid_latent_gt = np.asarray(latent_gt[valid_x_mask])
-    # dedup:
-    _, unique_idx = np.unique(valid_latent_x, axis=0, return_index=True)
-    valid_latent_x = valid_latent_x[unique_idx]
-    valid_latent_yhat = valid_latent_yhat[unique_idx]
-    valid_latent_gt = valid_latent_gt[unique_idx]
+    # dedup: numpy-based unique rows
+    if len(valid_latent_x) > 0:
+        _, unique_idx = np.unique(valid_latent_x, axis=0, return_index=True)
+        if len(unique_idx) < len(valid_latent_x):
+            unique_idx.sort()
+            valid_latent_x = valid_latent_x[unique_idx]
+            valid_latent_yhat = valid_latent_yhat[unique_idx]
+            valid_latent_gt = valid_latent_gt[unique_idx]
 
     global_var = np.var(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
     global_range = np.ptp(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
 
-    tree = build_tree(valid_latent_x)
+    # data already finite-filtered; use cKDTree directly
+    tree = cKDTree(valid_latent_x)
 
     # raw gaussian weights, single tree query for both n_eff and knn_stats
     # Use adaptive sigma ("leashed balloon"): sigma scales with local density for fair 2D/3D comparison
@@ -415,34 +445,23 @@ def _calculate_grid_stats(
     # effective sample size: sum of raw Gaussian weights (distance-aware confidence)
     n_eff = np.nansum(raw_weights, axis=1, keepdims=True)
 
-    # normalize weights for knn_stats
+    # normalize weights for mean/variance computation
     with np.errstate(divide='ignore', invalid='ignore'):
         norm_weights = raw_weights / n_eff
     iw = (indices, norm_weights)
 
-    _, gt_stdev, gt_mean = knn_stats(
-        grid,
-        valid_latent_gt,
-        iw=iw,
-        stats=['iw', 'std', 'mean'],
-        k=params['k'],
-        min_points=params['min_points'],
-    )
-    yhat_stdev, yhat_mean = knn_stats(
-        grid,
-        valid_latent_yhat,
-        iw=iw,
-        stats=['std', 'mean'],
-        k=params['k'],
-        min_points=params['min_points'],
-    )
+    from biocomp.plotting.knn_utils_np import get_knn_mean_and_variance
+    gt_mean, gt_var = get_knn_mean_and_variance(grid, valid_latent_gt, iw=iw)
+    yhat_mean, yhat_var = get_knn_mean_and_variance(grid, valid_latent_yhat, iw=iw)
 
-    # use centralized metric functions from biocomp.metric_utils
+    # compute metrics directly avoiding redundant sqrt/square roundtrips
     sq_error = (yhat_mean - gt_mean) ** 2
-    local_var = gt_stdev**2
+    local_var = gt_var  # gt_stdev**2 == gt_var
+    gt_stdev = np.sqrt(gt_var)
+    yhat_stdev = np.sqrt(yhat_var)
 
     mse_val = compute_grid_mse(yhat_mean, gt_mean)
-    rmse_val = compute_grid_rmse(yhat_mean, gt_mean)
+    rmse_val = float(np.sqrt(mse_val))  # avoid recomputing nanmean
     r_squared_val = compute_grid_r_squared(yhat_mean, gt_mean)
     snr_val = compute_grid_snr(gt_mean, local_var)
     kl_mean, kl_similarity = compute_grid_kl(yhat_mean, yhat_stdev, gt_mean, gt_stdev)
@@ -465,7 +484,7 @@ def _calculate_grid_stats(
         'grid_kl': kl_mean,
         'grid_kl_similarity': kl_similarity,
         'grid_r_squared': r_squared_val,
-    }
+    }, grid
 
 
 class NetworkPrediction(GridStatsFields, DataSource):
@@ -975,7 +994,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
         def process_and_log_stats(idx, task, result):
             all_stats[idx] = result
-            if task.get('gt') is not None:
+            if self.verbose and task.get('gt') is not None:
                 rescaler = task['rescaler']
                 latent_gt = rescaler.fwd(task['gt'])
                 latent_yhat = rescaler.fwd(task['yhat'])
@@ -984,7 +1003,6 @@ class NetworkPrediction(GridStatsFields, DataSource):
                         f"ground truth shape {latent_gt.shape} is smaller than yhat shape {latent_yhat.shape}, "
                         "Assuming gt is only the dependent outputs."
                     )
-                    # ensure dependent_output_pos is always a list for consistent indexing
                     output_pos = task['dependent_output_pos']
                     if isinstance(output_pos, int):
                         output_pos = [output_pos]
@@ -1493,6 +1511,151 @@ class NetworkPrediction(GridStatsFields, DataSource):
             data.set_xy()
 
         return lazy_data
+
+    def save_results(
+        self,
+        output_dir: Path | str,
+        prediction_data: list[PlotData] | None = None,
+        ground_truth: list[PlotData] | None = None,
+    ) -> list[Path]:
+        """Save per-network prediction results as Parquet files with metadata.
+
+        Saves processed PlotData (from get_data()) which has correct column semantics.
+        Ground truth saved separately (may differ in row count).
+
+        Args:
+            output_dir: Directory to save Parquet files.
+            ground_truth: Optional ground truth PlotData list (for embedding in metadata).
+
+        Returns:
+            List of saved file paths.
+        """
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if prediction_data is None:
+            prediction_data = self.get_data()
+
+        stats = self.get_network_stats() if self._yhats is not None else [{}] * len(prediction_data)
+        saved = []
+
+        for i, pred in enumerate(prediction_data):
+            x_pred = np.asarray(pred.x)
+            y_pred = np.asarray(pred.y)
+
+            pred_cols = {f"x_{j}": x_pred[:, j] for j in range(x_pred.shape[1])}
+            pred_cols.update({f"y_pred_{j}": y_pred[:, j] for j in range(y_pred.shape[1])})
+            df = pd.DataFrame(pred_cols)
+            table = pa.Table.from_pandas(df)
+
+            network_name = pred.metadata.get('network_name', f'network_{i}')
+            meta = {
+                'network_name': network_name,
+                'input_names': pred.input_names,
+                'output_name': pred.output_name,
+                'model_signature': self.network_model.signature,
+                'stats': stats[i] if i < len(stats) else {},
+            }
+            import json
+            existing_meta = table.schema.metadata or {}
+            existing_meta[b'biocomp'] = json.dumps(meta, default=str).encode()
+            table = table.replace_schema_metadata(existing_meta)
+
+            safe_name = network_name.replace('/', '_').replace(' ', '_')
+            fpath = output_dir / f"{safe_name}.parquet"
+            pq.write_table(table, fpath)
+            saved.append(fpath)
+
+            if ground_truth is not None and i < len(ground_truth):
+                gt = ground_truth[i]
+                gt_x, gt_y = np.asarray(gt.x), np.asarray(gt.y)
+                gt_cols = {f"x_{j}": gt_x[:, j] for j in range(gt_x.shape[1])}
+                gt_cols.update({f"y_gt_{j}": gt_y[:, j] for j in range(gt_y.shape[1])})
+                gt_table = pa.Table.from_pandas(pd.DataFrame(gt_cols))
+                gt_meta_dict = {**meta, 'data_type': 'ground_truth', 'input_names': gt.input_names, 'output_name': gt.output_name}
+                gt_existing = gt_table.schema.metadata or {}
+                gt_existing[b'biocomp'] = json.dumps(gt_meta_dict, default=str).encode()
+                gt_table = gt_table.replace_schema_metadata(gt_existing)
+                pq.write_table(gt_table, output_dir / f"{safe_name}_gt.parquet")
+
+        logger.info(f"Saved {len(saved)} prediction results to {output_dir}")
+        return saved
+
+    @staticmethod
+    def load_results(output_dir: Path | str) -> list[tuple[PlotData, PlotData]]:
+        """Load saved prediction results as (ground_truth, prediction) PlotData pairs.
+
+        No model or GPU needed — pure file I/O. Ready for the auto-dispatch plot system.
+
+        Returns:
+            List of (gt_plotdata, pred_plotdata) tuples, one per network.
+        """
+        import pyarrow.parquet as pq
+        import json
+
+        output_dir = Path(output_dir)
+        pairs = []
+
+        for fpath in sorted(output_dir.glob("*.parquet")):
+            if fpath.stem.endswith('_gt'):
+                continue  # skip GT files, loaded alongside pred files
+
+            table = pq.read_table(fpath)
+            meta_bytes = table.schema.metadata.get(b'biocomp')
+            meta = json.loads(meta_bytes.decode()) if meta_bytes else {}
+
+            df = table.to_pandas()
+            x_cols = sorted([c for c in df.columns if c.startswith('x_')])
+            y_pred_cols = sorted([c for c in df.columns if c.startswith('y_pred_')])
+
+            x_pred = df[x_cols].to_numpy()
+            y_pred = df[y_pred_cols].to_numpy()
+
+            n_outputs = len(y_pred_cols)
+            input_names = meta.get('input_names', [f'x_{i}' for i in range(len(x_cols))])
+            output_name = meta.get('output_name', 'output')
+            if isinstance(output_name, str) and n_outputs > 1:
+                output_name = [output_name] + [f'output_{j}' for j in range(1, n_outputs)]
+            stats = meta.get('stats', {})
+            network_name = meta.get('network_name', fpath.stem)
+
+            pred_metadata = {
+                'network_name': network_name,
+                'model_signature': meta.get('model_signature', ''),
+                'prediction_stats': stats,
+            }
+            pred_data = PlotData(
+                xval=x_pred, yval=y_pred,
+                input_names=input_names, output_name=output_name,
+                metadata=pred_metadata,
+            )
+
+            # Load separate GT file if it exists
+            gt_fpath = fpath.parent / f"{fpath.stem}_gt.parquet"
+            if gt_fpath.exists():
+                gt_df = pq.read_table(gt_fpath).to_pandas()
+                gt_x_cols = sorted([c for c in gt_df.columns if c.startswith('x_')])
+                gt_y_cols = sorted([c for c in gt_df.columns if c.startswith('y_gt_')])
+                gt_data = PlotData(
+                    xval=gt_df[gt_x_cols].to_numpy(),
+                    yval=gt_df[gt_y_cols].to_numpy(),
+                    input_names=input_names, output_name=output_name,
+                    metadata={'network_name': network_name},
+                )
+            else:
+                gt_data = PlotData(
+                    xval=x_pred, yval=np.full_like(y_pred, np.nan),
+                    input_names=input_names, output_name=output_name,
+                    metadata={'network_name': network_name},
+                )
+
+            pairs.append((gt_data, pred_data))
+
+        return pairs
 
 
 # 7.11 s

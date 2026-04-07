@@ -15,7 +15,6 @@ from biocomptools.logging_config import get_logger
 from dracon.utils import dict_like
 from biocomp.library import load_lib
 from biocomp.utils import ArbitraryModel
-from tqdm import tqdm
 
 logger = get_logger(__name__)
 lib = load_lib()
@@ -262,7 +261,7 @@ class NetworkModel(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     network: bc.Network | list[bc.Network]
 
-    max_points_per_batch: int = 10000
+    max_points_per_batch: int = 100000
 
     _stack: cmp.ComputeStack | None = None
     _params: pr.ParameterTree | None = None
@@ -360,8 +359,11 @@ class NetworkModel(BaseModel):
             raise e
         try:
             self._local_params = get_nonshared_params(init_params)
+            self._init_shared_params = get_shared_params(init_params)
             self._params = load_params(
-                pr.ParameterTree.merge(self.model.shared_params, self._local_params)
+                pr.overlay_shared_params(
+                    self._init_shared_params, self.model.shared_params, self._local_params
+                )
             )
         except Exception as e:
             logger.error(f"error updating params: {e}")
@@ -466,6 +468,19 @@ class NetworkModel(BaseModel):
                 logger.debug(f"GPU batch_apply precompiled in {time() - start_time:.2f} seconds")
             except Exception as e:
                 logger.warning(f"Failed to precompile GPU batch_apply: {e}")
+
+    def swap_params(self, model: BiocompModel) -> None:
+        """Swap shared params in-place without rebuilding stack or recompiling JIT.
+
+        Reuses existing _local_params and compiled batch_apply functions.
+        Only valid when the new model has the same compute structure (same networks).
+        """
+        self.model = model
+        self._params = load_params(
+            pr.overlay_shared_params(
+                self._init_shared_params, model.shared_params, self._local_params
+            )
+        )
 
     def with_model(self, model: BiocompModel) -> "NetworkModel":
         """create a new network model with a different biocomp model"""
@@ -691,75 +706,50 @@ class NetworkModel(BaseModel):
             batch_apply = self._batch_apply_cpu or self._batch_apply
             logger.debug("Using CPU for predictions")
 
-        # make predictions in batches
+        assert batch_apply is not None
+
+        # pre-generate all Z values and keys in one shot
+        if z_value == "uniform":
+            Z_all = jax.random.uniform(key, (padded_samples, num_z))
+        elif z_value == "normal":
+            Z_all = z_normal_mean + z_normal_std * jax.random.normal(key, (padded_samples, num_z))
+            if z_normal_clip:
+                Z_all = jnp.clip(Z_all, 0.0, 1.0)
+        else:
+            Z_all = jnp.broadcast_to(jnp.ones((1, num_z)) * z_value, (padded_samples, num_z))
+        keys_all = jax.random.split(key, padded_samples)
+
+        collecting = collect_in_indices is not None or collect_out_indices is not None
+
+        # run all batches — no per-batch sync, just dispatch
         all_yhats = []
         all_collected_in = []
         all_collected_out = []
-        batch_keys = jax.random.split(key, n_batches)
-        for i, batch_key in tqdm(list(enumerate(batch_keys)), desc="predicting"):
-            start_idx = i * effective_batch_size
-            end_idx = (i + 1) * effective_batch_size
-            batch_size = effective_batch_size
-
-            if z_value == "uniform":
-                Z_batch = jax.random.uniform(batch_key, (batch_size, num_z))
-            elif z_value == "normal":
-                Z_batch = z_normal_mean + z_normal_std * jax.random.normal(
-                    batch_key, (batch_size, num_z)
-                )
-                if z_normal_clip:
-                    Z_batch = jnp.clip(Z_batch, 0.0, 1.0)
-            else:
-                Z_batch = jnp.ones((batch_size, num_z)) * z_value
-
-            keys_batch = jax.random.split(batch_key, batch_size)
-
-            assert batch_apply is not None
-
-            # track potential recompilation
-            import time
-
-            batch_start = time.time()
+        for i in range(n_batches):
+            s = i * effective_batch_size
+            e = s + effective_batch_size
             out, (_, fullout) = batch_apply(
                 params,
-                X_padded[start_idx:end_idx],
-                Z_batch,
-                keys_batch,
+                X_padded[s:e],
+                Z_all[s:e],
+                keys_all[s:e],
             )
-            # ensure computation is complete
-            out.block_until_ready()
-            batch_time = time.time() - batch_start
+            all_yhats.append(out)
+            if collecting:
+                if collect_in_indices is not None:
+                    all_collected_in.append(fullout[:, collect_in_indices])
+                if collect_out_indices is not None:
+                    all_collected_out.append(fullout[:, collect_out_indices])
 
-            # warn if batch took suspiciously long (likely recompilation)
-            if i == 0 and batch_time > 1.0:
-                logger.warning(
-                    f"First batch took {batch_time:.2f}s - possible JAX recompilation. "
-                    f"Consider precompiling with expected batch sizes."
-                )
-            elif i > 0 and batch_time > 0.5:
-                logger.warning(
-                    f"Batch {i} took {batch_time:.2f}s - possible JAX recompilation "
-                    f"due to shape change or device switch."
-                )
-
-            all_yhats.append(np.asarray(out, dtype=np.float32))
-            if collect_in_indices is not None:
-                all_collected_in.append(
-                    np.asarray(fullout[:, collect_in_indices], dtype=np.float32)
-                )
-            if collect_out_indices is not None:
-                all_collected_out.append(
-                    np.asarray(fullout[:, collect_out_indices], dtype=np.float32)
-                )
-
-        yhat = np.concatenate(all_yhats, axis=0, dtype=np.float32)[:n_samples]
+        # single sync + transfer at the end
+        yhat = np.asarray(jnp.concatenate(all_yhats, axis=0)[:n_samples], dtype=np.float32)
         collected_in = (
-            np.concatenate(all_collected_in, axis=0, dtype=np.float32)[:n_samples]
+            np.asarray(jnp.concatenate(all_collected_in, axis=0)[:n_samples], dtype=np.float32)
             if collect_in_indices is not None
             else None
         )
         collected_out = (
-            np.concatenate(all_collected_out, axis=0, dtype=np.float32)[:n_samples]
+            np.asarray(jnp.concatenate(all_collected_out, axis=0)[:n_samples], dtype=np.float32)
             if collect_out_indices is not None
             else None
         )

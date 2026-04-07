@@ -954,7 +954,7 @@ class DesignCardLogger(Logger):
             )
             plt.close(fig)
 
-        def _render_prediction():
+        def _render_prediction(*, contours=3, suffix=""):
             fig, ax = plt.subplots(figsize=(5, 5))
             smooth_fn(
                 plot_data=pred_data,
@@ -963,11 +963,16 @@ class DesignCardLogger(Logger):
                 draw_colorbar=True,
                 xlims=xlims,
                 ylims=ylims,
-                smooth_2d_params={"vlims": (None, None)},
+                smooth_2d_params={
+                    "vlims": (None, None),
+                    "heatmap_params": {"contours": contours},
+                },
                 vlims=(None, None),
             )
+            out_dir = self._save_dir / f"prediction{suffix}"
+            out_dir.mkdir(exist_ok=True)
             fig.savefig(
-                prediction_dir / f"{name}.{fmt}",
+                out_dir / f"{name}.{fmt}",
                 dpi=self.low_dpi, transparent=transparent,
             )
             plt.close(fig)
@@ -1045,6 +1050,7 @@ class DesignCardLogger(Logger):
         tasks = {
             "circuit": _render_circuit,
             "prediction": _render_prediction,
+            "prediction_nocontour": lambda: _render_prediction(contours=None, suffix="_nocontour"),
             "network": _render_network,
             "loss": _render_loss,
             "subloss_bars": _render_subloss_bars,

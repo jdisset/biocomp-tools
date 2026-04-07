@@ -619,4 +619,8 @@ def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__jax_array__") or type(obj).__module__.startswith("jaxlib"):
         arr = np.asarray(obj)
         return arr.item() if arr.ndim == 0 else arr.tolist()
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "__dict__"):
+        return repr(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")

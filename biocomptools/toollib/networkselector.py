@@ -920,8 +920,9 @@ def build_data_manager(
     actual_networks = []
     weights = []
 
+    inverse = data_conf.build_inverse
     for n, f in tqdm(list(zip(networks, datafiles, strict=True)), desc='Building networks & loading data'):
-        n.build(lib)
+        n.build(lib, inverse=inverse)
         network = n._network
         if isinstance(network, list):
             logger.debug(

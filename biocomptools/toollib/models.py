@@ -258,7 +258,7 @@ class Network(BiocompDB, table=True):
             return False
         return self._network is not None
 
-    def build(self, lib, use_cache=config.paths.cache.networks, force=False):
+    def build(self, lib, use_cache=config.paths.cache.networks, force=False, inverse='all'):
         if self.built and not force:
             return self._network
         # recipe = self.recipe  # should lazy load
@@ -270,7 +270,7 @@ class Network(BiocompDB, table=True):
         recipe_networks = recipe.build_networks(
             lib=lib,
             use_cache=use_cache,
-            inverse='all',
+            inverse=inverse,
             add_to_self=False,
         )
 

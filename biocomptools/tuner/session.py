@@ -18,7 +18,7 @@ from biocomp.designloss import (
     soft_tucount_penalty,
 )
 from biocomp.network import Network
-from biocomp.parameters import ParameterTree
+from biocomp.parameters import ParameterTree, overlay_shared_params
 from biocomptools.logging_config import get_logger
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 
@@ -30,7 +30,9 @@ class TunerConfig:
     """Configuration for TunerSession loss weights and grid settings."""
 
     grid_resolution: tuple[int, int] = (32, 32)
-    weights: GridLossWeights = field(default_factory=lambda: GridLossWeights(w_mse=1.0, w_simse=1.0))
+    weights: GridLossWeights = field(
+        default_factory=lambda: GridLossWeights(w_mse=1.0, w_simse=1.0)
+    )
 
 
 @dataclass
@@ -89,8 +91,13 @@ class TunerSession:
             self.weights = weights
         else:
             self.weights = GridLossWeights(
-                w_sinkhorn=w_sinkhorn, w_lncc=w_lncc, w_mse=w_mse, w_simse=w_simse,
-                eps_sinkhorn=eps_sinkhorn, n_sinkhorn_iters=n_sinkhorn_iters, lncc_kernel=lncc_kernel,
+                w_sinkhorn=w_sinkhorn,
+                w_lncc=w_lncc,
+                w_mse=w_mse,
+                w_simse=w_simse,
+                eps_sinkhorn=eps_sinkhorn,
+                n_sinkhorn_iters=n_sinkhorn_iters,
+                lncc_kernel=lncc_kernel,
             )
 
         self.network_model: Optional[NetworkModel] = None
@@ -299,9 +306,7 @@ class TunerSession:
         key = jax.random.key(seed)
         full_params = self.network_model.stack.init(key)
         _, self.network_model._local_params = full_params.filter_by_tag(["shared"])
-        self.network_model._params = ParameterTree.merge(
-            self._model.shared_params, self.network_model._local_params
-        )
+        self.network_model._params = overlay_shared_params(full_params, self._model.shared_params)
         logger.info(f"Reset params with seed {seed}")
 
     def get_params_dict(self) -> dict[str, list]:
