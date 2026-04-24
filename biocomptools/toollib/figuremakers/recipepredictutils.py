@@ -1,10 +1,10 @@
 """Recipe prediction utilities for uniform vs experimental X sampling."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, PrivateAttr, model_validator
+
+from biocomptools.toollib.networkprediction import PredictionSamplingConfig
 
 if TYPE_CHECKING:
     from biocomp.plotutils import PlotData
@@ -21,7 +21,10 @@ class RecipePredictionData(BaseModel):
     resolution: int = 50
     n_samples: int = 5000
     seed: int = 42
-    input_order: list | None = None
+    input_order: Optional[list] = None
+
+    # Grouped sampling config (forwarded to NetworkPrediction).
+    sampling: Optional[PredictionSamplingConfig] = None
 
     _uniform_data: PlotData = PrivateAttr()
     _experimental_data: PlotData = PrivateAttr()
@@ -31,7 +34,6 @@ class RecipePredictionData(BaseModel):
 
     @model_validator(mode='after')
     def _compute(self):
-        import dracon as dr
         from biocomp.recipe import Recipe
         from biocomp.network import recipe_to_networks
         from biocomptools.modelmodel import BiocompModel, NetworkModel
@@ -40,19 +42,7 @@ class RecipePredictionData(BaseModel):
 
         model = BiocompModel.resolve(path=self.model_path)
 
-        with open(self.recipe_path, 'r') as f:
-            content = f.read()
-        if '\n!biocomp.recipe.Recipe' in content:
-            idx = content.index('\n!biocomp.recipe.Recipe')
-            recipe_part = content[idx + 1 :]
-        elif content.startswith('!biocomp.recipe.Recipe'):
-            recipe_part = content
-        else:
-            recipe_part = content
-        recipe_context = {'Recipe': Recipe, 'biocomp.recipe.Recipe': Recipe}
-        recipe = dr.loads(recipe_part, context=recipe_context)
-        if hasattr(recipe, 'get'):
-            recipe = recipe.get('recipe', recipe)
+        recipe = Recipe.load_from_paper_yaml(self.recipe_path)
 
         networks = recipe_to_networks(recipe, invert=True, inversion_mode='main')
         network = networks[0]
@@ -77,6 +67,7 @@ class RecipePredictionData(BaseModel):
             enable_gridstats=False,
             skip_input_reorder=False if self.input_order is not None else True,
             input_order=self.input_order,
+            sampling=self.sampling,
         )
         self._uniform_data = pred_uniform.get_data(rescale_latent=True)[0]
         self._uniform_data.metadata.update(
@@ -94,6 +85,7 @@ class RecipePredictionData(BaseModel):
             enable_gridstats=False,
             skip_input_reorder=False if self.input_order is not None else True,
             input_order=self.input_order,
+            sampling=self.sampling,
         )
         self._experimental_data = pred_exp.get_data(rescale_latent=True)[0]
         self._experimental_data.metadata.update(

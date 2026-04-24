@@ -1,5 +1,5 @@
 from pydantic.functional_validators import BeforeValidator
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
 import numpy as np
 import jax.numpy as jnp
@@ -32,6 +32,26 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
 logger = get_logger(__name__)
 
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
+
+
+class PredictionSamplingConfig(BaseModel):
+    """Controls how NetworkPrediction samples the stochastic layers.
+
+    Grouped because these knobs move together — a `distribution` preset
+    flips several at once, and every prediction-bearing caller accepts
+    the full set. Kept as one sub-model so a 10th knob is one edit.
+    """
+    model_config = ConfigDict(extra='forbid')
+
+    z_value: Union[Literal['uniform', 'normal'], float] = 'uniform'
+    z_normal_mean: float = 0.5
+    z_normal_std: float = 0.2
+    z_normal_clip: bool = True
+    disable_variational: bool = True
+    max_evals: int = 250_000
+    seed: int = 0
+    device: Literal['cpu', 'gpu'] = 'gpu'
+    input_order: Optional[list] = None
 
 
 def _stats_task_dump(
@@ -550,6 +570,11 @@ class NetworkPrediction(GridStatsFields, DataSource):
     disable_variational: bool = True
     device: Literal['cpu', 'gpu'] = 'cpu'  # device preference for predictions
 
+    # Optional grouped sampling config. When supplied, its fields win over the
+    # scalar fields above (transition state — scalar kwargs stay as-is for
+    # backward compat until every call site is migrated).
+    sampling: Optional[PredictionSamplingConfig] = None
+
     save_csv_to: Optional[str] = None  # save prediction statistics to a CSV file
 
     already_latent: bool = (
@@ -577,6 +602,16 @@ class NetworkPrediction(GridStatsFields, DataSource):
     def model_post_init(self, *args, **kwargs):
         """initialize the model after validation"""
         super().model_post_init(*args, **kwargs)
+
+        # If a grouped sampling config is supplied, unpack its fields onto the
+        # scalar fields. Preserves backward compat for call sites that still
+        # pass the 9 scalar kwargs directly.
+        if self.sampling is not None:
+            for _f in (
+                'z_value', 'z_normal_mean', 'z_normal_std', 'z_normal_clip',
+                'disable_variational', 'max_evals', 'seed', 'device', 'input_order',
+            ):
+                setattr(self, _f, getattr(self.sampling, _f))
 
         logger.debug(
             f"predict_at: {len(self.predict_at)} arrays, shapes: {[x.shape for x in self.predict_at]}"

@@ -10,6 +10,7 @@ from scipy.stats import gmean
 
 from biocomp.plotutils import PlotData
 from biocomp.metric_utils import GridStatsFields
+from biocomptools.toollib.networkprediction import PredictionSamplingConfig
 
 IN_TRAINING_COLOR = "#EEEEEE"
 NOT_IN_TRAINING_COLOR = "#EEEEEE"
@@ -59,6 +60,9 @@ class BenchmarkData(GridStatsFields, BaseModel):
     z_normal_std: float = 0.2
     z_normal_clip: bool = True
     disable_variational: bool = True
+
+    # Grouped sampling config (wins over scalar fields above if supplied).
+    sampling: Optional[PredictionSamplingConfig] = None
 
     _model: Any = PrivateAttr(default=None)
     _items: list[BenchmarkItem] = PrivateAttr(default_factory=list)
@@ -150,6 +154,7 @@ class BenchmarkData(GridStatsFields, BaseModel):
             z_normal_std=self.z_normal_std,
             z_normal_clip=self.z_normal_clip,
             disable_variational=self.disable_variational,
+            sampling=self.sampling,
         )
 
         prediction_data = predictor.get_data()

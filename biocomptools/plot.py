@@ -23,7 +23,7 @@ from biocomp.datautils import DataRescaler
 from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout, MergeSpec
 from biocomptools.toollib.datasources import DataSource, DBSource
 
-from biocomptools.toollib.networkprediction import NetworkPrediction
+from biocomptools.toollib.networkprediction import NetworkPrediction, PredictionSamplingConfig
 from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
 from biocomptools.toollib.common import config
@@ -223,6 +223,7 @@ DEFAULT_TYPES = [
     BiocompModel,
     NetworkModel,
     NetworkPrediction,
+    PredictionSamplingConfig,
     NetworkSelector,
     NetworkSet,
     NetworkDataPair,
