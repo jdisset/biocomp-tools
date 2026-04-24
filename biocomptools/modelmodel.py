@@ -167,6 +167,18 @@ class BiocompModel(ArbitraryModel):
             logger.debug(f"loaded model with signature {m.signature}")
             return m
 
+    @classmethod
+    def resolve(cls, *, name: str | None = None, path: str | None = None) -> "BiocompModel":
+        """Resolve a model from a DB name or a pickle path. Exactly one must be set."""
+        assert (name is None) != (path is None), (
+            "BiocompModel.resolve: exactly one of name / path required"
+        )
+        if path is not None:
+            return cls.load(path)
+        from biocomptools.toollib.modelselector import ModelSelector
+
+        return ModelSelector(name=name).get_model().load()
+
     def save_h5(self, filename: str):
         """Saves the entire BiocompModel to a single HDF5 file."""
         import h5py

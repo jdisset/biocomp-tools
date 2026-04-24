@@ -72,7 +72,6 @@ class BenchmarkData(GridStatsFields, BaseModel):
 
     def _do_initialize(self):
         from biocomptools.modelmodel import BiocompModel, NetworkModel
-        from biocomptools.toollib.modelselector import ModelSelector
         from biocomptools.toollib.networkprediction import NetworkPrediction
         from biocomptools.toollib.datasources import DBSource
         from biocomptools.toollib.networkselector import (
@@ -89,10 +88,10 @@ class BenchmarkData(GridStatsFields, BaseModel):
 
         if self.model is not None:
             self._model = self.model
-        elif self.model_name:
-            self._model = ModelSelector(name=self.model_name).get_model().load()
         else:
-            self._model = BiocompModel.load(self.model_path)
+            self._model = BiocompModel.resolve(
+                name=self.model_name or None, path=self.model_path
+            )
 
         self._dataset_name = (
             self.dataset_file.split('/')[-1].rsplit('.', 1)[0] if self.dataset_file else "unknown"
