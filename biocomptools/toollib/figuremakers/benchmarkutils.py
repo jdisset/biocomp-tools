@@ -126,17 +126,30 @@ class BenchmarkData(GridStatsFields, BaseModel):
         network_model = NetworkModel(model=self._model, network=networks)
 
         # d.x is in display order (alphabetical); NetworkPrediction expects network order.
-        # input_order maps network→display, so argsort inverts it back.
+        # input_order maps network→display, so argsort inverts it back. column_proteins
+        # rides along through the same inversion so the boundary assertion in
+        # NetworkPrediction can independently verify the restored wiring.
         predict_at_network_order = []
+        predict_at_column_proteins: list[list[str] | None] = []
         for d in items_to_plot:
             x_display = np.asarray(d.x)
             io = d.metadata.get('input_order')
-            predict_at_network_order.append(
-                x_display[:, np.argsort(io)] if io is not None else x_display
-            )
+            if io is not None:
+                inv = np.argsort(io)
+                predict_at_network_order.append(x_display[:, inv])
+                cp = d.column_proteins
+                predict_at_column_proteins.append(
+                    [cp[int(i)] for i in inv] if cp is not None else None
+                )
+            else:
+                predict_at_network_order.append(x_display)
+                predict_at_column_proteins.append(
+                    list(d.column_proteins) if d.column_proteins is not None else None
+                )
 
         predictor = NetworkPrediction(
             predict_at=predict_at_network_order,
+            predict_at_column_proteins=predict_at_column_proteins,
             ground_truth=[d.y for d in items_to_plot],
             per_prediction_info=[d.metadata for d in items_to_plot],
             max_evals=self.max_evals,
@@ -193,6 +206,7 @@ class BenchmarkData(GridStatsFields, BaseModel):
                     yval=gt.y[:pred_n] if gt.y is not None else None,
                     input_names=gt.input_names,
                     output_name=gt.output_name,
+                    column_proteins=gt.column_proteins,
                     metadata=gt.metadata,
                 )
             else:

@@ -555,6 +555,13 @@ class NetworkPrediction(GridStatsFields, DataSource):
         Optional[Union[NdArray, List[Optional[NdArray]]]],
         BeforeValidator(validate_ground_truth),
     ] = None
+    # Optional per-network column-protein identity. When supplied, verified
+    # against `network.get_inverted_input_proteins()` at construction time —
+    # this is the boundary check that catches X-column scrambling
+    # (see bugs/eval-x-axis-permutation-iRFP720.md). `None` entries (or a
+    # `None` list) skip the check; producers that know the column convention
+    # should always supply it.
+    predict_at_column_proteins: Optional[List[Optional[List[str]]]] = None
 
     per_prediction_info: Optional[list[Dict[str, Any]]] = None  # metadata for each prediction
 
@@ -645,6 +652,29 @@ class NetworkPrediction(GridStatsFields, DataSource):
             else:
                 fixed_predict_at.append(x)
         self.predict_at = fixed_predict_at
+
+        # Boundary check: verify each predict_at array's columns match the
+        # network's wired input protein order. This is the structural guard
+        # for the X-column scrambling bug class. Skipped per-entry when the
+        # caller can't supply column_proteins (e.g. design-space inputs with
+        # placeholder X1/X2 labels).
+        if self.predict_at_column_proteins is not None:
+            assert len(self.predict_at_column_proteins) == len(self.predict_at), (
+                f"predict_at_column_proteins has {len(self.predict_at_column_proteins)} "
+                f"entries but predict_at has {len(self.predict_at)}"
+            )
+            for i, (cp, net) in enumerate(
+                zip(self.predict_at_column_proteins, self.network_model.network, strict=True)
+            ):
+                if cp is None:
+                    continue
+                expected = net.get_inverted_input_proteins()
+                assert list(cp) == list(expected), (
+                    f"Network {i} ({getattr(net, 'name', '?')}): predict_at columns are "
+                    f"aligned to {list(cp)} but network expects {list(expected)}. "
+                    f"This is the X-column misalignment bug class — do not silence this "
+                    f"assertion; fix the producer of predict_at."
+                )
 
         if self.ground_truth is None:
             self.ground_truth = [None] * len(self.predict_at)
