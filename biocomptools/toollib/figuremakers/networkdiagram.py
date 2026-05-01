@@ -147,6 +147,23 @@ def _format_ratio_proportion(val: float) -> str:
     return f"({pct:.1f}%)"
 
 
+_NETWORK_DIAGRAM_THEME_CACHE: dict | None = None
+
+
+def _load_network_diagram_theme(types):
+    global _NETWORK_DIAGRAM_THEME_CACHE
+    if _NETWORK_DIAGRAM_THEME_CACHE is None:
+        from dracon import load, resolve_all_lazy
+        import importlib.resources
+        theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+            "network_diagram.yaml"
+        )
+        theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
+        resolve_all_lazy(theme)
+        _NETWORK_DIAGRAM_THEME_CACHE = theme
+    return _NETWORK_DIAGRAM_THEME_CACHE
+
+
 EMBEDDING_CATEGORY: dict[str, str] = {
     "tc_rate": "promoters",
     "tl_rate": "uORFs",
@@ -1239,8 +1256,6 @@ def render_diagram_to_ax(
         LineEndArrow,
     )
     from jeanplot.core.models import TextHalo
-    from dracon import load, resolve_all_lazy
-    import importlib.resources
 
     load_default_theme()
 
@@ -1258,11 +1273,7 @@ def render_diagram_to_ax(
         LineEndCircle,
         LineEndArrow,
     ]
-    theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-        "network_diagram.yaml"
-    )
-    theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
-    resolve_all_lazy(theme)
+    theme = _load_network_diagram_theme(types)
     jstyle.update(theme)
     if style_overrides:
         jstyle.update(style_overrides)

@@ -11,6 +11,23 @@ from biocomptools.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+_GENETIC_SCHEMATIC_THEME_CACHE: dict | None = None
+
+
+def _load_genetic_schematic_theme(types):
+    global _GENETIC_SCHEMATIC_THEME_CACHE
+    if _GENETIC_SCHEMATIC_THEME_CACHE is None:
+        from dracon import load, resolve_all_lazy
+        import importlib.resources
+        theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
+            "genetic_schematic.yaml"
+        )
+        theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
+        resolve_all_lazy(theme)
+        _GENETIC_SCHEMATIC_THEME_CACHE = theme
+    return _GENETIC_SCHEMATIC_THEME_CACHE
+
+
 def render_circuit_to_ax(
     network: Any,
     ax: matplotlib.axes.Axes,
@@ -28,17 +45,11 @@ def render_circuit_to_ax(
     from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
     from jeanplot.core import Size, BoxStyle, LayoutConstraints, Offset, Shadow
     from jeanplot.core.svg import LineEndFlat
-    from dracon import load, resolve_all_lazy
-    import importlib.resources
 
     load_default_theme()
 
     jeanplot_types = [Size, BoxStyle, LayoutConstraints, Offset, Shadow, LineEndFlat]
-    theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-        "genetic_schematic.yaml"
-    )
-    theme = load(str(theme_file), context={t.__name__: t for t in jeanplot_types}, raw_dict=True)
-    resolve_all_lazy(theme)
+    theme = _load_genetic_schematic_theme(jeanplot_types)
     jstyle.update(theme)
 
     if style_overrides:
