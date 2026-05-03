@@ -1,8 +1,8 @@
 !set_default axnum: null
-!set_default nslices: 30
-!set_default threshold: 0.235
-!set_default opacity: 0.25
-!set_default zlims: [0, 0.6]
+!set_default nslices: 20
+!set_default threshold: "otsu:70"
+!set_default opacity: 0.35
+!set_default zlims: [0, 0.65]
 
 !set_default slices: ${linspace(zlims[0], zlims[1], int(nslices))}
 
@@ -42,7 +42,7 @@ plot_config:
             show_image: True
             clip_to_lowest_contour: True
             contours:
-              - ${float(threshold)}
+              - ${threshold if isinstance(threshold, str) else float(threshold)}
             contours_linewidth: 0.2
 
 plot_method:

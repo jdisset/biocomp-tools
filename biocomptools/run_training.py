@@ -139,6 +139,7 @@ class TrainingProgram(BaseOptimizationProgram):
 
         dataman_info = {
             "network_names": [n.name for n in dman.get_networks()],
+            "network_weights": [float(w) for w in dman.get_weights()],
             "input_dimensions": [x.shape[1] for x in dman.get_X()],
             "output_dimensions": [y.shape[1] for y in dman.get_Y()],
             "data_config": dman.data_cfg.model_dump(),

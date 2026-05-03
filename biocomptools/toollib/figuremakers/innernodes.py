@@ -258,7 +258,7 @@ class InnerNodesFigure(Figure):
             )
             return recipe_to_networks(r, br.ALL_RULES, invert=True, inversion_mode="all")
 
-    def _build_ern(self) -> list[NodeInfo]:
+    def _build_ern(self, layer_id: int = 0) -> list[NodeInfo]:
         cc = self.model.compute_config
         if not cc or not cc.node_functions or "sequestron_ERN" not in cc.node_functions:
             return []
@@ -286,12 +286,27 @@ class InnerNodesFigure(Figure):
         ]
         if not nets:
             return []
-        try:
-            st, p, k = self._stack(nets)
-        except (KeyError, Exception) as e:
-            logger.info(f"_build_ern: stack building failed (no affinity params?): {e}")
-            return []
-        ly = self._layer(st, "ERN")
+        if layer_id > 0:
+            ern_kwargs = cc.node_functions["sequestron_ERN"].kwargs
+            if not ern_kwargs.get("use_ern_layer_id", False):
+                return []
+            m = NetworkModel(model=self.model, network=nets)
+            st, p, k = m.stack, m.params, jax.random.PRNGKey(0)
+            ly = self._layer(st, "ERN")
+            if not ly or st is None or p is None:
+                return []
+            ns = st.get_layer_namespace(ly.layer_id)
+            lid_path = f"{ns}/node_layer_ids"
+            if lid_path not in p:
+                return []
+            p[lid_path] = jnp.full_like(p[lid_path], layer_id)
+        else:
+            try:
+                st, p, k = self._stack(nets)
+            except (KeyError, Exception) as e:
+                logger.info(f"_build_ern: stack building failed (no affinity params?): {e}")
+                return []
+            ly = self._layer(st, "ERN")
         return (
             [
                 NodeInfo(
@@ -670,10 +685,10 @@ class InnerNodesFigure(Figure):
             ax.set_title(title, fontweight="bold", fontsize=12)
             logger.warning(f"Skipping embedding visualization for {emb_type}: dim={dim} > 2")
 
-    def _ern_2d(self, sf, nodes):
+    def _ern_2d(self, sf, nodes, layer_label: str = ""):
         if not nodes:
             return
-        sf.suptitle("ERN Nodes", fontsize=16, fontweight="bold", y=1.05)
+        sf.suptitle(f"ERN Nodes{layer_label}", fontsize=16, fontweight="bold", y=1.05)
         rng = self._in_range("sequestron_ERN")
         x = np.linspace(rng[0], rng[1], 100)
         xx, yy = np.meshgrid(x, x)
@@ -697,10 +712,10 @@ class InnerNodesFigure(Figure):
             axes[i].set_title(f"ERN\n({n.name})", fontweight="bold", fontsize=12)
         plt.colorbar(im, cax=axes[-1]).set_label("Output")
 
-    def _ern_1d(self, sf, nodes):
+    def _ern_1d(self, sf, nodes, layer_label: str = ""):
         if not nodes:
             return
-        sf.suptitle("ERN Repression Curves", fontsize=16, fontweight="bold", y=1.05)
+        sf.suptitle(f"ERN Repression Curves{layer_label}", fontsize=16, fontweight="bold", y=1.05)
         axes = sf.subplots(1, 3, width_ratios=[1, 1, 1.1], gridspec_kw={"wspace": 0.3})
         rng = self._in_range("sequestron_ERN")
         nr = np.linspace(rng[0], rng[1], 100)
@@ -841,6 +856,17 @@ class InnerNodesFigure(Figure):
 
     def create_figure(self) -> MplFigure:
         ern = sorted(self._build_ern(), key=lambda n: n.emb_scalar or 0, reverse=True)
+        cc = self.model.compute_config
+        use_ern_layer_id = (
+            cc and cc.node_functions
+            and cc.node_functions.get("sequestron_ERN") is not None
+            and cc.node_functions["sequestron_ERN"].kwargs.get("use_ern_layer_id", False)
+        )
+        ern_l1 = (
+            sorted(self._build_ern(layer_id=1), key=lambda n: n.emb_scalar or 0, reverse=True)
+            if use_ern_layer_id and ern
+            else []
+        )
         uorf = self._build_translation(False)
         inv_uorf = self._build_translation(True)
         src = self._build_source(False)
@@ -862,14 +888,19 @@ class InnerNodesFigure(Figure):
                 "source": src,
                 "basic": basic,
                 "uorf": uorf,
-                "ern": ern,
+                "ern": ern + ern_l1,
                 "output": out,
             }
         )
 
-        rows = []
+        rows: list[tuple[str, Any]] = []
         if ern:
-            rows.extend([("ern", ern), ("ern_1d", ern)])
+            if use_ern_layer_id:
+                rows.extend([("ern", (ern, " (Layer 1)")), ("ern_1d", (ern, " (Layer 1)"))])
+                if ern_l1:
+                    rows.extend([("ern", (ern_l1, " (Layer 2)")), ("ern_1d", (ern_l1, " (Layer 2)"))])
+            else:
+                rows.extend([("ern", (ern, "")), ("ern_1d", (ern, ""))])
         if any([basic, uorf, src, out]):
             rows.append(("fwd", (basic, uorf, src, out)))
         if (inv or inv_uorf or inv_src) and SHOW_INVERSE:
@@ -883,8 +914,8 @@ class InnerNodesFigure(Figure):
         sfs = fig.subfigures(len(rows), 1, hspace=0.25)
         sfs = [sfs] if len(rows) == 1 else list(sfs)
         fns = {
-            "ern": self._ern_2d,
-            "ern_1d": self._ern_1d,
+            "ern": lambda s, d: self._ern_2d(s, d[0], layer_label=d[1]),
+            "ern_1d": lambda s, d: self._ern_1d(s, d[0], layer_label=d[1]),
             "fwd": lambda s, d: self._fwd_row(s, *d),
             "inv": lambda s, d: self._inv_row(s, *d),
         }

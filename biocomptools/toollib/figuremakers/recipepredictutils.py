@@ -109,3 +109,5 @@ class RecipePredictionData(BaseModel):
     @property
     def network_name(self) -> str:
         return self._network_name
+
+

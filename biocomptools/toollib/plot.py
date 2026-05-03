@@ -238,7 +238,8 @@ class Figure(BaseModel):
                         pt = PlotTask(**pt)  # type: ignore
                     pt.plot_config.inherit_from(self.plot_config)
 
-                    pt._ax = self._figax.flat_ax[i]
+                    flat = self._figax.flat_ax
+                    pt._ax = flat[i] if i < len(flat) else None
                     self._ptasks.append(pt)
                 except Exception as e:
                     logger.error(f"Error constructing plot task {i}: {e}")
@@ -282,7 +283,7 @@ class Figure(BaseModel):
 
     def _run_mpl(self, overwrite: bool = True, finalize: bool = True):
         with mpl.rc_context(rc=self.plot_config.rc_context):
-            metadata = {}
+            metadata = dict(self.figure_spec.metadata) if self.figure_spec.metadata else {}
             metadata["plot_tasks"] = []
             for i, pt in enumerate(self._ptasks):
                 try:

@@ -1,9 +1,10 @@
-!define base_range: ${[0.05, 0.7]}
+!set_default base_range: ${[0.0, 0.65]}
 
 !set_default xlims: ${base_range}
 !set_default ylims: ${base_range}
 !set_default zlims: ${base_range}
-!set_default vlims: ${base_range}
+# !set_default vlims: ${base_range}
+!set_default vlims: [null, null]
 !set_default cmap: bc_blues
 !set_default colors_grey: "#000000"
 
@@ -72,6 +73,10 @@ callstack_params:
     xlims: ${xlims}
     ylims: ${ylims}
     vlims: ${vlims}
+    # Quantile fallback for any None entry in vlims — increases contrast by
+    # ignoring outliers. Only takes effect when vlims has a None entry; set
+    # to null to revert to raw min/max fallback.
+    vlim_quantiles: [0.02, 0.98]
     heatmap_params:
       bad_color: "#ffffff"
       contours: 0
@@ -83,6 +88,20 @@ callstack_params:
         labelsize: 9
         pad: 3
         length: 4
+
+  # Measured-vs-Predicted scatter (paper defaults: scatter + density + 1:1
+  # line + minimal stats; trendline / fit-derived metrics / noise band off
+  # because they're noise on top of the density picture).
+  measured_vs_predicted_params:
+    show_density: true
+    show_identity: true
+    show_stats: true
+    show_trendline: false
+    show_bias: false
+    show_calibration_rms: false
+    show_spread: false
+    show_noise_floor: false
+    noise_local: false
 
   smooth_3d_params:
     smooth_2d_params:
@@ -100,9 +119,9 @@ callstack_params:
     colorbar_size: [0.045, 0.5]
     projection_angle: 45.0
     projection_diag_coef: 0.5
-    xaxis_labelpad: 22
-    yaxis_labelpad: 25
-    zaxis_labelpad: 35
+    xaxis_labelpad: 2
+    yaxis_labelpad: -2
+    # zaxis_labelpad: 35
     cube_edge_props:
       bottom_left:
         offset: [0, 0]
@@ -171,7 +190,7 @@ callstack_params:
               },
             ]
         zaxis_title:
-          offset: [70, 0]
+          offset: [50, 0]
           props:
             fontsize: 10
             rotation: 45

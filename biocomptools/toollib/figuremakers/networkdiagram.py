@@ -1238,9 +1238,19 @@ def render_diagram_to_ax(
     show_edge_parts: bool = False,
     thickness_range: tuple[float, float] = (0.5, 4.0),
     layout_spec: LayoutSpec | None = None,
+    canvas_xlim: tuple[float, float] | None = None,
+    canvas_ylim: tuple[float, float] | None = None,
+    aspect: str = "equal",
     **_kwargs,
 ):
-    """Render a network compute diagram to an existing matplotlib axes."""
+    """Render a network compute diagram to an existing matplotlib axes.
+
+    ``aspect="equal"`` (default) preserves the diagram's data aspect ratio
+    inside the cell — produces whitespace bands when cell aspect ≠ content
+    aspect. ``aspect="auto"`` stretches the diagram to fill the cell with
+    no margins (boxes/text become slightly anisotropic; usually acceptable
+    for schematic content).
+    """
     from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
     from jeanplot.core import (
         Size,
@@ -1295,13 +1305,18 @@ def render_diagram_to_ax(
     )
     jstyle.apply(root)
 
-    ax.set_aspect("equal")
+    ax.set_aspect(aspect)
     ax.axis("off")
     renderer = MatplotlibRenderer()
     # Apply variable line widths via pre_render callback so they survive
     # jstyle re-application during measure_and_layout.
     renderer.pre_render_callbacks.append(lambda _ax: diagram.apply_variable_line_widths())
     renderer.render_component(ax, root, adjust_lims=True)
+
+    from biocomptools.toollib.figuremakers._jeanplot_canvas import apply_canvas
+
+    apply_canvas(ax, canvas_xlim, canvas_ylim)
+
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")
 

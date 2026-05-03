@@ -543,7 +543,7 @@ class UORFMatrixFigure(Figure):
 
             figax = self.figure_spec.make_figure()
 
-            metadata = {}
+            metadata = dict(self.figure_spec.metadata) if self.figure_spec.metadata else {}
             metadata["plot_tasks"] = []
             for i, cell in enumerate(cells):
                 ax = figax.ax[cell.row][cell.col]

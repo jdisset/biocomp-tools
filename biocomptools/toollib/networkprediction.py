@@ -12,12 +12,16 @@ import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomptools.toollib.types import InputOrderElement
 from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
+from biocomp.plotting.plotting_core import build_tree, knn_stats
+from biocomp.datautils import density_balanced_indices
+from scipy.interpolate import RegularGridInterpolator
 from biocomp.metric_utils import (
     grid_mse as compute_grid_mse,
     grid_r_squared as compute_grid_r_squared,
     grid_snr as compute_grid_snr,
     grid_kl_divergence as compute_grid_kl,
     compute_nrmse,
+    compute_nrmse_pointwise,
     noise_relative_error as compute_nre,
     SPLIT_HALF_SUBSET_SIZE,
     SPLIT_HALF_N_BOOTSTRAPS,
@@ -87,12 +91,14 @@ def reconstruct_from_flat(flat_values, shapes):
 
 
 def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> NdArray:
+    """Hypercube lattice with ``indexing='ij'`` so the flattened grid reshapes
+    naturally to ``(res, ..., res, n_outs)`` for ``RegularGridInterpolator``.
     """
-    Create a hypercube grid of points in n dimensions.
-    """
-    assert ndim > 0, "ndim must be greater than 0"
-    assert res > 0, "res must be greater than 0"
-    grid = np.meshgrid(*[np.linspace(xmin, xmax, res) for _ in range(ndim)])
+    assert ndim > 0 and res > 0
+    grid = np.meshgrid(
+        *[np.linspace(xmin, xmax, res) for _ in range(ndim)],
+        indexing='ij',
+    )
     return np.vstack([g.ravel() for g in grid]).T
 
 
@@ -121,14 +127,10 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     indices_c = indices.copy()
     indices_c[invalid] = 0
 
-    # n_eff from unnormalized weights (no NaN yet)
     n_eff = Z.sum(axis=1, keepdims=True)
-
-    # normalize
     with np.errstate(divide='ignore', invalid='ignore'):
         W = Z / n_eff
 
-    # mean and variance (fused, no NaN in W yet for valid rows)
     y_nei = y[indices_c]
     w = W[..., None]
     mean = np.sum(w * y_nei, axis=1)
@@ -138,7 +140,6 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     denom = np.maximum(1.0 - w2sum, eps)
     variance = var_num / denom
 
-    # mark too-few-neighbors rows as NaN
     too_few = nb_points < min_points
     if np.any(too_few):
         mean[too_few] = np.nan
@@ -146,6 +147,58 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
         n_eff[too_few] = np.nan
 
     return mean, variance, n_eff
+
+
+def kernel_lattice_interp(
+    grid_mean_latent: NdArray,
+    params: Dict[str, Any],
+    ndim: int,
+) -> RegularGridInterpolator:
+    """Linear interpolator over a flattened (res**ndim, n_outs) grid-mean
+    array, using the same lattice as ``make_hypercube``. SSOT for
+    evaluating kernel-smoother predictions at arbitrary points after
+    ``_calculate_grid_stats`` has produced the lattice means.
+    """
+    res = int(params['hypercube_res'])
+    arr = np.asarray(grid_mean_latent)
+    n_outs = arr.shape[-1] if arr.ndim > 1 else 1
+    grid_axes = tuple(
+        np.linspace(params['hypercube_min'], params['hypercube_max'], res)
+        for _ in range(ndim)
+    )
+    return RegularGridInterpolator(
+        grid_axes, arr.reshape(*([res] * ndim), n_outs),
+        method='linear', bounds_error=False, fill_value=np.nan,
+    )
+
+
+def _kernel_smoother_lattice(
+    latent_x: NdArray,
+    latent_y: NdArray,
+    grid: NdArray,
+    params: Dict[str, Any],
+) -> Tuple[NdArray, NdArray, NdArray, Tuple[NdArray, NdArray]]:
+    """Adaptive-sigma Gaussian-kNN smoother evaluated on the cube-view
+    lattice. Returns ``(mean, stdev, n_eff, (indices, norm_weights))``;
+    the ``iw`` tuple is reused for further ``knn_stats`` calls on
+    aligned y arrays.
+    """
+    tree = build_tree(latent_x)
+    indices, raw_weights = get_gaussian_weighted_knn(
+        grid, tree=tree,
+        k=params['k'], min_points=params['min_points'],
+        adaptive_sigma=True, max_radius=params['radius'],
+        normed_w=False,
+    )
+    n_eff = np.nansum(raw_weights, axis=1, keepdims=True)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        norm_weights = raw_weights / n_eff
+    _, stdev, mean = knn_stats(
+        grid, latent_y, iw=(indices, norm_weights),
+        stats=['iw', 'std', 'mean'],
+        k=params['k'], min_points=params['min_points'],
+    )
+    return mean, stdev, n_eff, (indices, norm_weights)
 
 
 def _compute_split_half_nrmse(
@@ -156,31 +209,20 @@ def _compute_split_half_nrmse(
     seed: int = 42,
     grid: NdArray | None = None,
 ) -> float:
-    """Compute intrinsic noise floor via bootstrapped split-half nRMSE.
+    """Bootstrapped split-half nRMSE over the lattice.
 
-    For each bootstrap iteration, draws two independent subsets (with replacement)
-    of fixed size, computes local means for each at shared grid points, then
-    measures the nRMSE between them. Uses fixed subset size for fair comparison
-    across datasets of different sizes.
-
-    Note: dataquality.compute_split_half_nrmse uses a permutation-based approach
-    which is conceptually similar but uses different sampling strategy. This
-    bootstrap version is used for prediction noise estimation.
+    Two independent same-size resamples produce two kernel smoothers; the
+    nRMSE between them estimates the irreducible noise floor.
     """
     from scipy.spatial import cKDTree
 
     rng = np.random.RandomState(seed)
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
-    n_points = len(latent_x)
-
-    if n_points < 200:
-        return np.nan
 
     valid_mask = np.all(np.isfinite(latent_x), axis=1) & np.all(np.isfinite(latent_gt), axis=1)
     latent_x = np.asarray(latent_x[valid_mask])
     latent_gt = np.asarray(latent_gt[valid_mask])
     n_points = len(latent_x)
-
     if n_points < 200:
         return np.nan
 
@@ -197,7 +239,6 @@ def _compute_split_half_nrmse(
     min_points_param = params['min_points']
     max_radius = params['radius']
 
-    # loop-invariant constants
     global_var = float(np.var(latent_gt))
     global_range = float(np.ptp(latent_gt))
     PRIOR_STRENGTH = 100.0
@@ -208,11 +249,10 @@ def _compute_split_half_nrmse(
     for _ in range(n_bootstraps):
         idx_a = rng.choice(n_points, size=subset_size, replace=True)
         idx_b = rng.choice(n_points, size=subset_size, replace=True)
-
         x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
         x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
 
-        # Use cKDTree directly (data is already finite from filtering above)
+        # cKDTree directly: data is already finite-filtered above.
         tree_a = cKDTree(x_a)
         tree_b = cKDTree(x_b)
 
@@ -226,17 +266,15 @@ def _compute_split_half_nrmse(
         smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (
             n_eff_pooled + PRIOR_STRENGTH
         )
-
         safe_denom = np.maximum(np.sqrt(smoothed_var), ROBUST_EPSILON)
-
-        norm_sq_error = sq_error / (safe_denom**2)
-
-        capped_weights = np.broadcast_to(np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape)
+        norm_sq_error = sq_error / (safe_denom ** 2)
+        capped_weights = np.broadcast_to(
+            np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape,
+        )
 
         weights_flat = capped_weights.ravel()
         norm_sq_flat = norm_sq_error.ravel()
         mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
-
         if np.any(mask):
             nrmse = np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask]))
             if np.isfinite(nrmse):
@@ -288,110 +326,58 @@ def _calculate_single_network_stats(
     network_info: Dict[str, Any],
     enable_gridstats: bool = True,
 ) -> Dict[str, Any]:
-    """calculate statistics for a single network (used in parallel processing)"""
+    """Per-network statistics; safe to run in worker threads."""
     latent_yhats = np.asarray(rescaler.fwd(yhat), dtype=np.float32)
-    # ensure dependent_output_pos is always a list for consistent indexing
     if isinstance(dependent_output_pos, int):
         dependent_output_pos = [dependent_output_pos]
     latent_yhat = latent_yhats[:, dependent_output_pos]
 
-    # check for empty output - this can happen if output_pos selects invalid columns
+    base = {
+        'xp_name': network_info.get('xp_name'),
+        'recipe_name': network_info.get('recipe_name'),
+        'network_name': network_info.get('network_name', f"Network_{network_idx}"),
+        'eval_npoints': nb_points_in_eval,
+        'samples': yhat.shape[0],
+        'mse': None,
+        'rmse': None,
+    }
+    if 'extra_prediction_info' in network_info:
+        base['extra_prediction_info'] = network_info['extra_prediction_info']
+
     if latent_yhat.size == 0:
-        result = {
-            'xp_name': network_info.get('xp_name'),
-            'recipe_name': network_info.get('recipe_name'),
-            'network_name': network_info.get('network_name', f"Network_{network_idx}"),
-            'eval_npoints': nb_points_in_eval,
-            'samples': yhat.shape[0],
-            'mse': None,
-            'rmse': None,
+        return {
+            **base,
             'latent_mean': np.nan,
             'latent_std': np.nan,
             'latent_min': np.nan,
             'latent_max': np.nan,
             'error': 'Empty output array - invalid dependent_output_pos selection',
         }
-        # include extra_prediction_info if available
-        if 'extra_prediction_info' in network_info:
-            result['extra_prediction_info'] = network_info['extra_prediction_info']
-        return result
 
     network_stats = {
-        'xp_name': network_info.get('xp_name'),
-        'recipe_name': network_info.get('recipe_name'),
-        'network_name': network_info.get('network_name', f"Network_{network_idx}"),
-        'eval_npoints': nb_points_in_eval,
-        'samples': yhat.shape[0],  # number of actual prediction points used
-        'mse': None,
-        'rmse': None,
+        **base,
         'latent_mean': float(latent_yhat.mean()),
         'latent_std': float(latent_yhat.std()),
         'latent_min': float(latent_yhat.min()),
         'latent_max': float(latent_yhat.max()),
     }
 
-    # include extra_prediction_info if available
-    if 'extra_prediction_info' in network_info:
-        network_stats['extra_prediction_info'] = network_info['extra_prediction_info']
-
-    # add comparison stats if ground truth available
     if gt is not None:
         latent_x = rescaler.fwd(x)
         latent_gt = np.asarray(rescaler.fwd(gt), dtype=np.float32)
-        # Handle dimension mismatch between gt and yhat. This can happen when:
-        # - force_single_output=True was applied to gt, reducing it to 1 column
-        # - yhat has multiple outputs that were sliced with dependent_output_pos
+        # Reconcile gt vs yhat column counts: force_single_output may have
+        # collapsed gt to 1 column, or yhat may have extra columns to slice.
         if latent_gt.shape[1] > 1:
-            # gt has multiple columns, apply the same slicing as yhat
             latent_gt = latent_gt[:, dependent_output_pos]
         elif latent_yhat.shape[1] > 1 and latent_gt.shape[1] == 1:
-            # gt was pre-transformed to single column, slice yhat to match
-            # use only the first column of yhat for comparison
             latent_yhat = latent_yhat[:, :1]
-        # Now dimensions should match
         assert latent_gt.shape[1] == latent_yhat.shape[1], (
-            f"After dimension adjustment, latent_gt.shape[1]={latent_gt.shape[1]} "
-            f"!= latent_yhat.shape[1]={latent_yhat.shape[1]}"
+            f"shape mismatch after reconcile: gt={latent_gt.shape}, yhat={latent_yhat.shape}"
         )
-
-        # Debug traces for validation investigation
-        from biocomptools.logging_config import get_logger
-
-        debug_logger = get_logger(__name__)
-
-        debug_logger.debug(f"Network {network_info.get('network_name', f'Network_{network_idx}')}:")
-        debug_logger.debug(f"  yhat shape: {yhat.shape}, gt shape: {gt.shape}")
-        debug_logger.debug(
-            f"  latent_yhat shape: {latent_yhat.shape}, latent_gt shape: {latent_gt.shape}"
-        )
-        debug_logger.debug(
-            f"  yhat stats: mean={yhat.mean():.6f}, std={yhat.std():.6f}, min={yhat.min():.6f}, max={yhat.max():.6f}"
-        )
-        debug_logger.debug(
-            f"  gt stats: mean={gt.mean():.6f}, std={gt.std():.6f}, min={gt.min():.6f}, max={gt.max():.6f}"
-        )
-        debug_logger.debug(
-            f"  latent_yhat stats: mean={latent_yhat.mean():.6f}, std={latent_yhat.std():.6f}"
-        )
-        debug_logger.debug(
-            f"  latent_gt stats: mean={latent_gt.mean():.6f}, std={latent_gt.std():.6f}"
-        )
-        debug_logger.debug(f"  dependent_output_pos: {dependent_output_pos}")
-
-        # BUGFIX: Ensure gt and yhat have matching shapes by extracting same columns
-        if latent_gt.shape[1] > latent_yhat.shape[1]:
-            debug_logger.debug(
-                f"  gt has more columns ({latent_gt.shape[1]}) than yhat ({latent_yhat.shape[1]}), extracting dependent outputs from gt"
-            )
-            latent_gt = latent_gt[:, dependent_output_pos]
-            debug_logger.debug(f"  after extraction: latent_gt shape: {latent_gt.shape}")
 
         mse = float(np.mean((latent_yhat - latent_gt) ** 2))
-        rmse = float(np.sqrt(mse))
-        network_stats['mse'] = float(mse)
-        network_stats['rmse'] = rmse
-
-        debug_logger.debug(f"  computed MSE: {mse:.6f}, RMSE: {rmse:.6f}")
+        network_stats['mse'] = mse
+        network_stats['rmse'] = float(np.sqrt(mse))
 
         if enable_gridstats:
             grid_stats, grid_cache = _calculate_grid_stats(
@@ -417,68 +403,47 @@ def _calculate_grid_stats(
     latent_x: NdArray,
     params: Dict[str, Any],
 ) -> tuple[Dict[str, Any], NdArray]:
-    """Calculate grid statistics with nRMSE and SNR. Returns (stats, grid) for reuse."""
-    from scipy.spatial import cKDTree
+    """Lattice-kernel grid stats + density-balanced kernel/model RMSE.
 
+    Returns ``(stats, grid)`` so the caller can reuse the lattice for
+    follow-on computations (e.g. split-half nRMSE). The lattice itself is
+    built on de-duplicated data so the adaptive-sigma kernel can't divide
+    by zero; the density-balanced subsample for ``kernel_rmse_latent`` /
+    ``model_rmse_latent`` runs on the original (non-deduped) data.
+    """
+    latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
+    latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
+
+    valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
+    full_x = np.asarray(latent_x[valid_x_mask])
+    full_yhat = np.asarray(latent_yhat[valid_x_mask])
+    full_gt = np.asarray(latent_gt[valid_x_mask])
+    _, unique_idx = np.unique(full_x, axis=0, return_index=True)
+    deduped_x = full_x[unique_idx]
+    deduped_yhat = full_yhat[unique_idx]
+    deduped_gt = full_gt[unique_idx]
+
+    d = full_x.shape[1]
     grid = make_hypercube(
-        latent_x.shape[1],
+        d,
         res=params['hypercube_res'],
         xmin=params['hypercube_min'],
         xmax=params['hypercube_max'],
     )
 
-    latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
-    latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
-
-    valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
-    valid_latent_x = np.asarray(latent_x[valid_x_mask])
-    valid_latent_yhat = np.asarray(latent_yhat[valid_x_mask])
-    valid_latent_gt = np.asarray(latent_gt[valid_x_mask])
-    # dedup: numpy-based unique rows
-    if len(valid_latent_x) > 0:
-        _, unique_idx = np.unique(valid_latent_x, axis=0, return_index=True)
-        if len(unique_idx) < len(valid_latent_x):
-            unique_idx.sort()
-            valid_latent_x = valid_latent_x[unique_idx]
-            valid_latent_yhat = valid_latent_yhat[unique_idx]
-            valid_latent_gt = valid_latent_gt[unique_idx]
-
-    global_var = np.var(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
-    global_range = np.ptp(valid_latent_gt) if valid_latent_gt.size > 0 else 1.0
-
-    # data already finite-filtered; use cKDTree directly
-    tree = cKDTree(valid_latent_x)
-
-    # raw gaussian weights, single tree query for both n_eff and knn_stats
-    # Use adaptive sigma ("leashed balloon"): sigma scales with local density for fair 2D/3D comparison
-    # max_radius acts as safety cutoff to prevent averaging over distant regions in voids
-    indices, raw_weights = get_gaussian_weighted_knn(
-        grid,
-        tree=tree,
-        k=params['k'],
-        min_points=params['min_points'],
-        adaptive_sigma=True,
-        max_radius=params['radius'],  # hard cutoff for safety
-        normed_w=False,
+    gt_mean, gt_stdev, n_eff, iw = _kernel_smoother_lattice(
+        deduped_x, deduped_gt, grid, params,
+    )
+    yhat_stdev, yhat_mean = knn_stats(
+        grid, deduped_yhat, iw=iw,
+        stats=['std', 'mean'],
+        k=params['k'], min_points=params['min_points'],
     )
 
-    # effective sample size: sum of raw Gaussian weights (distance-aware confidence)
-    n_eff = np.nansum(raw_weights, axis=1, keepdims=True)
-
-    # normalize weights for mean/variance computation
-    with np.errstate(divide='ignore', invalid='ignore'):
-        norm_weights = raw_weights / n_eff
-    iw = (indices, norm_weights)
-
-    from biocomp.plotting.knn_utils_np import get_knn_mean_and_variance
-    gt_mean, gt_var = get_knn_mean_and_variance(grid, valid_latent_gt, iw=iw)
-    yhat_mean, yhat_var = get_knn_mean_and_variance(grid, valid_latent_yhat, iw=iw)
-
-    # compute metrics directly avoiding redundant sqrt/square roundtrips
+    global_var = float(np.var(deduped_gt)) if deduped_gt.size else 1.0
+    global_range = float(np.ptp(deduped_gt)) if deduped_gt.size else 1.0
     sq_error = (yhat_mean - gt_mean) ** 2
-    local_var = gt_var  # gt_stdev**2 == gt_var
-    gt_stdev = np.sqrt(gt_var)
-    yhat_stdev = np.sqrt(yhat_var)
+    local_var = gt_stdev ** 2
 
     mse_val = compute_grid_mse(yhat_mean, gt_mean)
     rmse_val = float(np.sqrt(mse_val))  # avoid recomputing nanmean
@@ -486,14 +451,85 @@ def _calculate_grid_stats(
     snr_val = compute_grid_snr(gt_mean, local_var)
     kl_mean, kl_similarity = compute_grid_kl(yhat_mean, yhat_stdev, gt_mean, gt_stdev)
     nrmse_val = compute_nrmse(
-        sq_error,
-        local_var,
-        n_eff,
-        global_var,
-        global_range,
-        gt_mean,
+        sq_error, local_var, n_eff, global_var, global_range, gt_mean,
         k=params['k'],
     )
+
+    # Density-balanced subsample → kernel-smoother & model metrics on the
+    # SAME points. RMSE / R² are absolute; nRMSE_local normalizes each
+    # squared residual by interpolated local σ so the metric is comparable
+    # across networks with different signal magnitudes and noise profiles.
+    # Indices are surfaced so MVP plots render the same points the stats
+    # were computed on (SSOT between cloud and annotation).
+    mu_interp = kernel_lattice_interp(gt_mean, params, d)
+    sigma_interp = kernel_lattice_interp(gt_stdev, params, d)
+    kernel_pred_full = np.asarray(mu_interp(full_x))
+    kernel_resid = full_gt - kernel_pred_full
+    model_resid = full_gt - full_yhat
+    sub_idx_in_valid = density_balanced_indices(
+        full_x,
+        n_samples=int(params.get('subsample_n', 5000)),
+        knn_k=int(params.get('subsample_knn_k', 64)),
+        density_threshold_quantile=float(params.get('subsample_density_quantile', 0.025)),
+    )
+    valid_to_original = np.where(valid_x_mask)[0]
+    nan = float('nan')
+    if sub_idx_in_valid.size:
+        kr = kernel_resid[sub_idx_in_valid]
+        mr = model_resid[sub_idx_in_valid]
+        finite = np.all(np.isfinite(kr), axis=1) & np.all(np.isfinite(mr), axis=1)
+        sub_idx_finite = sub_idx_in_valid[finite]
+        if finite.any():
+            gt_sub = full_gt[sub_idx_in_valid][finite]
+            yhat_sub = full_yhat[sub_idx_in_valid][finite]
+            x_sub = full_x[sub_idx_in_valid][finite]
+            kernel_pred_sub = kernel_pred_full[sub_idx_in_valid][finite]
+            sigma_sub = np.asarray(sigma_interp(x_sub))
+
+            var_gt = float(np.var(gt_sub))
+            mse_kernel = float(np.mean(kr[finite] ** 2))
+            mse_model = float(np.mean(mr[finite] ** 2))
+            kernel_rmse_latent = float(np.sqrt(mse_kernel))
+            model_rmse_latent = float(np.sqrt(mse_model))
+            ratio_rmse = (
+                model_rmse_latent / kernel_rmse_latent
+                if kernel_rmse_latent > 0 else nan
+            )
+            if var_gt > 0:
+                kernel_r_squared_latent = 1.0 - mse_kernel / var_gt
+                model_r_squared_latent = 1.0 - mse_model / var_gt
+            else:
+                kernel_r_squared_latent = model_r_squared_latent = nan
+            ratio_r_squared = (
+                model_r_squared_latent / kernel_r_squared_latent
+                if (np.isfinite(kernel_r_squared_latent) and kernel_r_squared_latent != 0)
+                else nan
+            )
+
+            global_range = float(np.ptp(gt_sub)) if gt_sub.size else 1.0
+            kernel_nrmse_local = compute_nrmse_pointwise(
+                gt_sub, kernel_pred_sub, sigma_sub,
+                gt_mean_local=kernel_pred_sub, global_range=global_range,
+            )
+            model_nrmse_local = compute_nrmse_pointwise(
+                gt_sub, yhat_sub, sigma_sub,
+                gt_mean_local=kernel_pred_sub, global_range=global_range,
+            )
+            kratio = (
+                model_nrmse_local / kernel_nrmse_local
+                if (np.isfinite(kernel_nrmse_local) and kernel_nrmse_local > 0)
+                else nan
+            )
+        else:
+            kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
+            kernel_r_squared_latent = model_r_squared_latent = ratio_r_squared = nan
+            kernel_nrmse_local = model_nrmse_local = kratio = nan
+        subsample_indices = valid_to_original[sub_idx_finite].astype(np.intp)
+    else:
+        kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
+        kernel_r_squared_latent = model_r_squared_latent = ratio_r_squared = nan
+        kernel_nrmse_local = model_nrmse_local = kratio = nan
+        subsample_indices = np.array([], dtype=np.intp)
 
     return {
         'grid_gt_var': float(np.nanvar(gt_mean)),
@@ -504,6 +540,23 @@ def _calculate_grid_stats(
         'grid_kl': kl_mean,
         'grid_kl_similarity': kl_similarity,
         'grid_r_squared': r_squared_val,
+        'kernel_rmse_latent': kernel_rmse_latent,
+        'model_rmse_latent': model_rmse_latent,
+        'ratio_rmse': ratio_rmse,
+        'kernel_r_squared_latent': kernel_r_squared_latent,
+        'model_r_squared_latent': model_r_squared_latent,
+        'ratio_r_squared': ratio_r_squared,
+        'kernel_nrmse_local': kernel_nrmse_local,
+        'model_nrmse_local': model_nrmse_local,
+        'kratio': kratio,
+        'n_subsample_used': int(subsample_indices.size),
+        'subsample_indices': subsample_indices,
+        'grid_xy_latent': np.asarray(grid),
+        'grid_gt_mean_latent': np.asarray(gt_mean),
+        'grid_gt_stdev_latent': np.asarray(gt_stdev),
+        'grid_yhat_mean_latent': np.asarray(yhat_mean),
+        'grid_yhat_stdev_latent': np.asarray(yhat_stdev),
+        'grid_n_eff': np.asarray(n_eff).ravel(),
     }, grid
 
 
@@ -939,8 +992,13 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
             stats = self.get_network_stats()
             assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
-            # add stats to metadata
-            pdata.metadata['prediction_stats'] = stats[network_idx].copy()
+            # Drop array-valued grid overlays from the embedded plot metadata —
+            # they're consumed by data-holder helpers via `get_network_stats()`
+            # directly and don't belong in the JSON-bound figure subject blob.
+            pdata.metadata['prediction_stats'] = {
+                k: v for k, v in stats[network_idx].items()
+                if not isinstance(v, np.ndarray)
+            }
 
             # apply inverse rescaling if requested and data is already latent
             if self.already_latent and rescale_latent:
@@ -1268,6 +1326,12 @@ class NetworkPrediction(GridStatsFields, DataSource):
         import pandas as pd
 
         stats = self.get_network_stats()
+        # Drop array-valued fields (grid-mean / grid-weight overlays) — the
+        # CSV is for scalar metrics; arrays are consumed by plot helpers.
+        stats = [
+            {k: v for k, v in s.items() if not isinstance(v, np.ndarray)}
+            for s in stats
+        ]
         df = pd.DataFrame(stats)
 
         # update df with content of self.extra_metadata

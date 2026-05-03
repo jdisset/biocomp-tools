@@ -151,11 +151,24 @@ class DBSource(DataSource, NetworkSet):
             logger.debug(f"DBSource: XY data for {network.name}: X{X.shape}, Y{Y.shape}")
             return X, Y
 
+        # Fall back to the recipe's own input_order annotation when the caller
+        # hasn't set one. Lets a recipe declare its preferred x1/x2/x3 mapping
+        # once (in the JSON5) and have all forward plots pick it up.
+        effective_input_order = self.input_order
+        if effective_input_order is None and network.recipe is not None:
+            recipe_content = network.recipe.content or {}
+            recipe_order = recipe_content.get('input_order') if isinstance(recipe_content, dict) else None
+            if recipe_order:
+                effective_input_order = recipe_order
+                logger.debug(
+                    f"DBSource: using recipe.input_order={recipe_order} for {network.name}"
+                )
+
         try:
             pdata = pu.extract_lazy_plot_data_from_network(
                 actual_network,
                 get_XY,
-                input_order=self.input_order,
+                input_order=effective_input_order,
                 metadata=metadata,
             )
         except Exception as e:
@@ -230,8 +243,11 @@ class FileSource(DataSource):
             content = content[idx:]
 
         recipe_data = dracon.loads(content)
-        is_legacy = any('sources' in c for c in recipe_data.get('content', []))
-        recipe = dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
+        if isinstance(recipe_data, Recipe):
+            recipe = recipe_data
+        else:
+            is_legacy = any('sources' in c for c in recipe_data.get('content', []))
+            recipe = dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
         self._networks = recipe_to_networks(recipe, lib=self._lib)
 
     def _data_from_network(self, network: bc.network.Network) -> Optional[PlotData]:

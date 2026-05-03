@@ -22,9 +22,19 @@ figure.subplot.wspace: 0.01
 figure.titlesize: 10.0
 figure.titleweight: "bold"
 
-font.family: ["roboto"]
-font.sans-serif: ["roboto"]
-font.serif: ["roboto"]
+# Roboto is the primary face; DejaVu Sans (bundled with matplotlib) covers
+# arrows / math / box-drawing chars that Roboto lacks. Matplotlib walks
+# the list per-glyph, so any character missing from Roboto falls through
+# to DejaVu instead of rendering as tofu in PDFs.
+font.family: ["roboto", "DejaVu Sans"]
+font.sans-serif: ["roboto", "DejaVu Sans"]
+font.serif: ["roboto", "DejaVu Sans"]
+
+# Embed TrueType outlines (type-42) in PDF/PS so the actual glyph shapes
+# travel with the file. Type-3 (default) re-encodes through PostScript
+# fonts and can drop non-ASCII glyphs even when the renderer had them.
+pdf.fonttype: 42
+ps.fonttype: 42
 
 # or with Helvetica Neue:
 #font.family: ["Helvetica Neue"]

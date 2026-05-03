@@ -1015,7 +1015,9 @@ class BiocompDBUpdater(BaseModel):
             )
         except Exception as e:
             self._logger.error(f"Exception in build_networks for {recipe.name}: {e}")
-            return recipe, traceback.format_exc(limit=1)
+            # Keep the full traceback — callers surface it in the end-of-phase
+            # summary so failures aren't silently lost.
+            return recipe, traceback.format_exc()
 
     def _bulk_upsert(self, sess: Session, model_cls: type, items: List[Any]) -> int:
         """Bulk upsert items of a single model type using SQLite INSERT OR REPLACE."""
@@ -1308,6 +1310,9 @@ class BiocompDBUpdater(BaseModel):
                         "[green]Building networks...", total=len(all_recipes)
                     )
                     cache_p_nets = Path(config.paths.cache.networks)
+                    net_build_failures: List[Tuple[str, str]] = []
+                    net_build_empty: List[str] = []
+                    net_build_success = 0
                     with ThreadPoolExecutor(
                         max_workers=self.nworkers, thread_name_prefix="NetBuild"
                     ) as tpe:
@@ -1323,16 +1328,25 @@ class BiocompDBUpdater(BaseModel):
                                     self._add_error_to_item(
                                         recipe_ctx, 'net_build_error_str', nets_or_err
                                     )
+                                    reason = nets_or_err.strip().splitlines()[-1] if nets_or_err.strip() else "unknown"
+                                    net_build_failures.append((recipe_ctx.name, reason))
                                     self._logger.warning(
-                                        f"Failed to build network for {recipe_ctx.name}: {nets_or_err[:200]}"
+                                        f"Failed to build network for {recipe_ctx.name}: {reason[:200]}"
                                     )
                                 elif isinstance(nets_or_err, list):
+                                    if not nets_or_err:
+                                        net_build_empty.append(recipe_ctx.name)
+                                    else:
+                                        net_build_success += 1
                                     recipe_ctx.networks.extend(nets_or_err)
                                 else:
                                     self._add_error_to_item(
                                         recipe_ctx,
                                         'net_build_payload_unexpected',
                                         f"Type: {type(nets_or_err)}",
+                                    )
+                                    net_build_failures.append(
+                                        (recipe_ctx.name, f"unexpected payload type {type(nets_or_err).__name__}")
                                     )
                             except Exception as e:
                                 self._logger.error(
@@ -1341,12 +1355,35 @@ class BiocompDBUpdater(BaseModel):
                                 self._add_error_to_item(
                                     recipe_ctx, 'net_build_critical_future', traceback.format_exc()
                                 )
+                                net_build_failures.append((recipe_ctx.name, f"future error: {e}"))
                             progress.update(tid_net_bld, advance=1)
                     progress.update(
                         tid_net_bld,
                         description="[green]Networks built.",
                         completed=len(all_recipes),
                     )
+
+                    # Summary: surface how many recipes failed to produce networks
+                    # and list them inline so the problem is visible to the user.
+                    total = len(all_recipes)
+                    n_fail = len(net_build_failures)
+                    n_empty = len(net_build_empty)
+                    self._logger.info(
+                        f"Network build summary: {net_build_success}/{total} recipes produced networks"
+                        f" ({n_fail} failed, {n_empty} produced zero networks)"
+                    )
+                    if net_build_failures:
+                        self._logger.warning(
+                            f"{n_fail} recipe(s) failed to build networks — plot jobs that "
+                            f"target these recipes will raise 'No data found for []':"
+                        )
+                        for name, reason in sorted(net_build_failures):
+                            self._logger.warning(f"  - {name}: {reason[:300]}")
+                    if net_build_empty:
+                        self._logger.warning(
+                            f"{n_empty} recipe(s) built without error but produced no networks: "
+                            f"{', '.join(sorted(net_build_empty))}"
+                        )
                 else:
                     self._logger.warning("no experiments loaded to process.")
 

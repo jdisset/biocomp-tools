@@ -38,9 +38,16 @@ def render_circuit_to_ax(
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal",
     style_overrides: Optional[dict] = None,
     title: Optional[str] = None,
+    canvas_xlim: Optional[tuple[float, float]] = None,
+    canvas_ylim: Optional[tuple[float, float]] = None,
+    aspect: str = "equal",
     **_kwargs,
 ):
-    """Render a genetic circuit schematic to an existing matplotlib axes."""
+    """Render a genetic circuit schematic to an existing matplotlib axes.
+
+    ``aspect="equal"`` (default) preserves circuit aspect inside the cell;
+    ``aspect="auto"`` stretches to fill (no margins).
+    """
     from jeanplot.gene import GeneticSchematic
     from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
     from jeanplot.core import Size, BoxStyle, LayoutConstraints, Offset, Shadow
@@ -67,12 +74,20 @@ def render_circuit_to_ax(
     )
     jstyle.apply(schematic)
 
-    ax.set_aspect("equal")
+    ax.set_aspect(aspect)
     ax.axis("off")
     ax.set_facecolor("none")
 
     renderer = MatplotlibRenderer()
     renderer.render_component(ax, schematic, adjust_lims=True)
+
+    # Optional fixed-canvas widening — schematic content is left at its
+    # rendered data coords, lims are expanded around it so smaller recipes
+    # appear small inside a uniformly-sized canvas. Text stays in data
+    # space (jeanplot's data-unit auto-refresh handles re-sizing on draw).
+    from biocomptools.toollib.figuremakers._jeanplot_canvas import apply_canvas
+
+    apply_canvas(ax, canvas_xlim, canvas_ylim)
 
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")

@@ -109,7 +109,8 @@ class Experiment(BiocompDB, table=True):
         **kwargs,
     ) -> List["Recipe"]:
         """
-        returns a dict of sample_name -> Recipe
+        Returns a list of Recipe objects. Prefers .recipe.yaml over .recipe.json5
+        when both exist next to each other (YAML carries short_name + input_order).
         """
         recipes = []
         if not self.content:
@@ -119,7 +120,15 @@ class Experiment(BiocompDB, table=True):
                 continue
             basepath = Path(self.path)
             basepath = basepath if recipe_subpath is None else basepath / recipe_subpath
-            filepath = basepath / f"{s['recipe']}{recipe_ext}"
+
+            resolve_base = Path(path_prefix) / basepath if path_prefix else basepath
+            yaml_name = f"{s['recipe']}.recipe.yaml"
+            fs_candidate = resolve_base / yaml_name
+            if fs_candidate.exists():
+                filepath = basepath / yaml_name
+            else:
+                filepath = basepath / f"{s['recipe']}{recipe_ext}"
+
             recipe = Recipe.from_file(
                 filepath, xp_name=self.name, path_prefix=path_prefix, **kwargs
             )
@@ -196,6 +205,7 @@ class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     recipe_name: str = Field(foreign_key="recipe.name")
     network_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    short_name: Optional[str] = None  # human-friendly alias for display
 
     recipe: Optional["Recipe"] = Relationship(back_populates="networks")
 
@@ -217,6 +227,7 @@ class Network(BiocompDB, table=True):
             name=self.name,
             recipe_name=self.recipe_name,
             network_info=self.network_info,
+            short_name=self.short_name,
         )
 
         # can't copy recipe by accessing the recipe arg
@@ -231,7 +242,13 @@ class Network(BiocompDB, table=True):
         return new_obj
 
     @classmethod
-    def from_network(cls, network: bc.network.Network, recipe_name=None, **kwargs):
+    def from_network(
+        cls,
+        network: bc.network.Network,
+        recipe_name=None,
+        short_name: Optional[str] = None,
+        **kwargs,
+    ):
         network_info = extract_network_info(network)
         logger.debug(f"Network markers: {network_info['markers']}")
         if recipe_name is None:
@@ -240,6 +257,7 @@ class Network(BiocompDB, table=True):
             name=f"{recipe_name}_{'-'.join(network_info['markers'])}",
             recipe_name=recipe_name,
             network_info=network_info,
+            short_name=short_name,
             **kwargs,
         )
         obj._network = network
@@ -291,6 +309,8 @@ class Network(BiocompDB, table=True):
         raise ValueError(msg)
 
     def title(self):
+        if self.short_name:
+            return self.short_name
         if self._network is None:
             return f"{self.name}"
         fresh_info = extract_network_info(self._network)
@@ -350,18 +370,29 @@ class Recipe(BiocompDB, table=True):
 
     @staticmethod
     def from_file(file_path, xp_name=None, path_prefix=None, **kwargs):
-        import json5
-
         filepath = Path(file_path) if path_prefix is None else Path(path_prefix) / file_path
         filepath = Path(filepath).expanduser().resolve()
-        with open(filepath, 'r') as f:
-            content = json5.load(f)
 
-        short_name = content.get('name', filepath.stem)
-        if xp_name is not None:
-            name = f"{xp_name}_{short_name}"
+        is_yaml = filepath.name.endswith('.recipe.yaml')
+        if is_yaml:
+            import dracon
+            from biocomp.library import LibraryContext, load_lib
+            with LibraryContext.with_library(load_lib()):
+                bcr = dracon.load(str(filepath))
+            content = bcr.model_dump(mode='python')
+            # recipe 'name' in the stored dict should be the local recipe short-name
+            content['name'] = filepath.name.removesuffix('.recipe.yaml')
+            short_name = (bcr.metadata or {}).get('short_name') or content['name']
         else:
-            name = short_name
+            import json5
+            with open(filepath, 'r') as f:
+                content = json5.load(f)
+            short_name = content.get('name', filepath.stem)
+
+        if xp_name is not None:
+            name = f"{xp_name}_{content.get('name', filepath.stem)}"
+        else:
+            name = content.get('name', filepath.stem)
 
         return Recipe(
             name=name,
@@ -409,7 +440,12 @@ class Recipe(BiocompDB, table=True):
                 from biocomp.recipe import dict_to_recipe
 
                 if isinstance(self.content, dict) and "content" in self.content:
-                    recipe_obj = dict_to_recipe(self.content)
+                    first = self.content['content'][0] if self.content['content'] else {}
+                    if isinstance(first, dict) and 'units' in first:
+                        # new-style dict (e.g., from YAML via model_dump): validate directly
+                        recipe_obj = Recipe.model_validate(self.content)
+                    else:
+                        recipe_obj = dict_to_recipe(self.content)
                 elif (
                     isinstance(self.content, list)
                     and self.content
@@ -458,6 +494,7 @@ class Recipe(BiocompDB, table=True):
                 name=unique_name,
                 recipe_name=self.name,
                 network_info=network_info,
+                short_name=self.short_name,
             )
             network._network = net
             network_models.append(network)

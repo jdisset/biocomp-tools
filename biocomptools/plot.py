@@ -20,7 +20,14 @@ from dracon.deferred import DeferredNode
 from biocomp.utils import PartialFunction
 import biocomp
 from biocomp.datautils import DataRescaler
-from biocomp.plotutils import FigureSpec, FigAx, SimpleLayout, MergeSpec
+from biocomp.plotutils import (
+    FigureSpec,
+    FigAx,
+    SimpleLayout,
+    GridLayout,
+    MultiRowGridLayout,
+    MergeSpec,
+)
 from biocomptools.toollib.datasources import DataSource, DBSource
 
 from biocomptools.toollib.networkprediction import NetworkPrediction, PredictionSamplingConfig
@@ -36,6 +43,25 @@ from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
 )
 from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure, InnerNodesFigureSpec
 from biocomptools.toollib.figuremakers.benchmarkutils import BenchmarkData, BenchmarkItem
+from biocomptools.toollib.figuremakers.datasetsummary import (
+    expand_panel_atomics,
+    compose_rows,
+    compose_atomics,
+    layout_dimensions,
+    extract_plot_data_metadata,
+    extract_model_metadata,
+    extract_prediction_config,
+    build_figure_metadata,
+    predicted_stats,
+    build_prediction_pipeline,
+    build_per_network_mvp,
+    filter_compatible,
+    format_z_label,
+    smart_title,
+    training_set_count,
+    trained_on_status,
+)
+from biocomptools.toollib.figuremakers.measuredvspredicted import MeasuredVsPredictedData
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
@@ -216,6 +242,8 @@ DEFAULT_TYPES = [
     FigureSpec,
     FigAx,
     SimpleLayout,
+    GridLayout,
+    MultiRowGridLayout,
     MergeSpec,
     Regex,
     iRegex,
@@ -237,6 +265,7 @@ DEFAULT_TYPES = [
     InnerNodesFigureSpec,
     BenchmarkData,
     BenchmarkItem,
+    MeasuredVsPredictedData,
     bundle_uorf_data,
     get_uorf_values,
     extract_uorf_info,
@@ -274,6 +303,22 @@ DEFAULT_CONTEXT = {
     **make_context_from_types(DEFAULT_TYPES),
     'get_pretty_axis_label': get_pretty_axis_label,
     'urlencoded': urlencoded,
+    'expand_panel_atomics': expand_panel_atomics,
+    'compose_rows': compose_rows,
+    'compose_atomics': compose_atomics,
+    'layout_dimensions': layout_dimensions,
+    'extract_plot_data_metadata': extract_plot_data_metadata,
+    'extract_model_metadata': extract_model_metadata,
+    'extract_prediction_config': extract_prediction_config,
+    'build_figure_metadata': build_figure_metadata,
+    'predicted_stats': predicted_stats,
+    'build_prediction_pipeline': build_prediction_pipeline,
+    'build_per_network_mvp': build_per_network_mvp,
+    'filter_compatible': filter_compatible,
+    'format_z_label': format_z_label,
+    'smart_title': smart_title,
+    'training_set_count': training_set_count,
+    'trained_on_status': trained_on_status,
     'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
 }
 
@@ -288,6 +333,22 @@ DEFAULT_CONTEXT = {
         'urlencoded': urlencoded,
         'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
         'sample_latent': sample_latent,
+        'expand_panel_atomics': expand_panel_atomics,
+        'compose_rows': compose_rows,
+        'compose_atomics': compose_atomics,
+        'layout_dimensions': layout_dimensions,
+        'extract_plot_data_metadata': extract_plot_data_metadata,
+        'extract_model_metadata': extract_model_metadata,
+        'extract_prediction_config': extract_prediction_config,
+        'build_figure_metadata': build_figure_metadata,
+        'predicted_stats': predicted_stats,
+        'build_prediction_pipeline': build_prediction_pipeline,
+        'filter_compatible': filter_compatible,
+        'build_per_network_mvp': build_per_network_mvp,
+        'format_z_label': format_z_label,
+        'smart_title': smart_title,
+        'training_set_count': training_set_count,
+        'trained_on_status': trained_on_status,
     },
 )
 class PlotJob(BaseModel):
