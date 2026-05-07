@@ -206,6 +206,52 @@ def construct_figure(
     return figure
 
 
+def warm_caches_for_figure(figure):
+    try:
+        from biocomp.plotting.plotting_smooth import knn_grid
+        from biocomp.plotutils import LazyPlotData
+        for tc in figure.plot_tasks:
+            try:
+                pt = tc.construct(context={"FIG": _DUMMY_FIG_AX})
+            except Exception:
+                continue
+            if not hasattr(pt, "plot_method") or pt.plot_method is None:
+                continue
+            try:
+                func_name = pt.plot_method.get_name()
+            except Exception:
+                continue
+            if not (func_name.endswith("smooth") or func_name.endswith("smooth_2d")):
+                continue
+            kw = dict(pt.plot_method.kwargs)
+            plot_data = kw.get("plot_data") or (pt.plot_method.args[0] if pt.plot_method.args else None)
+            if plot_data is None or not isinstance(plot_data, LazyPlotData):
+                continue
+            rescaler = pt.plot_config.rescaler if pt.plot_config else None
+            if rescaler is None:
+                continue
+            try:
+                x_raw, y_raw = plot_data.x, plot_data.y
+                if x_raw is None or x_raw.ndim != 2 or x_raw.shape[1] != 2:
+                    continue
+                xlims = kw.get("xlims") or [0.0, 0.65]
+                ylims = kw.get("ylims") or xlims
+                knn_grid(rescaler.fwd(x_raw), rescaler.fwd(y_raw), xlims, ylims, grid_resolution=250)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+class _DummyFigAx:
+    flat_ax = [None] * 100
+    axes = [[None] * 10 for _ in range(10)]
+    figure = None
+
+
+_DUMMY_FIG_AX = _DummyFigAx()
+
+
 def run_figure(f, **kw) -> FigureResult:
     try:
         t0 = time.time()
@@ -420,22 +466,38 @@ class PlotJob(BaseModel):
                 self.figures[i].copy(reroot=True)
                 for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
             ]
-            constructed_figures = [
-                construct_figure(
-                    fig,
-                    output_path_override=temp_paths[order[j]],
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _construct_and_warm(*args, **kw):
+                fig = construct_figure(*args, **kw)
+                warm_caches_for_figure(fig)
+                return fig
+
+            constructed_figures: list = [None] * total_figures
+            with ThreadPoolExecutor(max_workers=1) as exec_:
+                fut = exec_.submit(
+                    _construct_and_warm,
+                    fig_copies[0],
+                    output_path_override=temp_paths[order[0]],
                     text_mode=txt_mode,
                     stdout_txt_plot=stdout_txt,
                 )
-                for j, fig in enumerate(
-                    maybetqdm(fig_copies, min_len=5, desc='Constructing figures')
-                )
-            ]
 
-            out_paths = [
-                run_figure(f, overwrite=overwrite)
-                for f in maybetqdm(constructed_figures, min_len=2, desc='Running figures')
-            ]
+                out_paths = []
+                pbar = maybetqdm(range(total_figures), min_len=2, desc='Running figures')
+                for j in pbar:
+                    fig = fut.result()
+                    constructed_figures[j] = fig
+                    if j + 1 < total_figures:
+                        fut = exec_.submit(
+                            _construct_and_warm,
+                            fig_copies[j + 1],
+                            output_path_override=temp_paths[order[j + 1]],
+                            text_mode=txt_mode,
+                            stdout_txt_plot=stdout_txt,
+                        )
+                    out_paths.append(run_figure(fig, overwrite=overwrite))
+
             outpathstr = '\n  - ' + '\n  - '.join(r.path for r in out_paths)
             logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
 

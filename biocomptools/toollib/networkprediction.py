@@ -28,14 +28,64 @@ from biocomp.metric_utils import (
     GridStatsFields,
 )
 from pathlib import Path
+import os
 import time
+import json as _json
+import xxhash
 
 # from concurrent.futures import ProcessPoolExecutor as PoolExecutor, as_completed
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
 
+from biocomp.utils import get_cache
+
 logger = get_logger(__name__)
 
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
+
+
+def _cache_dir(env_var: str, default_subdir: str) -> Path:
+    return Path(os.environ.get(env_var, os.path.expanduser(f"~/.cache/{default_subdir}")))
+
+
+def _cache_disabled(env_var: str) -> bool:
+    return os.environ.get(env_var, "").lower() in ("1", "true", "yes")
+
+
+_DATA_KERNEL_CACHE_DIR = _cache_dir("BIOCOMP_DATA_KERNEL_CACHE_DIR", "biocomp_data_kernel")
+_DATA_KERNEL_CACHE_DISABLED = _cache_disabled("BIOCOMP_DATA_KERNEL_CACHE_DISABLE")
+_PREDICTION_CACHE_DIR = _cache_dir("BIOCOMP_PREDICTION_CACHE_DIR", "biocomp_predictions")
+_PREDICTION_CACHE_DISABLED = _cache_disabled("BIOCOMP_PREDICTION_CACHE_DISABLE")
+
+
+def _dks_save(data: Dict[str, Any], path: Path) -> None:
+    arr_kwargs: Dict[str, Any] = {}
+    scalar_kwargs: Dict[str, Any] = {}
+    for k, v in data.items():
+        if k == 'iw':
+            idx, w = v
+            arr_kwargs['iw_idx'] = np.ascontiguousarray(idx, dtype=np.int32)
+            arr_kwargs['iw_w'] = np.ascontiguousarray(w, dtype=np.float32)
+        elif isinstance(v, np.ndarray):
+            arr_kwargs[k] = v
+        else:
+            scalar_kwargs[k] = v
+    arr_kwargs['__scalars__'] = np.array(_json.dumps(scalar_kwargs))
+    tmp = Path(str(path) + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, **arr_kwargs)
+    tmp.replace(path)
+
+
+def _dks_load(path: Path) -> Dict[str, Any]:
+    with open(path, "rb") as fh:
+        with np.load(fh, allow_pickle=False) as f:
+            out: Dict[str, Any] = {k: f[k] for k in f.files if k not in ('__scalars__', 'iw_idx', 'iw_w')}
+            out['iw'] = (f['iw_idx'], f['iw_w'])
+            out.update(_json.loads(str(f['__scalars__'])))
+    return out
+
+
+_DKS_SERIALIZER = {"save": _dks_save, "load": _dks_load}
 
 
 class PredictionSamplingConfig(BaseModel):
@@ -108,12 +158,19 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     Fused version of get_gaussian_weighted_knn(adaptive_sigma=True, normed_w=False)
     followed by normalization and get_knn_mean_and_variance.
     Returns (mean, variance, n_eff) without intermediate weight arrays.
+
+    Heavy-grid optimization: rows with fewer than ``min_points`` valid neighbors
+    return NaN regardless of weights, so we skip the (m, k, p) gather + reductions
+    on those rows. For bootstrap-on-3D-grid this is a 30x+ speedup since most
+    bootstrap subsamples have very few valid cells on a 64^3 lattice.
     """
     eps = 1e-12
-    distances, indices = tree.query(grid, k=k, workers=-1)
+    from biocomp.plotting.knn_utils_np import KNN_WORKERS
+    n_grid = grid.shape[0]
+    distances, indices = tree.query(grid, k=k, workers=KNN_WORKERS)
     finite_mask = np.isfinite(distances)
+    # max along axis=1, ignoring -inf entries; same as max over finite entries
     max_finite = np.where(finite_mask, distances, -np.inf).max(axis=1)
-    sigma = (max_finite / sigma_in_radius).reshape(-1, 1) + eps
 
     if max_radius is not None:
         valid_mask = finite_mask & (distances <= max_radius)
@@ -121,31 +178,64 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
         valid_mask = finite_mask
     nb_points = valid_mask.sum(axis=1)
 
-    Z = np.exp(-0.5 * (distances / sigma) ** 2)
-    invalid = ~valid_mask
-    Z[invalid] = 0.0
-    indices_c = indices.copy()
-    indices_c[invalid] = 0
+    valid_rows = nb_points >= min_points
+    n_outs = y.shape[1] if y.ndim > 1 else 1
 
-    n_eff = Z.sum(axis=1, keepdims=True)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        W = Z / n_eff
+    if not valid_rows.any():
+        # Everything is too_few → all NaN
+        nan_mat = np.full((n_grid, n_outs), np.nan)
+        nan_neff = np.full((n_grid, 1), np.nan)
+        return nan_mat, nan_mat.copy(), nan_neff
+
+    if valid_rows.all():
+        sub_distances = distances
+        sub_indices = indices
+        sub_valid_mask = valid_mask
+        sub_max_finite = max_finite
+    else:
+        sub_distances = distances[valid_rows]
+        sub_indices = indices[valid_rows]
+        sub_valid_mask = valid_mask[valid_rows]
+        sub_max_finite = max_finite[valid_rows]
+
+    sigma = (sub_max_finite / sigma_in_radius).reshape(-1, 1) + eps
+
+    inv_sigma = 1.0 / sigma
+    Z = sub_distances * inv_sigma
+    Z *= Z
+    Z *= -0.5
+    np.exp(Z, out=Z)
+    Z[~sub_valid_mask] = 0.0
+
+    n_eff_v = Z.sum(axis=1, keepdims=True)
+
+    indices_c = sub_indices
+    if not sub_valid_mask.all():
+        indices_c = sub_indices.copy()
+        indices_c[~sub_valid_mask] = 0
 
     y_nei = y[indices_c]
-    w = W[..., None]
-    mean = np.sum(w * y_nei, axis=1)
-    diff = y_nei - mean[:, None, :]
-    var_num = np.sum(w * (diff**2), axis=1)
-    w2sum = np.sum(W**2, axis=1, keepdims=True)
-    denom = np.maximum(1.0 - w2sum, eps)
-    variance = var_num / denom
+    z = Z[..., None]
+    sum_y = (z * y_nei).sum(axis=1)
+    sum_y2 = (z * y_nei * y_nei).sum(axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mean_v = sum_y / n_eff_v
+        m2 = sum_y2 / n_eff_v
+        variance_num_v = m2 - mean_v * mean_v
+        # DoF correction: 1 - sum(W^2) = 1 - sum(Z^2)/n_eff^2
+        z2sum = (Z * Z).sum(axis=1, keepdims=True)
+        denom = np.maximum(1.0 - z2sum / (n_eff_v * n_eff_v), eps)
+        variance_v = variance_num_v / denom
 
-    too_few = nb_points < min_points
-    if np.any(too_few):
-        mean[too_few] = np.nan
-        variance[too_few] = np.nan
-        n_eff[too_few] = np.nan
+    if valid_rows.all():
+        return mean_v, variance_v, n_eff_v
 
+    mean = np.full((n_grid, n_outs), np.nan)
+    variance = np.full((n_grid, n_outs), np.nan)
+    n_eff = np.full((n_grid, 1), np.nan)
+    mean[valid_rows] = mean_v
+    variance[valid_rows] = variance_v
+    n_eff[valid_rows] = n_eff_v
     return mean, variance, n_eff
 
 
@@ -208,11 +298,19 @@ def _compute_split_half_nrmse(
     n_bootstraps: int = SPLIT_HALF_N_BOOTSTRAPS,
     seed: int = 42,
     grid: NdArray | None = None,
+    grid_valid_mask: NdArray | None = None,
 ) -> float:
     """Bootstrapped split-half nRMSE over the lattice.
 
     Two independent same-size resamples produce two kernel smoothers; the
     nRMSE between them estimates the irreducible noise floor.
+
+    ``grid_valid_mask`` (optional): boolean mask over the grid points; cells
+    marked False are skipped before the kernel queries. The metric is
+    weight-averaged over surviving cells, so dropping cells the full-data
+    smoother already had no neighbors for is exact (those cells contribute
+    zero weight anyway). Big win for high-dim cubes where most cells are
+    empty (3D: ~95% empty for typical data).
     """
     from scipy.spatial import cKDTree
 
@@ -233,6 +331,10 @@ def _compute_split_half_nrmse(
             xmin=params['hypercube_min'],
             xmax=params['hypercube_max'],
         )
+    if grid_valid_mask is not None:
+        m = np.asarray(grid_valid_mask).ravel()
+        if m.shape[0] == grid.shape[0] and m.any():
+            grid = grid[m]
 
     subset_size = min(SPLIT_HALF_SUBSET_SIZE, n_points)
     k = params['k']
@@ -380,21 +482,132 @@ def _calculate_single_network_stats(
         network_stats['rmse'] = float(np.sqrt(mse))
 
         if enable_gridstats:
-            grid_stats, grid_cache = _calculate_grid_stats(
+            grid_stats, _grid_cache = _calculate_grid_stats(
                 latent_yhat, latent_gt, latent_x, gridstats_params
             )
             network_stats.update(grid_stats)
-
-            # compute data noise floor (split-half nRMSE) reusing cached grid
-            data_nrmse = _compute_split_half_nrmse(
-                latent_x, latent_gt, gridstats_params, grid=grid_cache
-            )
-            network_stats['data_nrmse'] = data_nrmse
+            data_nrmse = float(grid_stats['data_nrmse'])
             network_stats['noise_relative_error'] = compute_nre(
                 grid_stats['grid_nrmse'], data_nrmse
             )
 
     return network_stats
+
+
+def _data_kernel_signature(latent_x: NdArray, latent_gt: NdArray, params: Dict[str, Any]) -> str:
+    """Stable hash over the model-independent inputs to grid stats compute.
+
+    Uses shape + ~1024 decimated samples + a sorted, JSON-encoded subset
+    of params. Float arrays are normalized to contiguous float32 so cache
+    hits aren't broken by view/dtype noise. Bump the leading version tag
+    when changing what's cached.
+    """
+    h = xxhash.xxh128()
+    h.update(b"v1.")
+    x = np.ascontiguousarray(latent_x, dtype=np.float32)
+    g = np.ascontiguousarray(latent_gt, dtype=np.float32)
+    h.update(repr(x.shape).encode())
+    h.update(repr(g.shape).encode())
+    n = max(1, len(x) // 1024)
+    h.update(np.ascontiguousarray(x[::n]).tobytes())
+    h.update(np.ascontiguousarray(g[::n]).tobytes())
+    p_subset = {
+        k: v for k, v in params.items()
+        if isinstance(v, (int, float, str, bool, list, tuple))
+    }
+    h.update(_json.dumps(p_subset, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
+def _compute_data_kernel_state(
+    latent_x: NdArray,
+    latent_gt: NdArray,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Pure model-independent state for grid stats. Cacheable per (data, params).
+
+    Captures everything in ``_calculate_grid_stats`` that depends only on
+    ``(latent_x, latent_gt, params)`` — the kernel smoother lattice, the
+    kernel interpolator outputs, the density-balanced subsample, and the
+    split-half data nRMSE. The model-dependent residuals are computed
+    fresh per call from these cached arrays.
+    """
+    latent_gt_2d = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
+
+    valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
+    full_x = np.asarray(latent_x[valid_x_mask])
+    full_gt = np.asarray(latent_gt_2d[valid_x_mask])
+    _, unique_idx = np.unique(full_x, axis=0, return_index=True)
+    deduped_x = full_x[unique_idx]
+    deduped_gt = full_gt[unique_idx]
+
+    d = full_x.shape[1]
+    grid = make_hypercube(
+        d,
+        res=params['hypercube_res'],
+        xmin=params['hypercube_min'],
+        xmax=params['hypercube_max'],
+    )
+
+    gt_mean, gt_stdev, n_eff, iw = _kernel_smoother_lattice(
+        deduped_x, deduped_gt, grid, params,
+    )
+
+    mu_interp = kernel_lattice_interp(gt_mean, params, d)
+    sigma_interp = kernel_lattice_interp(gt_stdev, params, d)
+    kernel_pred_full = np.asarray(mu_interp(full_x))
+    kernel_resid = full_gt - kernel_pred_full
+
+    sub_idx_in_valid = density_balanced_indices(
+        full_x,
+        n_samples=int(params.get('subsample_n', 5000)),
+        knn_k=int(params.get('subsample_knn_k', 64)),
+        density_threshold_quantile=float(params.get('subsample_density_quantile', 0.025)),
+    )
+    valid_to_original = np.where(valid_x_mask)[0]
+
+    if sub_idx_in_valid.size:
+        kr = kernel_resid[sub_idx_in_valid]
+        sub_finite_mask = np.all(np.isfinite(kr), axis=1)
+    else:
+        sub_finite_mask = np.zeros(0, dtype=bool)
+
+    if sub_idx_in_valid.size and sub_finite_mask.any():
+        x_sub = full_x[sub_idx_in_valid][sub_finite_mask]
+        sigma_sub = np.asarray(sigma_interp(x_sub))
+    else:
+        sigma_sub = np.empty((0, full_gt.shape[1]), dtype=np.float32)
+
+    global_var = float(np.var(deduped_gt)) if deduped_gt.size else 1.0
+    global_range = float(np.ptp(deduped_gt)) if deduped_gt.size else 1.0
+
+    grid_n_eff_arr = np.asarray(n_eff)
+    grid_valid_mask = (grid_n_eff_arr > 0) if n_eff is not None else None
+    data_nrmse = _compute_split_half_nrmse(
+        latent_x, latent_gt_2d, params,
+        grid=grid, grid_valid_mask=grid_valid_mask,
+    )
+
+    return {
+        'valid_x_mask': valid_x_mask,
+        'unique_idx': unique_idx,
+        'full_x': full_x,
+        'full_gt': full_gt,
+        'd': d,
+        'grid': grid,
+        'gt_mean': gt_mean,
+        'gt_stdev': gt_stdev,
+        'n_eff': n_eff,
+        'iw': iw,
+        'kernel_pred_full': kernel_pred_full,
+        'sub_idx_in_valid': sub_idx_in_valid,
+        'sub_finite_mask': sub_finite_mask,
+        'sigma_sub': sigma_sub,
+        'valid_to_original': valid_to_original,
+        'global_var': global_var,
+        'global_range': global_range,
+        'data_nrmse': data_nrmse,
+    }
 
 
 def _calculate_grid_stats(
@@ -410,43 +623,56 @@ def _calculate_grid_stats(
     built on de-duplicated data so the adaptive-sigma kernel can't divide
     by zero; the density-balanced subsample for ``kernel_rmse_latent`` /
     ``model_rmse_latent`` runs on the original (non-deduped) data.
+
+    Model-independent state (kernel smoother, interpolators, subsample,
+    split-half nRMSE) is cached on disk keyed by ``(latent_x, latent_gt,
+    params)`` so that running this for the same network across many model
+    evaluations only pays for the heavy data-side compute once.
     """
     latent_yhat = latent_yhat.reshape(-1, 1) if latent_yhat.ndim == 1 else latent_yhat
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
 
-    valid_x_mask = np.all(np.isfinite(latent_x), axis=1)
-    full_x = np.asarray(latent_x[valid_x_mask])
+    if _DATA_KERNEL_CACHE_DISABLED:
+        ds = _compute_data_kernel_state(latent_x, latent_gt, params)
+    else:
+        sig = _data_kernel_signature(latent_x, latent_gt, params)
+        ds = get_cache(
+            gen_f=lambda: _compute_data_kernel_state(latent_x, latent_gt, params),
+            signature=sig,
+            cache_location=_DATA_KERNEL_CACHE_DIR,
+            serializer=_DKS_SERIALIZER,
+        )
+
+    valid_x_mask = ds['valid_x_mask']
+    unique_idx = ds['unique_idx']
+    grid = ds['grid']
+    gt_mean = ds['gt_mean']
+    gt_stdev = ds['gt_stdev']
+    n_eff = ds['n_eff']
+    iw = ds['iw']
+    full_gt = ds['full_gt']
+    kernel_pred_full = ds['kernel_pred_full']
+    sub_idx_in_valid = ds['sub_idx_in_valid']
+    sub_finite_mask = ds['sub_finite_mask']
+    sigma_sub = ds['sigma_sub']
+    valid_to_original = ds['valid_to_original']
+    global_var = ds['global_var']
+    global_range = ds['global_range']
+
     full_yhat = np.asarray(latent_yhat[valid_x_mask])
-    full_gt = np.asarray(latent_gt[valid_x_mask])
-    _, unique_idx = np.unique(full_x, axis=0, return_index=True)
-    deduped_x = full_x[unique_idx]
     deduped_yhat = full_yhat[unique_idx]
-    deduped_gt = full_gt[unique_idx]
 
-    d = full_x.shape[1]
-    grid = make_hypercube(
-        d,
-        res=params['hypercube_res'],
-        xmin=params['hypercube_min'],
-        xmax=params['hypercube_max'],
-    )
-
-    gt_mean, gt_stdev, n_eff, iw = _kernel_smoother_lattice(
-        deduped_x, deduped_gt, grid, params,
-    )
     yhat_stdev, yhat_mean = knn_stats(
         grid, deduped_yhat, iw=iw,
         stats=['std', 'mean'],
         k=params['k'], min_points=params['min_points'],
     )
 
-    global_var = float(np.var(deduped_gt)) if deduped_gt.size else 1.0
-    global_range = float(np.ptp(deduped_gt)) if deduped_gt.size else 1.0
     sq_error = (yhat_mean - gt_mean) ** 2
     local_var = gt_stdev ** 2
 
     mse_val = compute_grid_mse(yhat_mean, gt_mean)
-    rmse_val = float(np.sqrt(mse_val))  # avoid recomputing nanmean
+    rmse_val = float(np.sqrt(mse_val))
     r_squared_val = compute_grid_r_squared(yhat_mean, gt_mean)
     snr_val = compute_grid_snr(gt_mean, local_var)
     kl_mean, kl_similarity = compute_grid_kl(yhat_mean, yhat_stdev, gt_mean, gt_stdev)
@@ -455,75 +681,50 @@ def _calculate_grid_stats(
         k=params['k'],
     )
 
-    # Density-balanced subsample → kernel-smoother & model metrics on the
-    # SAME points. RMSE / R² are absolute; nRMSE_local normalizes each
-    # squared residual by interpolated local σ so the metric is comparable
-    # across networks with different signal magnitudes and noise profiles.
-    # Indices are surfaced so MVP plots render the same points the stats
-    # were computed on (SSOT between cloud and annotation).
-    mu_interp = kernel_lattice_interp(gt_mean, params, d)
-    sigma_interp = kernel_lattice_interp(gt_stdev, params, d)
-    kernel_pred_full = np.asarray(mu_interp(full_x))
-    kernel_resid = full_gt - kernel_pred_full
-    model_resid = full_gt - full_yhat
-    sub_idx_in_valid = density_balanced_indices(
-        full_x,
-        n_samples=int(params.get('subsample_n', 5000)),
-        knn_k=int(params.get('subsample_knn_k', 64)),
-        density_threshold_quantile=float(params.get('subsample_density_quantile', 0.025)),
-    )
-    valid_to_original = np.where(valid_x_mask)[0]
     nan = float('nan')
-    if sub_idx_in_valid.size:
-        kr = kernel_resid[sub_idx_in_valid]
-        mr = model_resid[sub_idx_in_valid]
-        finite = np.all(np.isfinite(kr), axis=1) & np.all(np.isfinite(mr), axis=1)
-        sub_idx_finite = sub_idx_in_valid[finite]
-        if finite.any():
-            gt_sub = full_gt[sub_idx_in_valid][finite]
-            yhat_sub = full_yhat[sub_idx_in_valid][finite]
-            x_sub = full_x[sub_idx_in_valid][finite]
-            kernel_pred_sub = kernel_pred_full[sub_idx_in_valid][finite]
-            sigma_sub = np.asarray(sigma_interp(x_sub))
+    if sub_idx_in_valid.size and sub_finite_mask.any():
+        sub_idx_finite = sub_idx_in_valid[sub_finite_mask]
+        gt_sub = full_gt[sub_idx_in_valid][sub_finite_mask]
+        yhat_sub = full_yhat[sub_idx_in_valid][sub_finite_mask]
+        kernel_pred_sub = kernel_pred_full[sub_idx_in_valid][sub_finite_mask]
 
-            var_gt = float(np.var(gt_sub))
-            mse_kernel = float(np.mean(kr[finite] ** 2))
-            mse_model = float(np.mean(mr[finite] ** 2))
-            kernel_rmse_latent = float(np.sqrt(mse_kernel))
-            model_rmse_latent = float(np.sqrt(mse_model))
-            ratio_rmse = (
-                model_rmse_latent / kernel_rmse_latent
-                if kernel_rmse_latent > 0 else nan
-            )
-            if var_gt > 0:
-                kernel_r_squared_latent = 1.0 - mse_kernel / var_gt
-                model_r_squared_latent = 1.0 - mse_model / var_gt
-            else:
-                kernel_r_squared_latent = model_r_squared_latent = nan
-            ratio_r_squared = (
-                model_r_squared_latent / kernel_r_squared_latent
-                if (np.isfinite(kernel_r_squared_latent) and kernel_r_squared_latent != 0)
-                else nan
-            )
+        kernel_resid_sub = gt_sub - kernel_pred_sub
+        model_resid_sub = gt_sub - yhat_sub
 
-            global_range = float(np.ptp(gt_sub)) if gt_sub.size else 1.0
-            kernel_nrmse_local = compute_nrmse_pointwise(
-                gt_sub, kernel_pred_sub, sigma_sub,
-                gt_mean_local=kernel_pred_sub, global_range=global_range,
-            )
-            model_nrmse_local = compute_nrmse_pointwise(
-                gt_sub, yhat_sub, sigma_sub,
-                gt_mean_local=kernel_pred_sub, global_range=global_range,
-            )
-            kratio = (
-                model_nrmse_local / kernel_nrmse_local
-                if (np.isfinite(kernel_nrmse_local) and kernel_nrmse_local > 0)
-                else nan
-            )
+        var_gt = float(np.var(gt_sub))
+        mse_kernel = float(np.mean(kernel_resid_sub ** 2))
+        mse_model = float(np.mean(model_resid_sub ** 2))
+        kernel_rmse_latent = float(np.sqrt(mse_kernel))
+        model_rmse_latent = float(np.sqrt(mse_model))
+        ratio_rmse = (
+            model_rmse_latent / kernel_rmse_latent
+            if kernel_rmse_latent > 0 else nan
+        )
+        if var_gt > 0:
+            kernel_r_squared_latent = 1.0 - mse_kernel / var_gt
+            model_r_squared_latent = 1.0 - mse_model / var_gt
         else:
-            kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
-            kernel_r_squared_latent = model_r_squared_latent = ratio_r_squared = nan
-            kernel_nrmse_local = model_nrmse_local = kratio = nan
+            kernel_r_squared_latent = model_r_squared_latent = nan
+        ratio_r_squared = (
+            model_r_squared_latent / kernel_r_squared_latent
+            if (np.isfinite(kernel_r_squared_latent) and kernel_r_squared_latent != 0)
+            else nan
+        )
+
+        sub_range = float(np.ptp(gt_sub)) if gt_sub.size else 1.0
+        kernel_nrmse_local = compute_nrmse_pointwise(
+            gt_sub, kernel_pred_sub, sigma_sub,
+            gt_mean_local=kernel_pred_sub, global_range=sub_range,
+        )
+        model_nrmse_local = compute_nrmse_pointwise(
+            gt_sub, yhat_sub, sigma_sub,
+            gt_mean_local=kernel_pred_sub, global_range=sub_range,
+        )
+        kratio = (
+            model_nrmse_local / kernel_nrmse_local
+            if (np.isfinite(kernel_nrmse_local) and kernel_nrmse_local > 0)
+            else nan
+        )
         subsample_indices = valid_to_original[sub_idx_finite].astype(np.intp)
     else:
         kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
@@ -557,6 +758,7 @@ def _calculate_grid_stats(
         'grid_yhat_mean_latent': np.asarray(yhat_mean),
         'grid_yhat_stdev_latent': np.asarray(yhat_stdev),
         'grid_n_eff': np.asarray(n_eff).ravel(),
+        'data_nrmse': ds['data_nrmse'],
     }, grid
 
 
@@ -824,19 +1026,41 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
         return aligned_predict_at, aligned_ground_truth
 
+    def _prediction_cache_signature(self) -> Optional[str]:
+        h = xxhash.xxh128()
+        h.update(b"v1.")
+        h.update(str(self.network_model.signature).encode())
+        for net in self.network_model.network:
+            try:
+                h.update(repr(net.to_recipe()).encode())
+            except Exception:
+                return None
+        assert isinstance(self._aligned_x, list)
+        for x in self._aligned_x:
+            a = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
+            h.update(repr(a.shape).encode())
+            h.update(a.tobytes())
+        params = {
+            'seed': self.seed,
+            'z_value': str(self.z_value),
+            'z_normal_mean': float(self.z_normal_mean),
+            'z_normal_std': float(self.z_normal_std),
+            'z_normal_clip': bool(self.z_normal_clip),
+            'disable_variational': bool(self.disable_variational),
+            'already_latent': bool(self.already_latent),
+            'device': str(self.device),
+        }
+        h.update(_json.dumps(params, sort_keys=True).encode())
+        return h.hexdigest()
+
     def compute_all_network_predictions(
         self,
         with_shared_params: Optional[pr.ParameterTree] = None,
         with_local_params: Optional[pr.ParameterTree] = None,
     ):
-        """compute predictions for all networks"""
-
         start_time = time.time()
-
-        # stack inputs from all networks
         assert isinstance(self._aligned_x, list)
         stacked_x = np.column_stack(self._aligned_x)
-
         effective_max_evals = len(self._aligned_x[0])
 
         predict_f = (
@@ -848,62 +1072,78 @@ class NetworkPrediction(GridStatsFields, DataSource):
         if self.verbose:
             logger.debug(f"computing predictions with model {self.network_model.signature}")
             logger.debug(
-                "prediction params: "
-                f"seed={self.seed}, disable_variational={self.disable_variational}, "
+                f"prediction params: seed={self.seed}, disable_variational={self.disable_variational}, "
                 f"z_value={self.z_value}, z_normal_mean={self.z_normal_mean}, "
                 f"z_normal_std={self.z_normal_std}, z_normal_clip={self.z_normal_clip}, "
                 f"device={self.device}"
             )
             logger.debug(f"effective_max_evals: {effective_max_evals}")
 
-        collect_in_idx = []
-        collect_out_idx = []
-        self._input_shapes = []
-        self._output_shapes = []
-        if self.collection_points is not None and len(self.collection_points) > 0:
-            for collection_point in self.collection_points:
+        collect_in_idx, collect_out_idx = [], []
+        self._input_shapes, self._output_shapes = [], []
+        if self.collection_points:
+            for cp in self.collection_points:
                 (in_idx, input_shapes), (out_idx, output_shapes) = (
-                    self.network_model.get_node_indices(
-                        collection_point.network_id,
-                        collection_point.node_id,
-                    )
+                    self.network_model.get_node_indices(cp.network_id, cp.node_id)
                 )
                 collect_in_idx.append(in_idx)
                 collect_out_idx.append(out_idx)
                 self._input_shapes.append(input_shapes)
                 self._output_shapes.append(output_shapes)
 
-        stacked_yhats, (self._collected_in, self._collected_out) = predict_f(
-            stacked_x,
-            key=self.seed,
-            z_value=self.z_value,
-            z_normal_mean=self.z_normal_mean,
-            z_normal_std=self.z_normal_std,
-            z_normal_clip=self.z_normal_clip,
-            disable_variational=self.disable_variational,
-            with_shared_params=with_shared_params,
-            with_local_params=with_local_params,
-            collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
-            collect_out_indices=np.concatenate(collect_out_idx).flatten()
-            if collect_out_idx
-            else None,
-            device=self.device,
+        def _run_predict_and_stats():
+            yhats, (cin, cout) = predict_f(
+                stacked_x,
+                key=self.seed,
+                z_value=self.z_value,
+                z_normal_mean=self.z_normal_mean,
+                z_normal_std=self.z_normal_std,
+                z_normal_clip=self.z_normal_clip,
+                disable_variational=self.disable_variational,
+                with_shared_params=with_shared_params,
+                with_local_params=with_local_params,
+                collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
+                collect_out_indices=np.concatenate(collect_out_idx).flatten() if collect_out_idx else None,
+                device=self.device,
+            )
+            outs = self.network_model.split_outputs_per_network(np.asarray(yhats), effective_max_evals)
+            self._process_prediction_results(outs, effective_max_evals)
+            self._collected_in = np.asarray(cin) if cin is not None else None
+            self._collected_out = np.asarray(cout) if cout is not None else None
+            self._network_stats = self._calculate_all_network_stats()
+            return {
+                'yhats': self._yhats,
+                'gtruths': self._gtruths,
+                'x': self._x,
+                'stats': self._network_stats,
+                'collected_in': self._collected_in,
+                'collected_out': self._collected_out,
+            }
+
+        cacheable = (
+            not _PREDICTION_CACHE_DISABLED
+            and with_shared_params is None
+            and with_local_params is None
+            and not self.collection_points
         )
+        sig = self._prediction_cache_signature() if cacheable else None
 
-        prediction_time = time.time() - start_time
-        logger.info(f"Network predictions completed in {prediction_time:.2f} seconds")
+        if sig is None:
+            _run_predict_and_stats()
+        else:
+            blob = get_cache(
+                gen_f=_run_predict_and_stats,
+                signature=sig,
+                cache_location=_PREDICTION_CACHE_DIR,
+            )
+            self._yhats = list(blob['yhats'])
+            self._gtruths = list(blob['gtruths'])
+            self._x = list(blob['x'])
+            self._network_stats = blob['stats']
+            self._collected_in = blob['collected_in']
+            self._collected_out = blob['collected_out']
 
-        # split the outputs by network
-        network_outputs = self.network_model.split_outputs_per_network(
-            stacked_yhats, effective_max_evals
-        )
-
-        self._process_prediction_results(network_outputs, effective_max_evals)
-
-        stats_start_time = time.time()
-        self._network_stats = self._calculate_all_network_stats()
-        stats_time = time.time() - stats_start_time
-        logger.info(f"Network statistics calculated in {stats_time:.2f} seconds")
+        logger.info(f"Network predictions+stats completed in {time.time() - start_time:.2f} seconds")
 
     def _process_prediction_results(self, network_outputs: List[NdArray], max_evals: int):
         """process and store prediction results"""
@@ -1114,6 +1354,26 @@ class NetworkPrediction(GridStatsFields, DataSource):
             )
 
         all_stats: List[Dict[str, Any] | None] = [None] * len(self.network_model.network)
+
+        # Bench-mode hook: dump the inputs to _calculate_single_network_stats and
+        # short-circuit. Not part of the production path — only fires when
+        # BIOCOMP_BENCH_CAPTURE is set in the environment.
+        _bench_capture = os.environ.get("BIOCOMP_BENCH_CAPTURE")
+        if _bench_capture:
+            import pickle
+            cache_data = {
+                "yhats": [t["yhat"] for t in tasks],
+                "gtruths": [t["gt"] for t in tasks],
+                "x": [t["x"] for t in tasks],
+                "rescaler": tasks[0]["rescaler"] if tasks else None,
+                "networks": list(self.network_model.network),
+                "names": [t["network_info"].get("network_name", f"net_{i}")
+                          for i, t in enumerate(tasks)],
+            }
+            with open(_bench_capture, "wb") as f:
+                pickle.dump(cache_data, f)
+            logger.info(f"BIOCOMP_BENCH_CAPTURE: dumped stats inputs to {_bench_capture}")
+            # do not exit; let stats run so we still get correct artifacts
 
         def process_and_log_stats(idx, task, result):
             all_stats[idx] = result

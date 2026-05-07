@@ -355,10 +355,15 @@ class NetworkModel(BaseModel):
     def update_params(self):
         """update parameters from model and initialize local parameters"""
         from jax.random import PRNGKey
+        from biocomp.context import CONTEXT_EMBEDDINGS, _codebook_means_path
 
         assert self._stack is not None
+        has_context = bool(CONTEXT_EMBEDDINGS) and all(
+            _codebook_means_path(ce.name) in self.model.shared_params
+            for ce in CONTEXT_EMBEDDINGS
+        )
         try:
-            init_params = self._stack.init(PRNGKey(0))
+            init_params = self._stack.init(PRNGKey(0), allow_create_context=has_context)
         except Exception as e:
             logger.error(f"error initializing stack: {e}")
             logger.error(f"networks: {self.network}")
