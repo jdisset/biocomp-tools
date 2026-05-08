@@ -405,6 +405,14 @@ class PlotJob(BaseModel):
         Literal['ray', 'none'],
         Arg(help='Parallel mode to use (multiprocess, ray, none)'),
     ] = 'ray'
+    # Optional NetworkPrediction handle. When set + nworkers>1, PlotJob
+    # mutates it: predict runs once in main, JAX-compiled state is dropped
+    # so the figure object pickles cleanly to loky workers, and stats are
+    # deferred so each worker computes its own network's stats lazily.
+    pred: Annotated[
+        Optional[NetworkPrediction],
+        Arg(help='NetworkPrediction handle for shard-by-network parallel mode'),
+    ] = None
 
     clear_figure_context_keys: Annotated[
         List[str], Arg(help='Clear these keys from the figure context')
@@ -506,6 +514,25 @@ class PlotJob(BaseModel):
             from joblib import Parallel, delayed
             import cloudpickle
 
+            # Shard-by-network: predict runs once in main (vmap'd JAX), stats
+            # are deferred so each worker computes its own network's stats
+            # lazily on data access. Drop JAX-compiled state since it's not
+            # picklable and workers don't need it (yhats are populated).
+            if self.pred is not None:
+                self.pred.defer_stats_compute = True
+                if self.pred._yhats is None:
+                    t_pre = time.time()
+                    self.pred.compute_all_network_predictions()
+                    logger.info(f"Pre-triggered predict in main ({time.time() - t_pre:.2f}s)")
+                # Drop JAX-compiled state — workers don't need the predictor
+                # (yhats are populated; stats KNN is pure numpy/usearch).
+                # `LoadedExecutable` inside `_batch_apply*` rejects pickle.
+                nm = self.pred.network_model
+                nm._batch_apply = None
+                nm._batch_apply_cpu = None
+                nm._batch_apply_gpu = None
+                logger.info(f"Stats deferred to workers")
+
             time_start = time.time()
 
             batch_idx = 0
@@ -542,10 +569,6 @@ class PlotJob(BaseModel):
                     )
                 ]
 
-                # for fig in constructed_figures:
-                    # _detach_lazy_plot_data(fig)
-                    # _convert_jax_to_numpy_inplace(fig)
-
                 # try parallel execution with fallback to sequential if pickling fails
                 parallel_figs, sequential_figs, sequential_indices = [], [], []
                 for i, fig in enumerate(constructed_figures):
@@ -559,7 +582,6 @@ class PlotJob(BaseModel):
 
                 results = [None] * len(constructed_figures)
 
-                # run picklable figures in parallel
                 if parallel_figs:
                     parallel_results = Parallel(n_jobs=self.nworkers, backend='loky')(
                         delayed(_run_figure_worker)(fig, overwrite)
@@ -575,7 +597,6 @@ class PlotJob(BaseModel):
                             results[i] = parallel_results[j]
                             j += 1
 
-                # run unpicklable figures sequentially
                 if sequential_figs:
                     logger.info(
                         f"Running {len(sequential_figs)} figures sequentially (not picklable)"
@@ -592,8 +613,7 @@ class PlotJob(BaseModel):
 
                 out_paths.extend(results)
 
-                time_batch_end = time.time()
-                logger.debug(f"Batch {batch_idx} completed in {time_batch_end - time_start:.2f}s")
+                logger.debug(f"Batch {batch_idx} completed in {time.time() - time_start:.2f}s")
 
                 fpaths = '\n  - ' + '\n  - '.join(r.path for r in results if r)
                 logger.debug(f"Generated {len(results)} figures:{fpaths}")
