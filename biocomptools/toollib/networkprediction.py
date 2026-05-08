@@ -47,14 +47,17 @@ def _cache_dir(env_var: str, default_subdir: str) -> Path:
     return Path(os.environ.get(env_var, os.path.expanduser(f"~/.cache/{default_subdir}")))
 
 
-def _cache_disabled(env_var: str) -> bool:
-    return os.environ.get(env_var, "").lower() in ("1", "true", "yes")
+def _env_flag(env_var: str, default: bool) -> bool:
+    val = os.environ.get(env_var)
+    if val is None:
+        return default
+    return val.lower() in ("1", "true", "yes")
 
 
 _DATA_KERNEL_CACHE_DIR = _cache_dir("BIOCOMP_DATA_KERNEL_CACHE_DIR", "biocomp_data_kernel")
-_DATA_KERNEL_CACHE_DISABLED = _cache_disabled("BIOCOMP_DATA_KERNEL_CACHE_DISABLE")
+_DATA_KERNEL_CACHE_DISABLED = _env_flag("BIOCOMP_DATA_KERNEL_CACHE_DISABLE", False)
 _PREDICTION_CACHE_DIR = _cache_dir("BIOCOMP_PREDICTION_CACHE_DIR", "biocomp_predictions")
-_PREDICTION_CACHE_DISABLED = _cache_disabled("BIOCOMP_PREDICTION_CACHE_DISABLE")
+_PREDICTION_CACHE_ENABLED = _env_flag("BIOCOMP_PREDICTION_CACHE_ENABLE", False)
 
 
 def _dks_save(data: Dict[str, Any], path: Path) -> None:
@@ -1121,7 +1124,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
             }
 
         cacheable = (
-            not _PREDICTION_CACHE_DISABLED
+            _PREDICTION_CACHE_ENABLED
             and with_shared_params is None
             and with_local_params is None
             and not self.collection_points
