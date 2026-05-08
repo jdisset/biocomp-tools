@@ -79,7 +79,7 @@ class HyperoptProgram(BaseHyperoptProgram):
     use_validation_loss: bool = False
     validation_set: NetworkSet | None = None
     n_validation_evals: int = 32000
-    validation_objective: str = "geomean_nre"
+    validation_objective: str = "geomean_nrmse"
     validation_enable_gridstats: bool = True
     validation_gridstats_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
     validation_gridstats_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
@@ -260,8 +260,6 @@ class HyperoptProgram(BaseHyperoptProgram):
             needs_gridstats = self.validation_enable_gridstats and self.validation_objective in (
                 "softmax_nrmse",
                 "geomean_nrmse",
-                "geomean_nre",
-                "powermean_nre",
             )
 
             logger.info(f"Preparing validation (objective={self.validation_objective})...")

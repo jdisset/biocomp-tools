@@ -98,7 +98,7 @@ def print_trial_summary(
     loss: float,
     stats: list[dict],
     names: list[str],
-    metric: str = 'noise_relative_error',
+    metric: str = 'grid_nrmse',
     show_barplot: bool = True,
     top_n: int = 30,
     best_stats: list[dict] | None = None,
@@ -241,14 +241,13 @@ def compute_loss_from_stats(
     stats: list[dict],
     objective: str,
     softmax_alpha: float = 5.0,
-    powermean_p: float = 2.0,
 ) -> float:
     """Compute scalar loss from network statistics.
 
     delegates to biocomp.metric_utils.compute_validation_objective
     """
     return compute_validation_objective(
-        stats, objective, softmax_alpha=softmax_alpha, powermean_p=powermean_p
+        stats, objective, softmax_alpha=softmax_alpha,
     )
 
 
@@ -258,14 +257,12 @@ class ValidationRunner:
     def __init__(
         self,
         predictor,  # NetworkPrediction
-        objective: str = "geomean_nre",
+        objective: str = "geomean_nrmse",
         softmax_alpha: float = 5.0,
-        powermean_p: float = 2.0,
     ):
         self.predictor = predictor
         self.objective = objective
         self.softmax_alpha = softmax_alpha
-        self.powermean_p = powermean_p
         self._batched_predict = None
 
     def compute_loss(self, params) -> float:
@@ -277,12 +274,12 @@ class ValidationRunner:
         except (IndexError, TypeError):
             single_params = params
         stats = self.predictor.get_network_stats(with_shared_params=single_params)
-        return compute_loss_from_stats(stats, self.objective, self.softmax_alpha, self.powermean_p)
+        return compute_loss_from_stats(stats, self.objective, self.softmax_alpha)
 
     def compute_loss_single(self, single_params) -> float:
         """Compute validation loss for already-single params."""
         stats = self.predictor.get_network_stats(with_shared_params=single_params)
-        return compute_loss_from_stats(stats, self.objective, self.softmax_alpha, self.powermean_p)
+        return compute_loss_from_stats(stats, self.objective, self.softmax_alpha)
 
     def compute_loss_with_stats(self, params) -> tuple[float, list[dict]]:
         """Compute validation loss and return per-network stats (using NetworkPrediction as source of truth)."""
@@ -295,7 +292,7 @@ class ValidationRunner:
 
         # use NetworkPrediction's canonical stats computation
         stats = self.predictor.get_network_stats(with_shared_params=single_params)
-        loss = compute_loss_from_stats(stats, self.objective, self.softmax_alpha, self.powermean_p)
+        loss = compute_loss_from_stats(stats, self.objective, self.softmax_alpha)
         return loss, stats
 
     def get_network_names(self) -> list[str]:
@@ -407,7 +404,7 @@ class ValidationRunner:
                     network_outputs = network_model.split_outputs_per_network(trial_out, n_samples)
                     stats = predictor.compute_stats_from_outputs(network_outputs)
                     loss = compute_loss_from_stats(
-                        stats, self.objective, self.softmax_alpha, self.powermean_p
+                        stats, self.objective, self.softmax_alpha
                     )
                     losses.append(loss)
                     if return_best_stats:
@@ -420,7 +417,7 @@ class ValidationRunner:
                 network_outputs = network_model.split_outputs_per_network(trial_out, n_samples)
                 stats = predictor.compute_stats_from_outputs(network_outputs)
                 loss = compute_loss_from_stats(
-                    stats, self.objective, self.softmax_alpha, self.powermean_p
+                    stats, self.objective, self.softmax_alpha
                 )
                 losses.append(loss)
                 if return_best_stats:

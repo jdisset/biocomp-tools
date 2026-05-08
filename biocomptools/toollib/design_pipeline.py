@@ -296,8 +296,6 @@ def build_design_result(
         lattice_grid=evaluated_design.lattice_grid,
         lattice_extent=evaluated_design.lattice_extent,
         lattice_resolution=evaluated_design.lattice_resolution,
-        design_nre=evaluated_design.design_nre,
-        baseline_nre=evaluated_design.baseline_nre,
         exp_x_data=evaluated_design.exp_x_data,
         fingerprint=fingerprint,
     )

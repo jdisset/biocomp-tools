@@ -18,7 +18,6 @@ GOOD_COLOR = "#28a745"
 BAD_COLOR = "#dc3545"
 RMSE_THRESHOLD = 0.1
 NRMSE_THRESHOLD = 1.0
-NRE_THRESHOLD = 1.5  # NRE < 1.5 is good (within 1.5x of noise floor)
 
 
 @dataclass
@@ -32,8 +31,6 @@ class BenchmarkItem:
     nrmse: Optional[float]
     snr: Optional[float]
     in_training: bool
-    data_nrmse: Optional[float] = None  # intrinsic noise floor (split-half)
-    nre: Optional[float] = None  # noise-relative error (nrmse / data_nrmse)
 
     @property
     def file_prefix(self) -> str:
@@ -181,7 +178,6 @@ class BenchmarkData(GridStatsFields, BaseModel):
         self._items = []
         all_nrmses = []
         all_snrs = []
-        all_nres = []
         for i, (gt, pred, stats) in enumerate(
             zip(items_to_plot, prediction_data, network_stats, strict=True)
         ):
@@ -189,14 +185,10 @@ class BenchmarkData(GridStatsFields, BaseModel):
             rmse = stats.get('grid_rmse') or stats.get('rmse')
             nrmse = stats.get('grid_nrmse')
             snr = stats.get('grid_snr')
-            data_nrmse = stats.get('data_nrmse')
-            nre = stats.get('noise_relative_error')
             if nrmse is not None and np.isfinite(nrmse):
                 all_nrmses.append(nrmse)
             if snr is not None and np.isfinite(snr):
                 all_snrs.append(snr)
-            if nre is not None and np.isfinite(nre) and nre > 0:
-                all_nres.append(nre)
 
             # Ensure gt_data uses the same x points as pred_data (which may be truncated by max_evals)
             pred_n = len(pred.x)
@@ -223,8 +215,6 @@ class BenchmarkData(GridStatsFields, BaseModel):
                     nrmse=nrmse,
                     snr=snr,
                     in_training=net_name in training_names,
-                    data_nrmse=data_nrmse,
-                    nre=nre,
                 )
             )
 
@@ -242,11 +232,6 @@ class BenchmarkData(GridStatsFields, BaseModel):
             }
         if all_snrs:
             self._aggregate_stats['mean_snr'] = float(np.mean(all_snrs))
-        if all_nres:
-            arr_nre = np.array(all_nres)
-            self._aggregate_stats['mean_nre'] = float(np.mean(arr_nre))
-            self._aggregate_stats['geomean_nre'] = float(gmean(arr_nre))
-            self._aggregate_stats['powermean_nre'] = float(np.sqrt(np.mean(arr_nre**2)))
 
     @property
     def loaded_model(self):
@@ -315,26 +300,6 @@ class BenchmarkData(GridStatsFields, BaseModel):
     def training_set_name(self) -> str:
         return self._model.metadata.get('training_set', {}).get('name', 'Unknown')
 
-    @property
-    def all_nres(self) -> list[float]:
-        return [
-            item.nre
-            for item in self._items
-            if item.nre is not None and np.isfinite(item.nre) and item.nre > 0
-        ]
-
-    @property
-    def mean_nre(self) -> Optional[float]:
-        return self._aggregate_stats.get('mean_nre')
-
-    @property
-    def geomean_nre(self) -> Optional[float]:
-        return self._aggregate_stats.get('geomean_nre')
-
-    @property
-    def powermean_nre(self) -> Optional[float]:
-        return self._aggregate_stats.get('powermean_nre')
-
     _MAX_AGGREGATE_POINTS: int = 50000
 
     @property
@@ -395,32 +360,9 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
         bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8),
     )
 
-    # Main metrics display - NRE as primary metric (falls back to nRMSE if unavailable)
+    # Main metrics display - geomean nRMSE
     y_pos = 0.75
-    if bench.powermean_nre is not None:
-        color = GOOD_COLOR if bench.powermean_nre < NRE_THRESHOLD else BAD_COLOR
-        ax.text(
-            0.32,
-            y_pos,
-            f"{bench.powermean_nre:.2f}x",
-            transform=ax.transAxes,
-            fontsize=28,
-            va='center',
-            ha='center',
-            fontweight='bold',
-            color=color,
-        )
-        ax.text(
-            0.32,
-            y_pos - 0.12,
-            "RMS NRE (p=2)",
-            transform=ax.transAxes,
-            fontsize=10,
-            va='center',
-            ha='center',
-            color='gray',
-        )
-    elif bench.geomean_nrmse is not None:
+    if bench.geomean_nrmse is not None:
         color = GOOD_COLOR if bench.geomean_nrmse < NRMSE_THRESHOLD else BAD_COLOR
         ax.text(
             0.32,
@@ -487,10 +429,9 @@ def render_summary_header(ax: matplotlib.axes.Axes, bench: BenchmarkData, **_kwa
         color='gray',
     )
 
-    # Bar plot - use NRE if available, otherwise nRMSE
-    bar_data = bench.all_nres if bench.all_nres else bench.all_nrmses
-    bar_label = 'NRE' if bench.all_nres else 'nRMSE'
-    bar_threshold = NRE_THRESHOLD if bench.all_nres else NRMSE_THRESHOLD
+    bar_data = bench.all_nrmses
+    bar_label = 'nRMSE'
+    bar_threshold = NRMSE_THRESHOLD
     if bar_data and bench.network_names:
         inset = ax.inset_axes([0.5, 0.1, 0.48, 0.8])
         colors = [IN_TRAINING_COLOR if it else NOT_IN_TRAINING_COLOR for it in bench.is_in_training]
@@ -534,37 +475,9 @@ def render_metrics_panel(
         )
     )
 
-    # Get average NRE for comparison (use powermean if available)
-    avg_nre = bench.powermean_nre if bench else None
     avg_nrmse = bench.mean_nrmse if bench else None
 
-    # NRE as primary metric if available, otherwise nRMSE
-    if item.nre is not None and np.isfinite(item.nre):
-        ncolor = (
-            GOOD_COLOR if (avg_nre and item.nre < avg_nre) else (BAD_COLOR if avg_nre else '#333')
-        )
-        ax.text(
-            0.5,
-            0.78,
-            f"{item.nre:.2f}x",
-            transform=ax.transAxes,
-            fontsize=18,
-            va='center',
-            ha='center',
-            fontweight='bold',
-            color=ncolor,
-        )
-        ax.text(
-            0.5,
-            0.65,
-            "NRE",
-            transform=ax.transAxes,
-            fontsize=7,
-            va='center',
-            ha='center',
-            color='gray',
-        )
-    elif item.nrmse is not None:
+    if item.nrmse is not None:
         ncolor = (
             GOOD_COLOR
             if (avg_nrmse and item.nrmse < avg_nrmse)
@@ -605,20 +518,6 @@ def render_metrics_panel(
             ha='center',
             family='monospace',
             color='#555',
-        )
-        y_offset -= 0.12
-
-    if item.data_nrmse is not None and np.isfinite(item.data_nrmse):
-        ax.text(
-            0.5,
-            y_offset,
-            f"floor={item.data_nrmse:.3f}",
-            transform=ax.transAxes,
-            fontsize=8,
-            va='center',
-            ha='center',
-            family='monospace',
-            color='#888',
         )
         y_offset -= 0.12
 

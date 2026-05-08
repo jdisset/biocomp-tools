@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 GOOD_COLOR = "#28a745"
 BAD_COLOR = "#dc3545"
 NEUTRAL_COLOR = "#333"
-BASELINE_COLOR = "#6c757d"
 
 
 @dataclass
@@ -47,8 +46,6 @@ class DesignResult:
     lattice_grid: Any | None  # np.ndarray (yres, xres) for pixel-perfect rendering
     lattice_extent: tuple[float, float, float, float] | None  # (xmin, xmax, ymin, ymax)
     lattice_resolution: tuple[int, int] | None  # (xres, yres)
-    design_nre: float | None
-    baseline_nre: float | None
     exp_x_data: PlotData | None = None
     fingerprint: str | None = None
 
@@ -76,21 +73,8 @@ class DesignResult:
             lattice_grid=ev.lattice_grid,
             lattice_extent=ev.lattice_extent,
             lattice_resolution=ev.lattice_resolution,
-            design_nre=ev.design_nre,
-            baseline_nre=ev.baseline_nre,
             exp_x_data=ev.exp_x_data,
         )
-
-
-def nre_color(design_nre: float | None, baseline_nre: float | None) -> str:
-    """Determine color for NRE display based on quality."""
-    if design_nre is None:
-        return NEUTRAL_COLOR
-    if baseline_nre is not None and design_nre <= baseline_nre * 1.5:
-        return GOOD_COLOR
-    if design_nre < 5.0:
-        return NEUTRAL_COLOR
-    return BAD_COLOR
 
 
 def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwargs):
@@ -135,46 +119,7 @@ def render_design_metrics(ax: matplotlib.axes.Axes, result: DesignResult, **_kwa
         color='gray',
     )
 
-    if result.has_original_network:
-        nre_y = 0.60
-        color = nre_color(result.design_nre, result.baseline_nre)
-        if result.design_nre is not None:
-            ax.text(
-                0.5,
-                nre_y,
-                f"NRE: {result.design_nre:.2f}",
-                transform=ax.transAxes,
-                fontsize=14,
-                va='center',
-                ha='center',
-                fontweight='bold',
-                color=color,
-            )
-        else:
-            ax.text(
-                0.5,
-                nre_y,
-                "NRE: N/A",
-                transform=ax.transAxes,
-                fontsize=14,
-                va='center',
-                ha='center',
-                color='#aaa',
-            )
-        if result.baseline_nre is not None:
-            ax.text(
-                0.5,
-                nre_y - 0.10,
-                f"(baseline: {result.baseline_nre:.2f})",
-                transform=ax.transAxes,
-                fontsize=9,
-                va='center',
-                ha='center',
-                color=BASELINE_COLOR,
-            )
-        info_y = 0.38
-    else:
-        info_y = 0.55
+    info_y = 0.55
 
     ax.text(
         0.5,

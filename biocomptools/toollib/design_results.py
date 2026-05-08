@@ -34,17 +34,6 @@ class LossComponents:
 
 
 @dataclass
-class NREMetrics:
-    """NRE-specific metrics for design evaluation."""
-
-    design_nre: float | None = None
-    baseline_nre: float | None = None
-    design_nrmse: float | None = None
-    baseline_nrmse: float | None = None
-    data_nrmse: float | None = None
-
-
-@dataclass
 class DesignMetrics:
     """Complete design result metrics."""
 
@@ -58,7 +47,6 @@ class DesignMetrics:
     regression: RegressionStats
     distribution: DistributionStats
     recipe_summary: dict = field(default_factory=dict)
-    nre: NREMetrics | None = None
     fingerprint: str | None = None
 
     def to_dict(self) -> dict:
@@ -73,7 +61,6 @@ class DesignMetrics:
             'regression': asdict(self.regression),
             'distribution': asdict(self.distribution),
             'recipe_summary': self.recipe_summary,
-            **(({'nre': asdict(self.nre)}) if self.nre else {}),
             **(({'fingerprint': self.fingerprint}) if self.fingerprint else {}),
         }
 
@@ -152,7 +139,6 @@ def compute_design_metrics(
     step: int,
     loss_components: dict | None = None,
     recipe_info: dict | None = None,
-    nre_metrics: NREMetrics | None = None,
     fingerprint: str | None = None,
 ) -> DesignMetrics:
     """Create DesignMetrics from evaluation data."""
@@ -174,7 +160,6 @@ def compute_design_metrics(
         regression=RegressionStats.compute(y_true, y_pred),
         distribution=DistributionStats.compute(y_true, y_pred),
         recipe_summary=recipe_info or {},
-        nre=nre_metrics,
         fingerprint=fingerprint,
     )
 

@@ -1019,8 +1019,6 @@ class DesignProgram(BaseOptimizationProgram):
                         'network_name': getattr(inp.network, 'name', None),
                         'network_inputs': inp.network.get_inverted_input_proteins(),
                         'original_network_inputs': original_input_proteins,
-                        'design_nre': ev.design_nre,
-                        'baseline_nre': ev.baseline_nre,
                     },
                     output_dir=str(design_dir),
                     mode="design",

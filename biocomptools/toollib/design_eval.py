@@ -1,4 +1,4 @@
-"""Design evaluation utilities - batched prediction and NRE computation.
+"""Design evaluation utilities - batched prediction.
 
 Single source of truth for all design evaluation. All networks are batched into
 ONE NetworkModel to avoid repeated JIT compilation (~25s savings per batch).
@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from biocomp.plotutils import PlotData
-from biocomp.design_targets import DataTarget
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.design_data import prepare_target_data
 
@@ -54,14 +53,12 @@ class EvaluatedDesign:
     lattice_grid: np.ndarray | None  # (yres, xres) for pixel-perfect rendering
     lattice_extent: tuple[float, float, float, float] | None  # (xmin, xmax, ymin, ymax)
     lattice_resolution: tuple[int, int] | None  # (xres, yres)
-    design_nre: float | None
-    baseline_nre: float | None
     exp_x_data: PlotData | None = None
     is_valid: bool = True
 
 
 class DesignEvaluator:
-    """Batched design evaluation - single source of truth for predictions and NRE."""
+    """Batched design evaluation - single source of truth for predictions."""
 
     def __init__(self, model: Any, max_evals: int = 50000, fail_fast: bool = True):
         assert model is not None, "model required for evaluation"
@@ -83,7 +80,7 @@ class DesignEvaluator:
         if not valid_inputs:
             return [self._make_invalid_result(inp) for inp in inputs]
 
-        precomputed, baseline_cache = self._batch_compute(valid_inputs)
+        precomputed = self._batch_compute(valid_inputs)
 
         results = []
         for i, inp in enumerate(inputs):
@@ -95,13 +92,11 @@ class DesignEvaluator:
                     results.append(self._make_invalid_result(inp))
                     continue
                 pred_data = precomputed[key]['pred_data']
-                design_nre = precomputed[key]['design_nre']
                 exp_x_data = precomputed[key].get('exp_x_data')
                 assert exp_x_data is not None, (
                     f"exp_x_data missing for {inp.target_name} "
                     + f"(key has: {list(precomputed[key].keys())})"
                 )
-                baseline_nre = self._get_baseline_nre(inp.target, baseline_cache)
                 gt_data = self._compute_gt_data(inp)
                 lattice_data, lattice_grid, lattice_extent, lattice_resolution = (
                     self._compute_lattice_data(inp)
@@ -116,8 +111,6 @@ class DesignEvaluator:
                         lattice_grid=lattice_grid,
                         lattice_extent=lattice_extent,
                         lattice_resolution=lattice_resolution,
-                        design_nre=design_nre,
-                        baseline_nre=baseline_nre,
                         exp_x_data=exp_x_data,
                     )
                 )
@@ -125,8 +118,8 @@ class DesignEvaluator:
 
     def _batch_compute(
         self, valid_inputs: list[tuple[int, DesignInput]]
-    ) -> tuple[dict[tuple, dict], dict[int, float | None]]:
-        """Batch compute predictions and NREs for all valid inputs."""
+    ) -> dict[tuple, dict]:
+        """Batch compute predictions for all valid inputs."""
         from biocomptools.modelmodel import NetworkModel
         from biocomptools.toollib.networkprediction import NetworkPrediction
 
@@ -134,24 +127,21 @@ class DesignEvaluator:
         logger.info(f"Batching predictions for {n} designs...")
         start = time.time()
 
-        networks, predict_at, ground_truth, keys = [], [], [], []
+        networks, predict_at, keys = [], [], []
         for _, inp in valid_inputs:
             td = prepare_target_data(inp.target, max_samples=self.max_evals, seed=42)
             networks.append(inp.network)
             predict_at.append(td.X)
-            ground_truth.append(td.reshape_Y_for_prediction())
             keys.append((inp.target_name, id(inp.network)))
 
-        has_gt = any(gt is not None for gt in ground_truth)
         network_model = NetworkModel(model=self.model, network=networks)
 
         predictor = NetworkPrediction(
             predict_at=predict_at,
-            ground_truth=ground_truth if has_gt else None,
             max_evals=self.max_evals,
             network_model=network_model,
             already_latent=True,
-            enable_gridstats=has_gt,
+            enable_gridstats=False,
             device='gpu',
             verbose=False,
             skip_input_reorder=True,  # design: X was passed positionally during optimization
@@ -159,8 +149,6 @@ class DesignEvaluator:
         )
 
         preds = predictor.get_data(rescale_latent=True)
-        stats = predictor.get_network_stats() if has_gt else None
-
         assert len(preds) == n, f"prediction count {len(preds)} != {n}"
 
         precomputed = {}
@@ -171,8 +159,7 @@ class DesignEvaluator:
                 input_names=[f'X{j + 1}' for j in range(pred.x.shape[1])],
                 output_name='Y',
             )
-            nre = stats[i].get('noise_relative_error') if stats else None
-            precomputed[keys[i]] = {'pred_data': pred_data, 'design_nre': nre}
+            precomputed[keys[i]] = {'pred_data': pred_data}
 
         from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
@@ -203,64 +190,7 @@ class DesignEvaluator:
 
         logger.info(f"Batched {n} predictions (incl. exp X) in {time.time() - start:.2f}s")
 
-        baseline_cache = self._batch_compute_baselines(valid_inputs)
-        return precomputed, baseline_cache
-
-    def _batch_compute_baselines(
-        self, valid_inputs: list[tuple[int, DesignInput]]
-    ) -> dict[int, float | None]:
-        """Batch compute baseline NREs for original networks."""
-        from biocomptools.modelmodel import NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction
-
-        groups: dict[int, tuple] = {}
-        for _, inp in valid_inputs:
-            if not isinstance(inp.target, DataTarget) or inp.target.original_network is None:
-                continue
-            net_key = id(inp.target.original_network)
-            if net_key not in groups:
-                groups[net_key] = (inp.target.original_network, inp.target)
-
-        if not groups:
-            return {}
-
-        items = list(groups.items())
-        networks = [item[1][0] for item in items]
-        targets = [item[1][1] for item in items]
-        n = len(networks)
-
-        logger.info(f"Computing baseline NRE for {n} original networks...")
-        start = time.time()
-
-        network_model = NetworkModel(model=self.model, network=networks)
-        predict_at, ground_truth = [], []
-        for _net, target in zip(networks, targets, strict=True):
-            td = prepare_target_data(target, max_samples=self.max_evals, seed=42)
-            predict_at.append(td.X)
-            ground_truth.append(td.reshape_Y_for_prediction())
-
-        predictor = NetworkPrediction(
-            predict_at=predict_at,
-            ground_truth=ground_truth,
-            max_evals=self.max_evals,
-            network_model=network_model,
-            already_latent=True,
-            enable_gridstats=True,
-            device='gpu',
-            verbose=False,
-            skip_input_reorder=True,  # baseline: preserve positional axis mapping
-        )
-        stats = predictor.get_network_stats()
-        assert stats and len(stats) == n
-
-        result = {items[i][0]: stats[i].get('noise_relative_error') for i in range(n)}
-        logger.info(f"Baseline NRE computed in {time.time() - start:.2f}s")
-        return result
-
-    def _get_baseline_nre(self, target: Any, cache: dict[int, float | None]) -> float | None:
-        if not isinstance(target, DataTarget) or target.original_network is None:
-            return None
-        return cache.get(id(target.original_network))
+        return precomputed
 
     def _compute_gt_data(self, inp: DesignInput) -> PlotData:
         """Compute ground truth data for plotting."""
@@ -314,8 +244,6 @@ class DesignEvaluator:
             lattice_grid=None,
             lattice_extent=None,
             lattice_resolution=None,
-            design_nre=None,
-            baseline_nre=None,
             exp_x_data=empty,
             is_valid=False,
         )

@@ -12,7 +12,6 @@ from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.design_results import (
     DesignResultsManager,
     compute_design_metrics,
-    NREMetrics,
 )
 from biocomptools.toollib.design_eval import is_valid_network, EvaluatedDesign
 from biocomptools.toollib.design_pipeline import (
@@ -295,22 +294,6 @@ class DesignSummaryLogger(Logger):
 
         logger.debug(f"  [{inp.target_name} rank {inp.rank}] Fingerprint: {fingerprint}")
 
-        # create NRE metrics
-        nre_metrics = (
-            NREMetrics(
-                design_nre=ev.design_nre,
-                baseline_nre=ev.baseline_nre,
-            )
-            if ev.design_nre is not None
-            else None
-        )
-
-        if ev.design_nre is not None:
-            baseline_str = f" (baseline: {ev.baseline_nre:.2f})" if ev.baseline_nre else ""
-            logger.info(
-                f"  [{inp.target_name} rank {inp.rank}] Design NRE: {ev.design_nre:.2f}{baseline_str}"
-            )
-
         # compute and save metrics
         metrics = compute_design_metrics(
             y_true,
@@ -322,7 +305,6 @@ class DesignSummaryLogger(Logger):
             info['net_id'],
             inp.rank,
             info['step'],
-            nre_metrics=nre_metrics,
             fingerprint=fingerprint,
         )
         metrics.to_json(rank_dir / 'metrics.json')

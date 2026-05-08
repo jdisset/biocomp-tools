@@ -22,9 +22,6 @@ from biocomp.metric_utils import (
     grid_kl_divergence as compute_grid_kl,
     compute_nrmse,
     compute_nrmse_pointwise,
-    noise_relative_error as compute_nre,
-    SPLIT_HALF_SUBSET_SIZE,
-    SPLIT_HALF_N_BOOTSTRAPS,
     GridStatsFields,
 )
 from pathlib import Path
@@ -291,95 +288,6 @@ def _kernel_smoother_lattice(
     return mean, stdev, n_eff, (indices, norm_weights)
 
 
-def _compute_split_half_nrmse(
-    latent_x: NdArray,
-    latent_gt: NdArray,
-    params: Dict[str, Any],
-    n_bootstraps: int = SPLIT_HALF_N_BOOTSTRAPS,
-    seed: int = 42,
-    grid: NdArray | None = None,
-    grid_valid_mask: NdArray | None = None,
-) -> float:
-    """Bootstrapped split-half nRMSE over the lattice.
-
-    Two independent same-size resamples produce two kernel smoothers; the
-    nRMSE between them estimates the irreducible noise floor.
-
-    ``grid_valid_mask`` (optional): boolean mask over the grid points; cells
-    marked False are skipped before the kernel queries.
-    """
-    from biocomp.plotting.knn_utils_np import make_tree
-
-    rng = np.random.RandomState(seed)
-    latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
-
-    valid_mask = np.all(np.isfinite(latent_x), axis=1) & np.all(np.isfinite(latent_gt), axis=1)
-    latent_x = np.asarray(latent_x[valid_mask])
-    latent_gt = np.asarray(latent_gt[valid_mask])
-    n_points = len(latent_x)
-    if n_points < 200:
-        return np.nan
-
-    if grid is None:
-        grid = make_hypercube(
-            latent_x.shape[1],
-            res=params['hypercube_res'],
-            xmin=params['hypercube_min'],
-            xmax=params['hypercube_max'],
-        )
-    if grid_valid_mask is not None:
-        m = np.asarray(grid_valid_mask).ravel()
-        if m.shape[0] == grid.shape[0] and m.any():
-            grid = grid[m]
-
-    subset_size = min(SPLIT_HALF_SUBSET_SIZE, n_points)
-    k = params['k']
-    min_points_param = params['min_points']
-    max_radius = params['radius']
-
-    global_var = float(np.var(latent_gt))
-    global_range = float(np.ptp(latent_gt))
-    PRIOR_STRENGTH = 100.0
-    ROBUST_EPSILON = max(0.01, 0.01 * global_range)
-    WEIGHT_CAP = 0.1 * k
-
-    scores = []
-    for _ in range(n_bootstraps):
-        idx_a = rng.choice(n_points, size=subset_size, replace=True)
-        idx_b = rng.choice(n_points, size=subset_size, replace=True)
-        x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
-        x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
-
-        tree_a = make_tree(x_a)
-        tree_b = make_tree(x_b)
-
-        mean_a, var_a, n_eff_a = _knn_mean_var_neff(tree_a, grid, y_a, k, min_points_param, max_radius)
-        mean_b, var_b, n_eff_b = _knn_mean_var_neff(tree_b, grid, y_b, k, min_points_param, max_radius)
-
-        pooled_var = (var_a + var_b) / 2.0
-        sq_error = (mean_a - mean_b) ** 2
-
-        n_eff_pooled = (n_eff_a + n_eff_b) / 2.0
-        smoothed_var = (pooled_var * n_eff_pooled + global_var * PRIOR_STRENGTH) / (
-            n_eff_pooled + PRIOR_STRENGTH
-        )
-        safe_denom = np.maximum(np.sqrt(smoothed_var), ROBUST_EPSILON)
-        norm_sq_error = sq_error / (safe_denom ** 2)
-        capped_weights = np.broadcast_to(
-            np.minimum(n_eff_pooled, WEIGHT_CAP), norm_sq_error.shape,
-        )
-
-        weights_flat = capped_weights.ravel()
-        norm_sq_flat = norm_sq_error.ravel()
-        mask = np.isfinite(norm_sq_flat) & (weights_flat > 0)
-        if np.any(mask):
-            nrmse = np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask]))
-            if np.isfinite(nrmse):
-                scores.append(float(nrmse))
-
-    return float(np.mean(scores)) if scores else np.nan
-
-
 def validate_predict_at(v: Any) -> List[NdArray]:
     """convert single numpy array to list of arrays"""
     if isinstance(v, NdArray):
@@ -481,10 +389,6 @@ def _calculate_single_network_stats(
                 latent_yhat, latent_gt, latent_x, gridstats_params
             )
             network_stats.update(grid_stats)
-            data_nrmse = float(grid_stats['data_nrmse'])
-            network_stats['noise_relative_error'] = compute_nre(
-                grid_stats['grid_nrmse'], data_nrmse
-            )
 
     return network_stats
 
@@ -498,7 +402,7 @@ def _data_kernel_signature(latent_x: NdArray, latent_gt: NdArray, params: Dict[s
     when changing what's cached.
     """
     h = xxhash.xxh128()
-    h.update(b"v1.")
+    h.update(b"v2.")
     x = np.ascontiguousarray(latent_x, dtype=np.float32)
     g = np.ascontiguousarray(latent_gt, dtype=np.float32)
     h.update(repr(x.shape).encode())
@@ -576,13 +480,6 @@ def _compute_data_kernel_state(
     global_var = float(np.var(deduped_gt)) if deduped_gt.size else 1.0
     global_range = float(np.ptp(deduped_gt)) if deduped_gt.size else 1.0
 
-    grid_n_eff_arr = np.asarray(n_eff)
-    grid_valid_mask = (grid_n_eff_arr > 0) if n_eff is not None else None
-    data_nrmse = _compute_split_half_nrmse(
-        latent_x, latent_gt_2d, params,
-        grid=grid, grid_valid_mask=grid_valid_mask,
-    )
-
     return {
         'valid_x_mask': valid_x_mask,
         'unique_idx': unique_idx,
@@ -601,7 +498,6 @@ def _compute_data_kernel_state(
         'valid_to_original': valid_to_original,
         'global_var': global_var,
         'global_range': global_range,
-        'data_nrmse': data_nrmse,
     }
 
 
@@ -753,7 +649,6 @@ def _calculate_grid_stats(
         'grid_yhat_mean_latent': np.asarray(yhat_mean),
         'grid_yhat_stdev_latent': np.asarray(yhat_stdev),
         'grid_n_eff': np.asarray(n_eff).ravel(),
-        'data_nrmse': ds['data_nrmse'],
     }, grid
 
 
