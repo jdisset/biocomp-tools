@@ -1,6 +1,7 @@
 ## {{{                          --     imports     --
 from typing import Any, List, Dict, Optional, Annotated
 import matplotlib as mpl
+import os
 from dracon.draconstructor import resolve_all_lazy
 from biocomp.datautils import DataRescaler
 from biocomp.utils import PartialFunction
@@ -14,6 +15,13 @@ from biocomptools.trainutils import make_json_ready
 from biocomp.tracing import is_plot_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                        --     plot config     --
@@ -284,23 +292,25 @@ class Figure(BaseModel):
     def _run_mpl(self, overwrite: bool = True, finalize: bool = True):
         with mpl.rc_context(rc=self.plot_config.rc_context):
             metadata = dict(self.figure_spec.metadata) if self.figure_spec.metadata else {}
-            metadata["plot_tasks"] = []
+            embed_plot_tasks = _env_flag("BIOCOMP_EMBED_PLOT_TASK_METADATA", False)
+            embed_grid_data = _env_flag("BIOCOMP_EMBED_GRID_DATA", False)
+            if embed_plot_tasks:
+                metadata["plot_tasks"] = []
+            all_grid_data = []
             for i, pt in enumerate(self._ptasks):
                 try:
                     resolve_all_lazy(pt)
                     pt_metadata = pt.run()
-                    metadata["plot_tasks"].append(pt_metadata)
+                    gd = pt_metadata.pop("grid_data", None)
+                    if embed_grid_data and gd:
+                        all_grid_data.extend(gd)
+                    if embed_plot_tasks:
+                        metadata["plot_tasks"].append(pt_metadata)
                 except Exception as e:
                     logger.error(f"Error running plot task {i}: {e}")
                     logger.exception(e)
                     continue
 
-            # collect and serialize grid data from all tasks into one blob
-            all_grid_data = []
-            for pt_meta in metadata.get("plot_tasks", []):
-                gd = pt_meta.pop("grid_data", None)
-                if gd:
-                    all_grid_data.extend(gd)
             if all_grid_data:
                 from biocomp.plotting.plotting_smooth import grid_data_to_b64
 
