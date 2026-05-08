@@ -162,17 +162,14 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     followed by normalization and get_knn_mean_and_variance.
     Returns (mean, variance, n_eff) without intermediate weight arrays.
 
-    Heavy-grid optimization: rows with fewer than ``min_points`` valid neighbors
-    return NaN regardless of weights, so we skip the (m, k, p) gather + reductions
-    on those rows. For bootstrap-on-3D-grid this is a 30x+ speedup since most
-    bootstrap subsamples have very few valid cells on a 64^3 lattice.
+    Skips rows below ``min_points`` valid neighbors (NaN in any case) — large win
+    on 3D lattices where most cells are empty.
     """
     eps = 1e-12
-    from biocomp.plotting.knn_utils_np import KNN_WORKERS
+    from biocomp.plotting.knn_utils_np import KNN_WORKERS, _query
     n_grid = grid.shape[0]
-    distances, indices = tree.query(grid, k=k, workers=KNN_WORKERS)
+    distances, indices = _query(tree, grid, k=k, workers=KNN_WORKERS)
     finite_mask = np.isfinite(distances)
-    # max along axis=1, ignoring -inf entries; same as max over finite entries
     max_finite = np.where(finite_mask, distances, -np.inf).max(axis=1)
 
     if max_radius is not None:
@@ -309,13 +306,9 @@ def _compute_split_half_nrmse(
     nRMSE between them estimates the irreducible noise floor.
 
     ``grid_valid_mask`` (optional): boolean mask over the grid points; cells
-    marked False are skipped before the kernel queries. The metric is
-    weight-averaged over surviving cells, so dropping cells the full-data
-    smoother already had no neighbors for is exact (those cells contribute
-    zero weight anyway). Big win for high-dim cubes where most cells are
-    empty (3D: ~95% empty for typical data).
+    marked False are skipped before the kernel queries.
     """
-    from scipy.spatial import cKDTree
+    from biocomp.plotting.knn_utils_np import make_tree
 
     rng = np.random.RandomState(seed)
     latent_gt = latent_gt.reshape(-1, 1) if latent_gt.ndim == 1 else latent_gt
@@ -357,9 +350,8 @@ def _compute_split_half_nrmse(
         x_a, y_a = latent_x[idx_a], latent_gt[idx_a]
         x_b, y_b = latent_x[idx_b], latent_gt[idx_b]
 
-        # cKDTree directly: data is already finite-filtered above.
-        tree_a = cKDTree(x_a)
-        tree_b = cKDTree(x_b)
+        tree_a = make_tree(x_a)
+        tree_b = make_tree(x_b)
 
         mean_a, var_a, n_eff_a = _knn_mean_var_neff(tree_a, grid, y_a, k, min_points_param, max_radius)
         mean_b, var_b, n_eff_b = _knn_mean_var_neff(tree_b, grid, y_b, k, min_points_param, max_radius)
