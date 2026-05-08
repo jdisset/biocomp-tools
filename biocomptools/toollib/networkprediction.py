@@ -742,6 +742,12 @@ class NetworkPrediction(GridStatsFields, DataSource):
 
     n_stats_workers: int = 8  # number of workers for parallel processing of statistics
 
+    # When True, _run_predict_and_stats only runs predict; stats are computed
+    # lazily per-network on first `get_network_stats(network_idx)` access.
+    # Disables the predict+stats blob cache (predict-only caching is a future
+    # optimisation; predict alone is cheap).
+    defer_stats_compute: bool = False
+
     verbose: bool = False  # print prediction statistics to the console
 
     _yhats: Optional[List[NdArray]] = None
@@ -1000,7 +1006,10 @@ class NetworkPrediction(GridStatsFields, DataSource):
             self._process_prediction_results(outs, effective_max_evals)
             self._collected_in = np.asarray(cin) if cin is not None else None
             self._collected_out = np.asarray(cout) if cout is not None else None
-            self._network_stats = self._calculate_all_network_stats()
+            if self.defer_stats_compute:
+                self._network_stats = [None] * len(self.network_model.network)
+            else:
+                self._network_stats = self._calculate_all_network_stats()
             return {
                 'yhats': self._yhats,
                 'gtruths': self._gtruths,
@@ -1015,6 +1024,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
             and with_shared_params is None
             and with_local_params is None
             and not self.collection_points
+            and not self.defer_stats_compute
         )
         sig = self._prediction_cache_signature() if cacheable else None
 
@@ -1120,13 +1130,12 @@ class NetworkPrediction(GridStatsFields, DataSource):
             if self.verbose:
                 logger.info(f"dep_output_pos: {dependent_output_pos}")
 
-            stats = self.get_network_stats()
-            assert isinstance(stats, list) and (len(stats) == len(self.network_model.network))
+            stat = self.get_network_stats(network_idx=network_idx)
             # Drop array-valued grid overlays from the embedded plot metadata —
             # they're consumed by data-holder helpers via `get_network_stats()`
             # directly and don't belong in the JSON-bound figure subject blob.
             pdata.metadata['prediction_stats'] = {
-                k: v for k, v in stats[network_idx].items()
+                k: v for k, v in stat.items()
                 if not isinstance(v, np.ndarray)
             }
 
@@ -1197,51 +1206,42 @@ class NetworkPrediction(GridStatsFields, DataSource):
             )
             logger.info(f"Random samples:\n{df.round(3).to_string()}")
 
+    def _build_stats_task(self, i: int) -> Dict[str, Any]:
+        network = self.network_model.network[i]
+        network_name = getattr(network, 'name', f"Network_{i}")
+        nb_points_in_eval = len(self.predict_at[i])
+        _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
+        all_outputs = set(network.get_output_proteins())
+        input_proteins = set(network.get_inverted_input_proteins())
+        n_dependent_outputs = len(all_outputs - input_proteins)
+        network_info = {
+            'network_name': network_name,
+            'n_dependent_outputs': n_dependent_outputs,
+        }
+        if self.per_prediction_info is not None and i < len(self.per_prediction_info):
+            network_info['extra_prediction_info'] = self.per_prediction_info[i]
+        return {
+            'network_idx': i,
+            'yhat': self._yhats[i],
+            'gt': self._gtruths[i],
+            'x': self._x[i],
+            'dependent_output_pos': dependent_output_pos,
+            'nb_points_in_eval': nb_points_in_eval,
+            'rescaler': self.network_model.model.rescaler
+            if not self.already_latent
+            else IdentityRescaler(),
+            'gridstats_params': self.get_gridstats_params(),
+            'network_info': network_info,
+            'enable_gridstats': self.enable_gridstats,
+        }
+
+    def _compute_single_network_stats(self, i: int) -> Dict[str, Any]:
+        """Compute stats for one network. Used by both eager (parallel) and
+        lazy (per-figure-worker) paths."""
+        return _calculate_single_network_stats(**self._build_stats_task(i))
+
     def _calculate_all_network_stats(self) -> List[Dict[str, Any]]:
-        tasks = []
-        for i, network in enumerate(self.network_model.network):
-            network_name = getattr(network, 'name', f"Network_{i}")
-            nb_points_in_eval = len(self.predict_at[i])
-
-            yhat = self._yhats[i]
-            gt = self._gtruths[i]
-            x = self._x[i]  # Already in network order from _prepare_inputs
-
-            _, dependent_output_pos, _, _ = get_reordered_protein_names(network)
-
-            # Calculate dependent outputs for validation
-            all_outputs = set(network.get_output_proteins())
-            input_proteins = set(network.get_inverted_input_proteins())
-            dependent_outputs = all_outputs - input_proteins
-            n_dependent_outputs = len(dependent_outputs)
-
-            network_info = {
-                'network_name': network_name,
-                'n_dependent_outputs': n_dependent_outputs,
-            }
-
-            # add extra_prediction_info if available
-            if self.per_prediction_info is not None and i < len(self.per_prediction_info):
-                network_info['extra_prediction_info'] = self.per_prediction_info[i]
-
-            gridstats_params = self.get_gridstats_params()
-
-            tasks.append(
-                {
-                    'network_idx': i,
-                    'yhat': yhat,
-                    'gt': gt,
-                    'x': x,
-                    'dependent_output_pos': dependent_output_pos,
-                    'nb_points_in_eval': nb_points_in_eval,
-                    'rescaler': self.network_model.model.rescaler
-                    if not self.already_latent
-                    else IdentityRescaler(),
-                    'gridstats_params': gridstats_params,
-                    'network_info': network_info,
-                    'enable_gridstats': self.enable_gridstats,
-                }
-            )
+        tasks = [self._build_stats_task(i) for i in range(len(self.network_model.network))]
 
         all_stats: List[Dict[str, Any] | None] = [None] * len(self.network_model.network)
 
@@ -1433,27 +1433,42 @@ class NetworkPrediction(GridStatsFields, DataSource):
         self,
         with_shared_params: Optional[pr.ParameterTree] = None,
         with_local_params: Optional[pr.ParameterTree] = None,
+        network_idx: Optional[int] = None,
     ):
-        """get statistics for all networks, computing if necessary"""
+        """Get network stats. Without ``network_idx`` returns the full list
+        (computing all missing entries). With ``network_idx`` returns just one
+        network's stats, computing it lazily if missing — used by per-figure
+        workers to avoid eager all-up-front compute."""
         if (
-            not hasattr(self, '_network_stats')
-            or self._network_stats is None
+            not hasattr(self, '_yhats')
+            or self._yhats is None
             or with_shared_params
             or with_local_params
         ):
-            if (
-                not hasattr(self, '_yhats')
-                or self._yhats is None
-                or with_shared_params
-                or with_local_params
-            ):
-                self.compute_all_network_predictions(
-                    with_shared_params=with_shared_params,
-                    with_local_params=with_local_params,
-                )
+            self.compute_all_network_predictions(
+                with_shared_params=with_shared_params,
+                with_local_params=with_local_params,
+            )
+
+        if not hasattr(self, '_network_stats') or self._network_stats is None:
+            self._network_stats = [None] * len(self.network_model.network)
+
+        if network_idx is not None:
+            if self._network_stats[network_idx] is None:
+                self._network_stats[network_idx] = self._compute_single_network_stats(network_idx)
+            return self._network_stats[network_idx]
+
+        if any(s is None for s in self._network_stats):
+            missing = [i for i, s in enumerate(self._network_stats) if s is None]
+            if self.n_stats_workers > 1 and len(missing) > 1:
+                from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
+                with PoolExecutor(max_workers=self.n_stats_workers) as ex:
+                    futs = {ex.submit(self._compute_single_network_stats, i): i for i in missing}
+                    for fut in as_completed(futs):
+                        self._network_stats[futs[fut]] = fut.result()
             else:
-                # just calculate stats if predictions already exist
-                self._network_stats = self._calculate_all_network_stats()
+                for i in missing:
+                    self._network_stats[i] = self._compute_single_network_stats(i)
 
         return self._network_stats
 
