@@ -2,7 +2,6 @@
 
 from biocomptools.logging_config import get_logger, setup_logging
 from pydantic import BaseModel, ConfigDict, Field
-from tqdm import tqdm
 from biocomptools.toollib.common import maybetqdm, make_context_from_types
 import numpy as np
 
@@ -277,6 +276,45 @@ def _run_figure_worker(fig, overwrite) -> FigureResult:
     return run_figure(fig, overwrite=overwrite)
 
 
+def _construct_and_run_worker(
+    fig_node, output_path_override, text_mode, stdout_txt_plot, overwrite,
+) -> FigureResult:
+    """Worker entry: construct + render + save end-to-end. Send deferred node
+    (small) so per-network MVP stats compute fires in worker, parallel."""
+    fig = construct_figure(
+        fig_node,
+        output_path_override=output_path_override,
+        text_mode=text_mode,
+        stdout_txt_plot=stdout_txt_plot,
+    )
+    return run_figure(fig, overwrite=overwrite)
+
+
+def _run_worker_unpack(task) -> FigureResult:
+    return _construct_and_run_worker(*task)
+
+
+_THREAD_ENV_KEYS = (
+    "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS", "NUMBA_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS", "TBB_NUM_THREADS",
+    "BIOCOMP_KNN_WORKERS",
+)
+
+
+def _lock_thread_env() -> None:
+    """Worker initializer: pin every numerics library to 1 thread so each
+    loky worker uses exactly 1 core. Runs before the worker imports numpy
+    etc. so BLAS reads the limit at first use. Main process is unaffected."""
+    import os as _os
+    for k in _THREAD_ENV_KEYS:
+        _os.environ.setdefault(k, "1")
+    _os.environ.setdefault(
+        "XLA_FLAGS",
+        "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1",
+    )
+
+
 DEFAULT_TYPES = [
     Figure,
     FigureResult,
@@ -402,9 +440,9 @@ class PlotJob(BaseModel):
     nworkers: Annotated[int, Arg(help='Number of workers (processes) to use')] = 8
     skip_existing: Annotated[bool, Arg(help='Overwrite existing figures')] = False
     parallel_mode: Annotated[
-        Literal['ray', 'none'],
-        Arg(help='Parallel mode to use (multiprocess, ray, none)'),
-    ] = 'ray'
+        Literal['process', 'thread', 'ray', 'none'],
+        Arg(help="Parallel mode: 'process' (loky workers, default) | 'thread' (GIL-bound) | 'none' (sequential). 'ray' is a legacy alias for 'process'."),
+    ] = 'process'
     # Optional NetworkPrediction handle. When set + nworkers>1, PlotJob
     # mutates it: predict runs once in main, JAX-compiled state is dropped
     # so the figure object pickles cleanly to loky workers, and stats are
@@ -455,179 +493,112 @@ class PlotJob(BaseModel):
                     del fig.context[k]
 
         t0 = time.time()
-        out_paths = []
-        temp_paths: list[str | None] = [None] * total_figures
 
         if self.merge_spec:
             order = list(range(total_figures))
-            merge_out_dir = Path(self.merge_spec.output_path).parent
-            merge_out_dir.mkdir(parents=True, exist_ok=True)
-            temp_paths = self._get_temp_paths_for_merge(total_figures)
+            Path(self.merge_spec.output_path).parent.mkdir(parents=True, exist_ok=True)
+            temp_paths: list[str | None] = self._get_temp_paths_for_merge(total_figures)
         else:
             order = list(np.random.permutation(total_figures))
+            temp_paths = [None] * total_figures
 
         txt_mode = self.use_txt_plotting
         stdout_txt = not self.no_stdout_txt_plot
 
-        if self.nworkers <= 1 or self.parallel_mode == 'none' or total_figures <= 1:
-            fig_copies = [
-                self.figures[i].copy(reroot=True)
-                for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
-            ]
-            from concurrent.futures import ThreadPoolExecutor
+        is_parallel = (
+            self.nworkers > 1
+            and self.parallel_mode != 'none'
+            and total_figures > 1
+        )
 
-            def _construct_and_warm(*args, **kw):
-                fig = construct_figure(*args, **kw)
-                warm_caches_for_figure(fig)
-                return fig
+        if is_parallel:
+            out_paths = self._run_parallel(order, temp_paths, txt_mode, stdout_txt, overwrite)
+        else:
+            out_paths = self._run_sequential(order, temp_paths, txt_mode, stdout_txt, overwrite)
 
-            constructed_figures: list = [None] * total_figures
-            with ThreadPoolExecutor(max_workers=1) as exec_:
-                fut = exec_.submit(
-                    _construct_and_warm,
-                    fig_copies[0],
-                    output_path_override=temp_paths[order[0]],
-                    text_mode=txt_mode,
-                    stdout_txt_plot=stdout_txt,
-                )
-
-                out_paths = []
-                pbar = maybetqdm(range(total_figures), min_len=2, desc='Running figures')
-                for j in pbar:
-                    fig = fut.result()
-                    constructed_figures[j] = fig
-                    if j + 1 < total_figures:
-                        fut = exec_.submit(
-                            _construct_and_warm,
-                            fig_copies[j + 1],
-                            output_path_override=temp_paths[order[j + 1]],
-                            text_mode=txt_mode,
-                            stdout_txt_plot=stdout_txt,
-                        )
-                    out_paths.append(run_figure(fig, overwrite=overwrite))
-
-            outpathstr = '\n  - ' + '\n  - '.join(r.path for r in out_paths)
-            logger.info(f"Generated {len(out_paths)} figures:{outpathstr}")
-
-        elif self.parallel_mode == 'ray':
-            logger.debug(f"Using joblib with {self.nworkers} workers")
-            from joblib import Parallel, delayed
-            import cloudpickle
-
-            # Shard-by-network: predict runs once in main (vmap'd JAX), stats
-            # are deferred so each worker computes its own network's stats
-            # lazily on data access. Drop JAX-compiled state since it's not
-            # picklable and workers don't need it (yhats are populated).
-            if self.pred is not None:
-                self.pred.defer_stats_compute = True
-                if self.pred._yhats is None:
-                    t_pre = time.time()
-                    self.pred.compute_all_network_predictions()
-                    logger.info(f"Pre-triggered predict in main ({time.time() - t_pre:.2f}s)")
-                # Drop JAX-compiled state — workers don't need the predictor
-                # (yhats are populated; stats KNN is pure numpy/usearch).
-                # `LoadedExecutable` inside `_batch_apply*` rejects pickle.
-                nm = self.pred.network_model
-                nm._batch_apply = None
-                nm._batch_apply_cpu = None
-                nm._batch_apply_gpu = None
-                logger.info(f"Stats deferred to workers")
-
-            time_start = time.time()
-
-            batch_idx = 0
-            num_batches = (total_figures + self.max_batch_size - 1) // self.max_batch_size
-            batch_start = 0
-            while batch_start < total_figures:
-                batch_idx += 1
-                batch_len = min(self.max_batch_size, total_figures - batch_start)
-                batch_order_indices = order[batch_start : batch_start + batch_len]
-                fig_copies = [
-                    self.figures[i].copy(reroot=True)
-                    for i in maybetqdm(
-                        batch_order_indices,
-                        min_len=20,
-                        desc=f'Copying figure tasks for batch {batch_idx}/{num_batches}',
-                    )
-                ]
-
-                batch_start += batch_len
-
-                constructed_figures = [
-                    construct_figure(
-                        fig,
-                        output_path_override=temp_paths[batch_order_indices[j]],
-                        text_mode=txt_mode,
-                        stdout_txt_plot=stdout_txt,
-                    )
-                    for j, fig in enumerate(
-                        maybetqdm(
-                            fig_copies,
-                            min_len=5,
-                            desc=f'Constructing figures for batch {batch_idx}/{num_batches}',
-                        )
-                    )
-                ]
-
-                # try parallel execution with fallback to sequential if pickling fails
-                parallel_figs, sequential_figs, sequential_indices = [], [], []
-                for i, fig in enumerate(constructed_figures):
-                    try:
-                        cloudpickle.dumps(fig)
-                        parallel_figs.append(fig)
-                    except (TypeError, AttributeError) as e:
-                        logger.debug(f"Figure {i} cannot be pickled ({e}), running sequentially")
-                        sequential_figs.append(fig)
-                        sequential_indices.append(i)
-
-                results = [None] * len(constructed_figures)
-
-                if parallel_figs:
-                    parallel_results = Parallel(n_jobs=self.nworkers, backend='loky')(
-                        delayed(_run_figure_worker)(fig, overwrite)
-                        for fig in tqdm(
-                            parallel_figs,
-                            total=len(parallel_figs),
-                            desc=f'Parallel figures in batch {batch_idx}/{num_batches}',
-                        )
-                    )
-                    j = 0
-                    for i in range(len(constructed_figures)):
-                        if i not in sequential_indices:
-                            results[i] = parallel_results[j]
-                            j += 1
-
-                if sequential_figs:
-                    logger.info(
-                        f"Running {len(sequential_figs)} figures sequentially (not picklable)"
-                    )
-                    for i, fig in zip(
-                        sequential_indices,
-                        tqdm(
-                            sequential_figs,
-                            desc=f'Sequential figures in batch {batch_idx}/{num_batches}',
-                        ),
-                        strict=True,
-                    ):
-                        results[i] = run_figure(fig, overwrite=overwrite)
-
-                out_paths.extend(results)
-
-                logger.debug(f"Batch {batch_idx} completed in {time.time() - time_start:.2f}s")
-
-                fpaths = '\n  - ' + '\n  - '.join(r.path for r in results if r)
-                logger.debug(f"Generated {len(results)} figures:{fpaths}")
-
-        t1 = time.time()
-        logger.info(f"{total_figures} figures completed in {t1 - t0:.2f}s")
+        logger.info(f"{total_figures} figures completed in {time.time() - t0:.2f}s")
 
         merged_path = None
         if self.merge_spec and out_paths:
-            paths = [r.path for r in out_paths]
-            self._merge_figures(paths)
+            self._merge_figures([r.path for r in out_paths])
             merged_path = str(self.merge_spec.output_path)
 
         return PlotResult(figures=out_paths, merged_path=merged_path)
+
+    def _run_sequential(self, order, temp_paths, txt_mode, stdout_txt, overwrite):
+        from concurrent.futures import ThreadPoolExecutor
+
+        fig_copies = [
+            self.figures[i].copy(reroot=True)
+            for i in maybetqdm(order, min_len=20, desc='Copying figure tasks')
+        ]
+
+        def construct_and_warm(node, path):
+            fig = construct_figure(node, output_path_override=path,
+                                   text_mode=txt_mode, stdout_txt_plot=stdout_txt)
+            warm_caches_for_figure(fig)
+            return fig
+
+        out_paths: list = []
+        with ThreadPoolExecutor(max_workers=1) as exec_:
+            fut = exec_.submit(construct_and_warm, fig_copies[0], temp_paths[order[0]])
+            for j in maybetqdm(range(len(order)), min_len=2, desc='Running figures'):
+                fig = fut.result()
+                if j + 1 < len(order):
+                    fut = exec_.submit(construct_and_warm, fig_copies[j + 1], temp_paths[order[j + 1]])
+                out_paths.append(run_figure(fig, overwrite=overwrite))
+        return out_paths
+
+    def _run_parallel(self, order, temp_paths, txt_mode, stdout_txt, overwrite):
+        warm_futs = self._prewarm_pool()
+
+        if self.pred is not None:
+            if self.pred._yhats is None:
+                self.pred.compute_all_network_predictions()
+            nm = self.pred.network_model
+            nm._batch_apply = nm._batch_apply_cpu = nm._batch_apply_gpu = None
+
+        for f in warm_futs:
+            f.result()
+
+        out_paths: list = []
+        for batch_indices in self._iter_batches(order):
+            fig_copies = [self.figures[i].copy(reroot=True) for i in batch_indices]
+            tasks = [
+                (fig_node, temp_paths[idx], txt_mode, stdout_txt, overwrite)
+                for fig_node, idx in zip(fig_copies, batch_indices, strict=True)
+            ]
+            out_paths.extend(self._dispatch_batch(tasks))
+        return out_paths
+
+    def _prewarm_pool(self):
+        if self.parallel_mode == 'thread':
+            return []
+        from loky import get_reusable_executor
+        ex = get_reusable_executor(
+            max_workers=self.nworkers,
+            initializer=_lock_thread_env,
+            reuse=True,
+        )
+        return [ex.submit(int, 0) for _ in range(self.nworkers)]
+
+    def _dispatch_batch(self, tasks):
+        if self.parallel_mode == 'thread':
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=self.nworkers) as ex:
+                return list(ex.map(lambda t: _construct_and_run_worker(*t), tasks))
+
+        from loky import get_reusable_executor
+        ex = get_reusable_executor(
+            max_workers=self.nworkers,
+            initializer=_lock_thread_env,
+            reuse=True,
+        )
+        return list(ex.map(_run_worker_unpack, tasks))
+
+    def _iter_batches(self, order):
+        for start in range(0, len(order), self.max_batch_size):
+            yield order[start:start + self.max_batch_size]
 
     def _merge_figures(self, paths: list[str]):
         """Merge generated figures into single output per MergeSpec."""

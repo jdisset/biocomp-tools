@@ -106,7 +106,6 @@ class MeasuredVsPredictedData(BaseModel):
             if pred._yhats is None:
                 pred.compute_all_network_predictions()
 
-            stats_list = pred.get_network_stats()
             networks = pred.network_model.network
             for i, network in enumerate(networks):
                 if self.network_indices is not None and i not in self.network_indices:
@@ -137,7 +136,9 @@ class MeasuredVsPredictedData(BaseModel):
                 gt = gt[:, :n_cols]
                 yhat = yhat[:, :n_cols]
 
-                stats_dict = stats_list[i] if i < len(stats_list) else None
+                # Per-idx lazy: avoids forcing all-network stats compute in
+                # the caller's process when only one network is needed.
+                stats_dict = pred.get_network_stats(network_idx=i)
                 # Row indices the metric was computed on. Using these here
                 # makes the MVP cloud the *exact* set of points the
                 # `excess` / `model_rmse` annotations refer to.
