@@ -53,7 +53,6 @@ from biocomptools.toollib.figuremakers.datasetsummary import (
     build_figure_metadata,
     predicted_stats,
     build_prediction_pipeline,
-    build_per_network_mvp,
     filter_compatible,
     format_z_label,
     smart_title,
@@ -110,15 +109,12 @@ from numpy import (
 
 import warnings
 
-# suppress the fork warning from jax
 warnings.filterwarnings("ignore", message="os.fork()", module="subprocess")
 
 logger = get_logger(__name__)
 
 
 class FigureResult(BaseModel):
-    """Result of running a single figure. Useful for chaining/composition."""
-
     path: str
     figure_spec: FigureSpec
     metadata: dict = Field(default_factory=dict)
@@ -130,25 +126,20 @@ class FigureResult(BaseModel):
 
 
 class PlotResult(BaseModel):
-    """Result of running PlotJob. Provides both paths and structured data for composition."""
-
     figures: List[FigureResult] = Field(default_factory=list)
     merged_path: Optional[str] = None
 
     @property
     def paths(self) -> List[str]:
-        """List of output file paths (for backward compatibility)."""
         return [f.path for f in self.figures]
 
     def __iter__(self):
-        """Iterate over paths for backward compatibility."""
         return iter(self.paths)
 
     def __len__(self):
         return len(self.figures)
 
     def __getitem__(self, idx):
-        """Index access returns FigureResult for composition, or path for backward compat."""
         return self.figures[idx]
 
 
@@ -159,13 +150,7 @@ def debug_figures(figures):
     for fig in figures:
         ser_debug(fig, 'dill')
         ser_debug(fig, 'deepcopy')
-        # ser_debug(fig, 'sizeof', max_size_mb=200)
-        nr = dr.utils.node_repr(
-            fig,
-            enable_colors=True,
-            show_biggest_context=5,
-        )
-        logger.debug(nr)
+        logger.debug(dr.utils.node_repr(fig, enable_colors=True, show_biggest_context=5))
 
 
 def get_pretty_axis_label(i: int, d: DataSource) -> str:
@@ -251,47 +236,41 @@ class _DummyFigAx:
 _DUMMY_FIG_AX = _DummyFigAx()
 
 
+def _result_path(f) -> str:
+    return str(
+        getattr(f.figure_spec, '_output_path_override', None)
+        or f.figure_spec.output_path
+        or "(no file output)"
+    )
+
+
 def run_figure(f, **kw) -> FigureResult:
+    t0 = time.time()
     try:
-        t0 = time.time()
         f.run(**kw)
         if not f.is_txt_output:
             plt.close('all')
-        t1 = time.time()
-        opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path or "(no file output)"
-        logger.debug(f"Figure {opath} completed in {t1 - t0:.2f}s")
     except Exception as e:
         logger.error(f"Error running figure: {e}")
         logger.exception(e)
         raise
-    opath = getattr(f.figure_spec, '_output_path_override', None) or f.figure_spec.output_path or "(no file output)"
+    logger.debug(f"Figure {_result_path(f)} completed in {time.time() - t0:.2f}s")
     return FigureResult(
-        path=str(opath),
+        path=_result_path(f),
         figure_spec=f.figure_spec,
         metadata=getattr(f.figure_spec, 'metadata', {}),
     )
 
 
-def _run_figure_worker(fig, overwrite) -> FigureResult:
-    return run_figure(fig, overwrite=overwrite)
-
-
-def _construct_and_run_worker(
-    fig_node, output_path_override, text_mode, stdout_txt_plot, overwrite,
-) -> FigureResult:
-    """Worker entry: construct + render + save end-to-end. Send deferred node
-    (small) so per-network MVP stats compute fires in worker, parallel."""
+def _worker_entry(task) -> FigureResult:
+    node, output_path, text_mode, stdout_txt, overwrite = task
     fig = construct_figure(
-        fig_node,
-        output_path_override=output_path_override,
+        node,
+        output_path_override=output_path,
         text_mode=text_mode,
-        stdout_txt_plot=stdout_txt_plot,
+        stdout_txt_plot=stdout_txt,
     )
     return run_figure(fig, overwrite=overwrite)
-
-
-def _run_worker_unpack(task) -> FigureResult:
-    return _construct_and_run_worker(*task)
 
 
 _THREAD_ENV_KEYS = (
@@ -303,15 +282,20 @@ _THREAD_ENV_KEYS = (
 
 
 def _lock_thread_env() -> None:
-    """Worker initializer: pin every numerics library to 1 thread so each
-    loky worker uses exactly 1 core. Runs before the worker imports numpy
-    etc. so BLAS reads the limit at first use. Main process is unaffected."""
+    """Pin numerics libs to 1 thread before BLAS imports — each loky worker = 1 core."""
     import os as _os
     for k in _THREAD_ENV_KEYS:
         _os.environ.setdefault(k, "1")
     _os.environ.setdefault(
         "XLA_FLAGS",
         "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1",
+    )
+
+
+def _loky_pool(nworkers: int):
+    from loky import get_reusable_executor
+    return get_reusable_executor(
+        max_workers=nworkers, initializer=_lock_thread_env, reuse=True,
     )
 
 
@@ -383,10 +367,10 @@ DEFAULT_TYPES = [
 ]
 
 
-DEFAULT_CONTEXT = {
-    **make_context_from_types(DEFAULT_TYPES),
+_HELPER_FUNCS = {
     'get_pretty_axis_label': get_pretty_axis_label,
     'urlencoded': urlencoded,
+    'sample_latent': sample_latent,
     'expand_panel_atomics': expand_panel_atomics,
     'compose_rows': compose_rows,
     'compose_atomics': compose_atomics,
@@ -397,7 +381,6 @@ DEFAULT_CONTEXT = {
     'build_figure_metadata': build_figure_metadata,
     'predicted_stats': predicted_stats,
     'build_prediction_pipeline': build_prediction_pipeline,
-    'build_per_network_mvp': build_per_network_mvp,
     'filter_compatible': filter_compatible,
     'format_z_label': format_z_label,
     'smart_title': smart_title,
@@ -406,34 +389,15 @@ DEFAULT_CONTEXT = {
     'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
 }
 
+DEFAULT_CONTEXT = {**make_context_from_types(DEFAULT_TYPES), **_HELPER_FUNCS}
+
 
 @dracon_program(
     name='biocomp-plot',
     description='Generate plots from YAML configuration.',
     deferred_paths=['/figures.*'],
     context_types=DEFAULT_TYPES,
-    context={
-        'get_pretty_axis_label': get_pretty_axis_label,
-        'urlencoded': urlencoded,
-        'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
-        'sample_latent': sample_latent,
-        'expand_panel_atomics': expand_panel_atomics,
-        'compose_rows': compose_rows,
-        'compose_atomics': compose_atomics,
-        'layout_dimensions': layout_dimensions,
-        'extract_plot_data_metadata': extract_plot_data_metadata,
-        'extract_model_metadata': extract_model_metadata,
-        'extract_prediction_config': extract_prediction_config,
-        'build_figure_metadata': build_figure_metadata,
-        'predicted_stats': predicted_stats,
-        'build_prediction_pipeline': build_prediction_pipeline,
-        'filter_compatible': filter_compatible,
-        'build_per_network_mvp': build_per_network_mvp,
-        'format_z_label': format_z_label,
-        'smart_title': smart_title,
-        'training_set_count': training_set_count,
-        'trained_on_status': trained_on_status,
-    },
+    context=_HELPER_FUNCS,
 )
 class PlotJob(BaseModel):
     figures: Annotated[List[DeferredNode[Figure]], Arg(help='List of figure objects to create')]
@@ -441,12 +405,8 @@ class PlotJob(BaseModel):
     skip_existing: Annotated[bool, Arg(help='Overwrite existing figures')] = False
     parallel_mode: Annotated[
         Literal['process', 'thread', 'ray', 'none'],
-        Arg(help="Parallel mode: 'process' (loky workers, default) | 'thread' (GIL-bound) | 'none' (sequential). 'ray' is a legacy alias for 'process'."),
+        Arg(help="'process' (loky, default) | 'thread' | 'none'. 'ray' is a legacy alias for 'process'."),
     ] = 'process'
-    # Optional NetworkPrediction handle. When set + nworkers>1, PlotJob
-    # mutates it: predict runs once in main, JAX-compiled state is dropped
-    # so the figure object pickles cleanly to loky workers, and stats are
-    # deferred so each worker computes its own network's stats lazily.
     pred: Annotated[
         Optional[NetworkPrediction],
         Arg(help='NetworkPrediction handle for shard-by-network parallel mode'),
@@ -456,7 +416,7 @@ class PlotJob(BaseModel):
         List[str], Arg(help='Clear these keys from the figure context')
     ] = []
 
-    max_batch_size: Annotated[int, Arg(help='Maximum batch size for ray')] = 32
+    max_batch_size: Annotated[int, Arg(help='Maximum batch size per dispatch')] = 32
 
     merge_spec: Annotated[MergeSpec | None, Arg(help='Merge all figures into a single output')] = (
         None
@@ -475,12 +435,10 @@ class PlotJob(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_temp_paths_for_merge(self, n: int) -> list[str | None]:
-        """Generate temp file paths for merge mode when figures don't have unique outputs."""
         assert self.merge_spec is not None
-        merge_out_dir = Path(self.merge_spec.output_path).parent
-        # use same extension as final merge output
+        out_dir = Path(self.merge_spec.output_path).parent
         ext = Path(self.merge_spec.output_file).suffix or '.png'
-        return [str(merge_out_dir / f"_merge_tmp_{i:04d}{ext}") for i in range(n)]
+        return [str(out_dir / f"_merge_tmp_{i:04d}{ext}") for i in range(n)]
 
     def run(self):
         overwrite = not self.skip_existing
@@ -525,6 +483,12 @@ class PlotJob(BaseModel):
 
         return PlotResult(figures=out_paths, merged_path=merged_path)
 
+    def _make_tasks(self, batch_indices, temp_paths, txt_mode, stdout_txt, overwrite):
+        return [
+            (self.figures[i].copy(reroot=True), temp_paths[i], txt_mode, stdout_txt, overwrite)
+            for i in batch_indices
+        ]
+
     def _run_sequential(self, order, temp_paths, txt_mode, stdout_txt, overwrite):
         from concurrent.futures import ThreadPoolExecutor
 
@@ -550,7 +514,8 @@ class PlotJob(BaseModel):
         return out_paths
 
     def _run_parallel(self, order, temp_paths, txt_mode, stdout_txt, overwrite):
-        warm_futs = self._prewarm_pool()
+        ex = None if self.parallel_mode == 'thread' else _loky_pool(self.nworkers)
+        warm_futs = [ex.submit(int, 0) for _ in range(self.nworkers)] if ex else []
 
         if self.pred is not None:
             if self.pred._yhats is None:
@@ -562,46 +527,20 @@ class PlotJob(BaseModel):
             f.result()
 
         out_paths: list = []
-        for batch_indices in self._iter_batches(order):
-            fig_copies = [self.figures[i].copy(reroot=True) for i in batch_indices]
-            tasks = [
-                (fig_node, temp_paths[idx], txt_mode, stdout_txt, overwrite)
-                for fig_node, idx in zip(fig_copies, batch_indices, strict=True)
-            ]
-            out_paths.extend(self._dispatch_batch(tasks))
+        for start in range(0, len(order), self.max_batch_size):
+            batch = order[start:start + self.max_batch_size]
+            tasks = self._make_tasks(batch, temp_paths, txt_mode, stdout_txt, overwrite)
+            out_paths.extend(self._dispatch(tasks, ex))
         return out_paths
 
-    def _prewarm_pool(self):
-        if self.parallel_mode == 'thread':
-            return []
-        from loky import get_reusable_executor
-        ex = get_reusable_executor(
-            max_workers=self.nworkers,
-            initializer=_lock_thread_env,
-            reuse=True,
-        )
-        return [ex.submit(int, 0) for _ in range(self.nworkers)]
-
-    def _dispatch_batch(self, tasks):
-        if self.parallel_mode == 'thread':
+    def _dispatch(self, tasks, ex):
+        if ex is None:
             from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=self.nworkers) as ex:
-                return list(ex.map(lambda t: _construct_and_run_worker(*t), tasks))
-
-        from loky import get_reusable_executor
-        ex = get_reusable_executor(
-            max_workers=self.nworkers,
-            initializer=_lock_thread_env,
-            reuse=True,
-        )
-        return list(ex.map(_run_worker_unpack, tasks))
-
-    def _iter_batches(self, order):
-        for start in range(0, len(order), self.max_batch_size):
-            yield order[start:start + self.max_batch_size]
+            with ThreadPoolExecutor(max_workers=self.nworkers) as tex:
+                return list(tex.map(_worker_entry, tasks))
+        return list(ex.map(_worker_entry, tasks))
 
     def _merge_figures(self, paths: list[str]):
-        """Merge generated figures into single output per MergeSpec."""
         spec = self.merge_spec
         if not paths:
             return
@@ -610,7 +549,7 @@ class PlotJob(BaseModel):
 
         if spec.mode == "pages":
             self._merge_as_pdf_pages(paths)
-        else:  # grid mode
+        else:
             all_pdfs = all(p.lower().endswith('.pdf') for p in paths)
             output_is_pdf = str(spec.output_path).lower().endswith('.pdf')
             if all_pdfs and output_is_pdf:
@@ -628,7 +567,6 @@ class PlotJob(BaseModel):
         logger.info(f"Merged {len(paths)} figures to {spec.output_path}")
 
     def _merge_pdfs_lossless(self, paths: list[str]):
-        """Merge PDFs into grid layout without rasterization using pypdf."""
         from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 
         spec = self.merge_spec
@@ -638,26 +576,18 @@ class PlotJob(BaseModel):
         readers = [PdfReader(p) for p in paths]
         pages = [r.pages[0] for r in readers]
 
-        # get dimensions from source pages (in points, 72pt = 1 inch)
         widths = [float(p.mediabox.width) for p in pages]
         heights = [float(p.mediabox.height) for p in pages]
 
-        if spec.col_widths:
-            col_w = [w * max(widths) for w in spec.col_widths]
-        else:
-            col_w = [max(widths)] * cols
-
-        if spec.row_heights:
-            row_h = [h * max(heights) for h in spec.row_heights]
-        else:
-            row_h = [max(heights)] * rows
+        col_w = [w * max(widths) for w in spec.col_widths] if spec.col_widths else [max(widths)] * cols
+        row_h = [h * max(heights) for h in spec.row_heights] if spec.row_heights else [max(heights)] * rows
 
         total_w = sum(col_w) + spec.hspace * (cols - 1)
         total_h = sum(row_h) + spec.vspace * (rows - 1)
 
         merged_page = PageObject.create_blank_page(width=total_w, height=total_h)
 
-        y_offset = total_h  # PDF coords: origin at bottom-left
+        y_offset = total_h  # PDF origin is bottom-left
         idx = 0
         for r in range(rows):
             y_offset -= row_h[r]
@@ -666,9 +596,7 @@ class PlotJob(BaseModel):
                 if idx < n:
                     page = pages[idx]
                     pw, ph = float(page.mediabox.width), float(page.mediabox.height)
-                    scale_x, scale_y = col_w[c] / pw, row_h[r] / ph
-                    scale = min(scale_x, scale_y)  # preserve aspect ratio
-                    # center within cell
+                    scale = min(col_w[c] / pw, row_h[r] / ph)
                     dx = x_offset + (col_w[c] - pw * scale) / 2
                     dy = y_offset + (row_h[r] - ph * scale) / 2
                     merged_page.merge_transformed_page(
@@ -684,7 +612,6 @@ class PlotJob(BaseModel):
             writer.write(f)
 
     def _merge_as_pdf_pages(self, paths: list[str]):
-        """Merge figures as separate pages in a PDF."""
         from pypdf import PdfReader, PdfWriter
         from PIL import Image
         import io
@@ -694,26 +621,22 @@ class PlotJob(BaseModel):
 
         for p in paths:
             if p.lower().endswith('.pdf'):
-                reader = PdfReader(p)
-                for page in reader.pages:
+                for page in PdfReader(p).pages:
                     writer.add_page(page)
             else:
-                # convert image to PDF page
                 img = Image.open(p)
                 if img.mode == 'RGBA':
                     img = img.convert('RGB')
-                pdf_bytes = io.BytesIO()
-                img.save(pdf_bytes, format='PDF', resolution=300)
-                pdf_bytes.seek(0)
-                reader = PdfReader(pdf_bytes)
-                writer.add_page(reader.pages[0])
+                buf = io.BytesIO()
+                img.save(buf, format='PDF', resolution=300)
+                buf.seek(0)
+                writer.add_page(PdfReader(buf).pages[0])
                 img.close()
 
         with open(spec.output_path, 'wb') as f:
             writer.write(f)
 
     def _merge_as_images(self, paths: list[str]):
-        """Merge figures as images (fallback for non-PDF or mixed inputs)."""
         from PIL import Image
         import subprocess
         import tempfile
@@ -786,7 +709,6 @@ def main():
     except DraconError as e:
         handle_dracon_error(e, exit_code=1)
     except Exception as e:
-        # check if root cause is a DraconError
         root = e
         while root.__cause__ is not None:
             root = root.__cause__

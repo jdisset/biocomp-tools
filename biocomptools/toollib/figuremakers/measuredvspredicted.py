@@ -136,16 +136,8 @@ class MeasuredVsPredictedData(BaseModel):
                 gt = gt[:, :n_cols]
                 yhat = yhat[:, :n_cols]
 
-                # Per-idx lazy: avoids forcing all-network stats compute in
-                # the caller's process when only one network is needed.
                 stats_dict = pred.get_network_stats(network_idx=i)
-                # Row indices the metric was computed on. Using these here
-                # makes the MVP cloud the *exact* set of points the
-                # `excess` / `model_rmse` annotations refer to.
-                sub_rows = (
-                    None if stats_dict is None
-                    else stats_dict.get('subsample_indices')
-                )
+                sub_rows = None if stats_dict is None else stats_dict.get('subsample_indices')
 
                 if self.lattice_res is not None:
                     m_flat = gt.ravel()

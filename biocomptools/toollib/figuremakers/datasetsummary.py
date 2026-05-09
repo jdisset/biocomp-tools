@@ -537,37 +537,6 @@ def build_prediction_pipeline(
     return model, pred, pred.get_data_lazy()
 
 
-def build_per_network_mvp(
-    pred,
-    D,
-    resample_per_experiment: int = 100000,
-    lattice_res=None,
-    compute_noise_floor: bool = False,
-):
-    """Per-network MVP holders, or ``[None]*len(D)`` when ``pred`` is None
-    (data-only mode). Kept as a Python helper so dracon's eager identifier
-    resolution gets a safe value rather than tripping the per-network MVP
-    construction.
-
-    Set ``compute_noise_floor=True`` to populate the kernel-smoother
-    noise-floor cloud (``noise_floor_measured`` / ``noise_floor_predicted``)
-    consumed by the noise-floor MVP panel."""
-    if pred is None:
-        return [None] * len(D)
-    from biocomptools.toollib.figuremakers.measuredvspredicted import MeasuredVsPredictedData
-
-    return [
-        MeasuredVsPredictedData(
-            predictions=[pred],
-            network_indices=[i],
-            resample_per_experiment=resample_per_experiment,
-            lattice_res=lattice_res,
-            compute_noise_floor=compute_noise_floor,
-        )
-        for i in range(len(D))
-    ]
-
-
 def predicted_stats(predicted_data) -> dict:
     """Force-evaluate `predicted_data.y` to populate the stats cache, then
     return `prediction_stats`. Returns ``{}`` when ``predicted_data`` is
