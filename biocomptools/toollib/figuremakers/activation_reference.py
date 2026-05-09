@@ -13,7 +13,7 @@ import numpy as np
 from matplotlib.axes import Axes
 
 from biocomp.datautils import DataRescaler
-from biocomptools.toollib.figuremakers.ern_diff_density import apply_symmetric_log_axis
+from biocomptools.toollib.figuremakers.latent_projection_density import apply_symmetric_log_axis
 
 
 SELU_LAMBDA = 1.0507009873554805
