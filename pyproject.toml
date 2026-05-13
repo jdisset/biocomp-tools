@@ -111,4 +111,5 @@ biocomp-eval = "biocomptools.run_eval:main"
 biocomp-model-prepare = "biocomptools.model_prepare:main"
 biocomp-replay = "biocomptools.run_replay:main"
 biocomp-tuner = "biocomptools.tuner.api:main"
+biocomp-interactive-link = "biocomptools.toollib.interactive_link:main"
 

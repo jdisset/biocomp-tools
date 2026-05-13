@@ -34,6 +34,7 @@ from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
 from biocomptools.toollib.common import config
 from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.toollib.overlays import OVERLAY_TYPES
 from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
     UORFMatrixFigure,
     bundle_uorf_data,
@@ -305,6 +306,7 @@ DEFAULT_TYPES = [
     PlotResult,
     PlotConfig,
     PlotTask,
+    *OVERLAY_TYPES,
     DataSource,
     DBSource,
     FigureSpec,
@@ -444,6 +446,9 @@ class PlotJob(BaseModel):
         overwrite = not self.skip_existing
         total_figures = len(self.figures)
         logger.debug(f"Going to create {total_figures} figures")
+
+        if total_figures == 0:
+            return PlotResult(figures=[], merged_path=None)
 
         for fig in self.figures:
             for k in self.clear_figure_context_keys:
