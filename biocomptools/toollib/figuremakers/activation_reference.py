@@ -4,7 +4,7 @@ response shown by `ern_diff_density.histogram`.
 
 All three curves are evaluated in latent space directly — the same
 convention used by `ern_diff_density` for its dashed ReLU reference —
-so they share the same latent xlims/ylims and MEFL tick labeling.
+so they share the same latent xlims/ylims and MEF tick labeling.
 """
 
 from typing import Any, Sequence
@@ -47,7 +47,7 @@ def plot_activations(
     activations: Sequence[str] = ("relu", "gelu", "selu"),
     n_points: int = 400,
     xtitle: str = r"$X_2 - X_1$ (fluorescence diff)",
-    ytitle: str = "output fluorescence (MEFL)",
+    ytitle: str = "output fluorescence (MEF)",
     line_kwargs: dict[str, Any] | None = None,
     **_runner_kwargs: Any,
 ):

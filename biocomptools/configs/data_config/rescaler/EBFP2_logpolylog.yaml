@@ -1,0 +1,13 @@
+# Pure log-poly-log rescaler (no input_range normalization).
+# Output is in log-space units (NOT [0, 1]).
+#   fwd(10^7)        ≈ 5.51
+#   fwd(10^4)        ≈ 2.51
+#   fwd(500)         ≈ 1.21
+#   fwd(300)         ≈ 0.99   (log/poly transition)
+#   fwd(100)         ≈ 0.74   (cubic-exp region)
+# Signed inputs are preserved by the rescaler itself.
+# For diff-projection (X2-X1) of typical fluorescence, signed range is
+# roughly [-5.5, 5.5].
+!biocomp.datautils.LogPolyLogRescaler
+poly_region_threshold: 300.0
+poly_region_coef: 0.4

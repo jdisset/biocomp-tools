@@ -163,10 +163,17 @@ class PlotConfig(BaseModel):
 class PlotTask(BaseModel):
     plot_config: PlotConfig = Field(default_factory=PlotConfig)
     plot_method: Optional[PartialFunction] = None
-    auto_callstack_bind: bool = True  # whether to automatically bind callstack params
+    overlays: List[Any] = []  # list of Overlay instances; runs after plot_method
+    # Optional separate data source for overlays. Useful when plot_method
+    # consumes a transformed PlotData (e.g. KNN-smoothed centroids) but
+    # overlays need the original raw points to compute forward maps. Falls
+    # back to plot_method.kwargs.plot_data if unset.
+    overlay_data: Any = None
+    auto_callstack_bind: bool = True
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _ax: Optional[mpl.axes.Axes] = None
+    _overlay_results: List[Dict[str, Any]] = []
 
     def run(self):
         # generates some metadata and returns it
@@ -180,6 +187,24 @@ class PlotTask(BaseModel):
             )
 
             result, metadata = f()
+
+        if self.overlays and self._ax is not None:
+            plot_data = self.overlay_data
+            if plot_data is None and self.plot_method:
+                plot_data = self.plot_method.kwargs.get("plot_data")
+            self._overlay_results = []
+            for ov in self.overlays:
+                if not getattr(ov, "enabled", True):
+                    continue
+                try:
+                    self._overlay_results.append(
+                        ov.apply(self._ax, plot_data, self.plot_config)
+                    )
+                except Exception as e:
+                    logger.error(f"overlay {type(ov).__name__} failed: {e}")
+                    logger.exception(e)
+            if self._overlay_results:
+                metadata["overlays"] = self._overlay_results
 
         return metadata
 

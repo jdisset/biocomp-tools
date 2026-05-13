@@ -45,6 +45,7 @@ callstack_params:
   knn_grid_params:
     grid_resolution: 250
     is_density_plot: false
+    max_centroid_offset_frac: 1.0
 
   mkfig_params:
     dpi: 300

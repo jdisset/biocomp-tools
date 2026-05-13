@@ -1,27 +1,9 @@
 """Density of `(projection(X), Y)` pooled across 2-input networks in latent space.
 
-Generic plotting building block that subsumes the original "ERN diff density"
-plot. The same machinery powers two paper figures:
-
-- `projection="diff"`  → density of `(X2 - X1, Y)` for single-ERN circuits.
-  A dashed `y = max(0, X2 - X1)` reference anchors the ReLU shape.
-- `projection="sum"`   → density of `(X1 + X2, Y)` for two-TU additive circuits.
-  A dashed `y = X1 + X2` reference anchors the linear-sum shape.
-
-`TwoInputProjectionData` pools `(proj(x), y)` pairs across networks, mapping
-both inputs and outputs through `rescaler.fwd()` into latent space before
-projecting. Two preprocessing modes:
-
-- `mode="raw"`: every raw datapoint becomes one (proj, y) entry.
-- `mode="knn"`: per-network we first build a Gaussian-weighted KNN grid over
-  the original (X1, X2) → Y latent surface, then feed the smoothed grid
-  cells into the pool — filtering single-point outliers before projecting.
-
-Rendering delegates to the canonical paper density primitive
-(`biocomp.plotutils.histogram`), so style knobs auto-bind from
-`histogram_params` in `default_plotconf_v2`. The thin `histogram` wrapper
-relabels axes in raw fluorescence (MEFL) and overlays an arbitrary
-reference curve `y = reference_curve_fn(x, ylims)`.
+`projection="diff"` (X2 - X1) anchors the single-ERN ReLU paper figure;
+`projection="sum"` (X1 + X2) anchors the additive 2-TU paper figure.
+Rendering delegates to the canonical `biocomp.plotutils.histogram` so
+style auto-binds from `histogram_params` in `default_plotconf_v2`.
 """
 
 from typing import Any, Callable, Literal, Sequence
@@ -43,11 +25,30 @@ logger = get_logger(__name__)
 _DEFAULT_KNN_STATS = {"k": 500, "min_points": 5, "radius": 0.1}
 
 ProjectionKind = Literal["diff", "sum"]
-
 ReferenceFn = Callable[[np.ndarray, Sequence[float]], np.ndarray]
 
 
-def _project(x_lat: np.ndarray, x1_idx: int, x2_idx: int, kind: ProjectionKind) -> np.ndarray:
+def _signed_fwd(x: np.ndarray, rescaler: DataRescaler) -> np.ndarray:
+    return np.sign(x) * rescaler.fwd(np.abs(x))
+
+
+def _project(
+    x_lat: np.ndarray,
+    x_raw: np.ndarray,
+    rescaler: DataRescaler,
+    x1_idx: int,
+    x2_idx: int,
+    kind: ProjectionKind,
+    in_raw_space: bool,
+) -> np.ndarray:
+    if in_raw_space:
+        x1r = x_raw[:, x1_idx : x1_idx + 1]
+        x2r = x_raw[:, x2_idx : x2_idx + 1]
+        if kind == "sum":
+            return rescaler.fwd(x1r + x2r)
+        if kind == "diff":
+            return _signed_fwd(x2r - x1r, rescaler)
+        raise ValueError(f"unknown projection kind: {kind!r}")
     x1 = x_lat[:, x1_idx : x1_idx + 1]
     x2 = x_lat[:, x2_idx : x2_idx + 1]
     if kind == "diff":
@@ -58,19 +59,6 @@ def _project(x_lat: np.ndarray, x1_idx: int, x2_idx: int, kind: ProjectionKind) 
 
 
 class TwoInputProjectionData(BaseModel):
-    """Pool `proj(x_lat) vs y_lat` across 2-input PlotData objects.
-
-    X and Y are mapped through `rescaler.fwd()` into latent space before the
-    projection is applied. The resulting synthetic `PlotData` is ready to
-    feed into `biocomp.plotutils.histogram` — pair it with an
-    `IdentityRescaler` on the plot config to avoid double-transformation.
-
-    When `mode="knn"`, each network's (X1, X2) → Y latent surface is first
-    smoothed on a `grid_resolution` × `grid_resolution` grid via a
-    Gaussian-weighted KNN mean. The grid cells then replace the raw points
-    as inputs to the pool, filtering single-point noise before projecting.
-    """
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     plot_data_list: list[Any]
@@ -80,13 +68,21 @@ class TwoInputProjectionData(BaseModel):
     x2_idx: int = 1
     xlabel: str | None = None
     ylabel: str = "output"
-    mode: Literal["raw", "knn"] = "raw"
+    mode: Literal["raw", "knn", "knn_uniform"] = "raw"
     grid_resolution: int = 100
+    query_seed: int = 0
     latent_xlims: tuple[float, float] = (0.0, 1.0)
     latent_ylims: tuple[float, float] = (0.0, 1.0)
     knn_stats_params: dict = Field(default_factory=lambda: dict(_DEFAULT_KNN_STATS))
+    max_centroid_offset_frac: float = 1.0
+    # The latent rescaler is log-like, so combining two latent values does
+    # arithmetic in *log* space — sum becomes product, diff becomes log
+    # ratio. Set True to compute the projection in raw fluorescence then
+    # rescale (signed-log for diff), so the axis is in real MEF units.
+    project_in_raw_space: bool = False
 
     _pooled: PlotData = PrivateAttr()
+    _density: np.ndarray | None = PrivateAttr(default=None)
 
     @property
     def _default_xlabel(self) -> str:
@@ -94,31 +90,34 @@ class TwoInputProjectionData(BaseModel):
 
     def _knn_smooth(
         self, x_latent: np.ndarray, y_latent: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """KNN-smooth (X1, X2) → Y on a regular latent-space grid.
-
-        Returns (pixel_coords (M, 2), pixel_values (M, 1)) — one row per
-        grid cell with enough neighbors for a valid mean.
-        """
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         x_2d = x_latent[:, [self.x1_idx, self.x2_idx]]
-        xy_grid, y_mean = _canonical_knn_grid(
-            x=x_2d,
-            y=y_latent,
-            xlims=list(self.latent_xlims),
-            ylims=list(self.latent_ylims),
-            is_density_plot=False,
+        query_mode = "uniform" if self.mode == "knn_uniform" else "grid"
+        knn_kw = dict(
+            x=x_2d, y=y_latent,
+            xlims=list(self.latent_xlims), ylims=list(self.latent_ylims),
             grid_resolution=self.grid_resolution,
             knn_stats_params=dict(self.knn_stats_params),
+            max_centroid_offset_frac=self.max_centroid_offset_frac,
+            query_mode=query_mode, query_seed=self.query_seed,
         )
+        xy_grid, y_mean = _canonical_knn_grid(is_density_plot=False, **knn_kw)
+        _, density = _canonical_knn_grid(is_density_plot=True, **knn_kw)
         y_mean = np.asarray(y_mean).reshape(-1)
+        density = np.asarray(density).reshape(-1)
         valid = np.isfinite(y_mean) & np.all(np.isfinite(xy_grid), axis=1)
-        return xy_grid[valid], y_mean[valid].reshape(-1, 1)
+        width = max(self.x1_idx, self.x2_idx) + 1
+        x_lat = np.zeros((int(valid.sum()), width), dtype=np.float32)
+        x_lat[:, self.x1_idx] = xy_grid[valid, 0]
+        x_lat[:, self.x2_idx] = xy_grid[valid, 1]
+        return x_lat, y_mean[valid].reshape(-1, 1), density[valid]
 
     @model_validator(mode="after")
     def _initialize(self):
         rescaler = self.rescaler if self.rescaler is not None else IdentityRescaler()
         projs: list[np.ndarray] = []
         ys: list[np.ndarray] = []
+        densities: list[np.ndarray] = []
         n_input_points = 0
         for pd in self.plot_data_list:
             x = np.asarray(pd.x, dtype=np.float32)
@@ -134,23 +133,28 @@ class TwoInputProjectionData(BaseModel):
             n_input_points += x.shape[0]
             x_lat = rescaler.fwd(x)
             y_lat = rescaler.fwd(y)
+            d_pernet: np.ndarray | None = None
 
-            if self.mode == "knn":
-                pixel_xy, pixel_y = self._knn_smooth(x_lat, y_lat)
-                width = max(self.x1_idx, self.x2_idx) + 1
-                x_lat = np.zeros((pixel_xy.shape[0], width), dtype=np.float32)
-                x_lat[:, self.x1_idx] = pixel_xy[:, 0]
-                x_lat[:, self.x2_idx] = pixel_xy[:, 1]
-                y_lat = pixel_y
+            if self.mode in ("knn", "knn_uniform"):
+                x_lat, y_lat, d_pernet = self._knn_smooth(x_lat, y_lat)
 
-            proj = _project(x_lat, self.x1_idx, self.x2_idx, self.projection)
+            x_raw = rescaler.inv(x_lat) if self.project_in_raw_space else x_lat
+            proj = _project(
+                x_lat, x_raw, rescaler,
+                self.x1_idx, self.x2_idx, self.projection,
+                self.project_in_raw_space,
+            )
             mask = np.isfinite(proj).all(axis=1) & np.isfinite(y_lat).all(axis=1)
             projs.append(proj[mask])
             ys.append(y_lat[mask])
+            if d_pernet is not None:
+                densities.append(d_pernet[mask])
 
         assert projs, "TwoInputProjectionData received an empty plot_data_list"
         xpool = np.concatenate(projs, axis=0)
         ypool = np.concatenate(ys, axis=0)
+        if densities:
+            self._density = np.concatenate(densities, axis=0)
         logger.info(
             f"TwoInputProjectionData[{self.projection}/{self.mode}]: pooled "
             f"{xpool.shape[0]} points across {len(self.plot_data_list)} networks "
@@ -168,7 +172,7 @@ class TwoInputProjectionData(BaseModel):
                 "n_networks": len(self.plot_data_list),
                 "n_points": int(xpool.shape[0]),
                 "n_raw_points": int(n_input_points),
-                "grid_resolution": self.grid_resolution if self.mode == "knn" else None,
+                "grid_resolution": self.grid_resolution if self.mode in ("knn", "knn_uniform") else None,
             },
         )
         return self
@@ -177,14 +181,18 @@ class TwoInputProjectionData(BaseModel):
     def plot_data(self) -> PlotData:
         return self._pooled
 
+    @property
+    def density(self) -> np.ndarray | None:
+        """Per-centroid density array (same length as `plot_data.x`), only
+        populated in `knn`/`knn_uniform` mode. Returns `None` for `raw`."""
+        return self._density
+
 
 def relu_reference(xs: np.ndarray, ylims: Sequence[float]) -> np.ndarray:
-    """`y = max(0, x)` clipped to the y-range — matches the diff-projection plot."""
     return np.clip(xs, 0.0, ylims[1])
 
 
 def identity_reference(xs: np.ndarray, ylims: Sequence[float]) -> np.ndarray:
-    """`y = x` clipped to the y-range — matches the sum-projection plot."""
     return np.clip(xs, ylims[0], ylims[1])
 
 
@@ -205,15 +213,7 @@ def apply_symmetric_log_axis(
     tick_floor: float | None = None,
     min_separation: float = 0.05,
 ):
-    """Place ticks at rescaler.fwd(±10^k) covering the requested latent range.
-
-    `symmetric=True` mirrors powers-of-ten across zero (appropriate for the
-    diff axis, which can be negative); `symmetric=False` uses only positive
-    powers (appropriate for non-negative axes — sum, output).
-
-    `tick_floor` excludes powers of ten below that raw-space magnitude.
-    `min_separation` culls tick-label crowding near zero.
-    """
+    """Place ticks at rescaler.fwd(±10^k) covering the requested latent range."""
     lims = list(lims)
     lims_inv = rescaler.inv(np.asarray(lims))
     max_abs = max(abs(float(lims_inv[0])), abs(float(lims_inv[1])))
@@ -222,10 +222,7 @@ def apply_symmetric_log_axis(
         tick_floor = float(input_range.min) if input_range is not None else 0.1
     p10 = powers_of_ten(tick_floor, max_abs)
     p10 = p10[(p10 >= tick_floor) & (p10 <= max_abs)]
-    if symmetric:
-        signed_raw = np.concatenate([-p10[::-1], [0.0], p10])
-    else:
-        signed_raw = p10
+    signed_raw = np.concatenate([-p10[::-1], [0.0], p10]) if symmetric else p10
     latent_positions = rescaler.fwd(signed_raw)
     in_range = (latent_positions >= lims[0]) & (latent_positions <= lims[1])
     latent_positions = latent_positions[in_range]
@@ -234,8 +231,7 @@ def apply_symmetric_log_axis(
     min_gap = min_separation * (lims[1] - lims[0])
     kept_positions: list[float] = []
     kept_raw: list[float] = []
-    order = np.argsort(np.abs(latent_positions))
-    for idx in order:
+    for idx in np.argsort(np.abs(latent_positions)):
         pos = float(latent_positions[idx])
         if all(abs(pos - kp) >= min_gap for kp in kept_positions):
             kept_positions.append(pos)
@@ -248,9 +244,6 @@ def apply_symmetric_log_axis(
     getattr(ax, f"set_{axis}ticks")(kept_positions)
     getattr(ax, f"set_{axis}ticklabels")([_format_power(v) for v in kept_raw])
     ax.tick_params(axis=axis, which="minor", length=0)
-    # grid_histogram enables major+minor gridlines at tick positions; a
-    # vertical gridline at x=0 overlays the density as a visible streak.
-    # Disable gridlines on the log-tick axis we just (re)placed.
     getattr(ax, f"{axis}axis").grid(False, which="both")
 
 
@@ -266,16 +259,11 @@ def histogram(
 ):
     """Latent-space (projection, Y) density plot for 2-input circuits.
 
-    Delegates density rendering to `biocomp.plotutils.histogram` — the
-    canonical paper primitive — so cmap, use_log_density, colorbar_params,
-    noise_smooth, and vlims auto-bind from `histogram_params` in
-    `default_plotconf_v2`. Rendering is identical for `raw` / `knn` modes
-    of `TwoInputProjectionData` (the difference is what points feed in).
-
-    `x_axis_symmetric=True` uses ±10^k MEFL ticks (diff projection); set
-    `False` for non-negative projections (sum). `reference_curve_fn(xs,
-    ylims)` returns y-values for an overlaid dashed reference line; pair
-    with `reference_curve_kwargs` for line style and label.
+    Delegates rendering to `biocomp.plotutils.histogram`. When
+    `label_rescaler` is given, axes are relabelled in raw fluorescence
+    (powers of ten); `x_axis_symmetric` toggles between ±10^k (diff) and
+    positive 10^k (sum, output). `reference_curve_fn(xs, ylims)` returns
+    y-values for an overlaid dashed reference line.
     """
     rescaler = rescaler or IdentityRescaler()
     xlims = histogram_kwargs.get("xlims", ax.get_xlim())
@@ -299,21 +287,57 @@ def histogram(
 
     if reference_curve_fn is not None:
         ref_kw: dict[str, Any] = dict(
-            color="#222222",
-            lw=0.8,
-            alpha=0.7,
-            dashes=(4, 4),
-            dash_capstyle="round",
+            color="#222222", lw=0.8, alpha=0.7,
+            dashes=(4, 4), dash_capstyle="round",
         )
         if reference_curve_kwargs:
             ref_kw.update(reference_curve_kwargs)
-        # `dashes=None` (or empty) means "solid": drop the kwarg so
-        # matplotlib falls back to the default solid linestyle instead of
-        # silently rendering nothing when handed a list like [None, None].
         if not ref_kw.get("dashes"):
             ref_kw.pop("dashes", None)
             ref_kw.pop("dash_capstyle", None)
         xs = np.linspace(xlims[0], xlims[1], 200)
-        ys = reference_curve_fn(xs, ylims)
-        ax.plot(xs, ys, **ref_kw)
+        ax.plot(xs, reference_curve_fn(xs, ylims), **ref_kw)
         ax.legend(loc="upper left", fontsize=8, frameon=False)
+
+
+def prep_log_axis(
+    plot_data: PlotData | None = None,
+    ax: Axes | None = None,
+    rescaler: DataRescaler | None = None,
+    xlims: Sequence[float] = (0.0, 1.0),
+    ylims: Sequence[float] = (0.0, 1.0),
+    x_symmetric: bool = False,
+    y_symmetric: bool = False,
+    apply_x: bool = True,
+    apply_y: bool = False,
+    hide_y_ticks: bool = False,
+    hide_spines: Sequence[str] = (),
+    title: str = "",
+    xlabel: str = "",
+    ylabel: str = "",
+    **_kwargs: Any,
+):
+    """Empty plot method: set axis lims + signed-log tick labels.
+
+    For panels that exist only to host overlays (e.g. an output
+    distribution panel whose overlay draws the curve)."""
+    assert ax is not None
+    rescaler = rescaler or IdentityRescaler()
+    ax.set_xlim(xlims[0], xlims[1])
+    ax.set_ylim(ylims[0], ylims[1])
+    if apply_x:
+        apply_symmetric_log_axis(ax, "x", xlims, rescaler, symmetric=x_symmetric)
+    if apply_y:
+        apply_symmetric_log_axis(ax, "y", ylims, rescaler, symmetric=y_symmetric)
+    if hide_y_ticks:
+        ax.set_yticks([])
+    for s in hide_spines:
+        ax.spines[s].set_visible(False)
+    if title:
+        ax.set_title(title, fontsize=10, pad=2)
+    if xlabel:
+        ax.set_xlabel(xlabel)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+
+
