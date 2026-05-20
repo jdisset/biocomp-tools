@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Class-partition scatters for 2-input circuits.
 
 `BimodalPartitionData` pools `(X1, X2, y)` (raw + latent) once and assigns
@@ -6,13 +8,13 @@ its own class names and colors. Two render functions share the partition:
 `bimodal_proj_scatter` for `(projection, y)` and `bimodal_xy_scatter` for
 `(X1, X2)`.
 
-Projection: `sum` → `rescaler.fwd(X1_raw + X2_raw)` (additive 2-TU);
-            `diff` → signed-log `X2_raw - X1_raw` (single-ERN).
+Projection: `sum` -> `rescaler.fwd(X1_raw + X2_raw)` (additive 2-TU);
+            `diff` -> signed-log `X2_raw - X1_raw` (single-ERN).
 
 Rules:
-  `sum_residual`         — 2 classes (main / off-trend) for additive 2-TU.
-  `raw_diff_y_threshold` — 2 classes for single-ERN "should be ON, isn't".
-  `ern_4_quadrant`       — 4 classes for single-ERN: X1-dominant suppressed,
+  `sum_residual`         - 2 classes (main / off-trend) for additive 2-TU.
+  `raw_diff_y_threshold` - 2 classes for single-ERN "should be ON, isn't".
+  `ern_4_quadrant`       - 4 classes for single-ERN: X1-dominant suppressed,
                            ON (y high), X2-dominant off-trend, intermediate.
 """
 

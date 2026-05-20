@@ -1,9 +1,11 @@
-"""E2E tests: actual loggers through StepWriter → DB → LoggerRunner replay pipeline.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""E2E tests: actual loggers through StepWriter -> DB -> LoggerRunner replay pipeline.
 
 Tests real logger implementations (ConsoleLogger, EnhancedConsoleLogger,
 DataDesignLogger, DesignAuxLogger, DesignSublossLogger, TUMaskingDiagLogger,
 CMAESLogger) with realistic step_history data flowing through the full
-write → store → replay path.
+write -> store -> replay path.
 """
 
 import json
@@ -541,7 +543,7 @@ class TestWritePolicyWithLoggers:
         assert len(lg._loss_history) == 4  # steps 10, 20, 30 (on_batch), 30 (on_end)
 
     def test_tu_masking_logger_needs_tu_stats_dict(self, design_db, tmp_path):
-        """TUMaskingDiagLogger needs tu_stats dict — always saved by default policy."""
+        """TUMaskingDiagLogger needs tu_stats dict - always saved by default policy."""
         from biocomptools.toollib.loggers.tumaskingdiaglogger import TUMaskingDiagLogger
 
         # Default policy saves dicts every step
@@ -555,7 +557,7 @@ class TestWritePolicyWithLoggers:
         )
         _replay(design_db, [lg])
 
-        # tu_stats is a dict, always saved → logger should get it
+        # tu_stats is a dict, always saved -> logger should get it
         assert len(lg._history) > 0
 
 

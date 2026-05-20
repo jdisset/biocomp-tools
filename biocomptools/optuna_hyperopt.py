@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Optuna-based hyperparameter optimization for biocomp training.
 
 Progress saved to SQLite after each trial for resume support.

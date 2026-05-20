@@ -1,4 +1,6 @@
-"""Tests for step_history_triage — SSOT data routing."""
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""Tests for step_history_triage - SSOT data routing."""
 
 import numpy as np
 import pytest

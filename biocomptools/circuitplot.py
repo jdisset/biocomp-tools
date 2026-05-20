@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """biocomp-circuitplot: Generate circuit diagrams and network schematics from recipes"""
 
 from typing import Optional, Literal, Annotated

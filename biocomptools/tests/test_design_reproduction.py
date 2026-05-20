@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test logged vs committed predictions using saved reproduction pickle.
 
 This test loads a reproduction pickle saved by DesignHeatmapLogger (with

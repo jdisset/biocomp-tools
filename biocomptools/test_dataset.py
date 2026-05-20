@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ## {{{                          --     imports     --
 
 # set BCTOOLS_DEBUG to 1 to enable debug logging

@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Brush-interactive linked-pixel multi-panel renderer.
 
 Architecture
 ------------
 This is a thin orchestrator on top of the canonical biocomp-plot pipeline.
-It does not invent a parallel rendering path — every panel is a regular
+It does not invent a parallel rendering path - every panel is a regular
 `PlotTask` (with its own `plot_method` and any `overlays`). The canonical
 `Figure` runs them through `mpl.rc_context` from `default_plotconf_v2`
 and dispatches `plot_method` calls with full `callstack_params` styling
@@ -15,7 +17,7 @@ The interactive layer's only job is post-render aggregation:
   2. Subsample.
   3. Construct the `Figure` (declared in YAML), injecting `plot_data` via
      dracon's deferred-construct context.
-  4. Run the figure normally — it writes an SVG.
+  4. Run the figure normally - it writes an SVG.
   5. Walk `figure._ptasks` and harvest each task's `_overlay_results`. The
      selection-grid overlays exposed `pixel_for_raw` arrays + per-pixel
      metadata; we bundle them into a JSON payload.

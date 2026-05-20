@@ -21,21 +21,17 @@ db:
       keep_n: ${getenv('BIOCOMP_SQLITE_DB_BACKUP_KEEP_N', 50)}
 
   gsheet:
-    google_app_credentials_path: ${getenv('BIOCOMP_GOOGLE_APP_CREDENTIALS_PATH', '/Users/jeandisset/.google/biocomp/key.json')}
-    parts_sheet_key: "1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME"
+    google_app_credentials_path: ${getenv('BIOCOMP_GOOGLE_APP_CREDENTIALS_PATH', '~/.google/biocomp/key.json')}
+    parts_sheet_key: ${getenv('BIOCOMP_PARTS_SHEET_KEY', '')}
 
 mlflow:
-  server: ${getenv('BIOCOMP_MLFLOW_SERVER', 'https://mlf.rachael.jdisset.com')}
+  server: ${getenv('BIOCOMP_MLFLOW_SERVER', '')}
 
-# Debug pickle saves for design and plot modules
-# Enable to save comprehensive state at critical points for debugging axis inversion, etc.
 debug:
   design:
     enabled: ${getenv('BIOCOMP_DEBUG_DESIGN', False)}
-    # Saves go to: {design_output_dir}/_debug_dumps/
   plot:
     enabled: ${getenv('BIOCOMP_DEBUG_PLOT', False)}
-    # Saves go to: {figure_output_dir}/_debug_dumps/
 
 calib:
   paths:

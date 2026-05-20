@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Data quality analysis via split-half nRMSE (intrinsic noise floor estimation)."""
 
 from typing import Dict, Any, Optional

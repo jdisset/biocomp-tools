@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Optional post-render overlay layer for `PlotTask`.
 
 Overlays run *after* the base plot has been drawn on a `PlotTask`'s axes.
-Each overlay can stamp extra geometry on the axes — typically tagged with
+Each overlay can stamp extra geometry on the axes - typically tagged with
 stable `gid` attributes for downstream tooling (the interactive HTML
-viewer in `interactive_link.py` is the first consumer) — and returns
+viewer in `interactive_link.py` is the first consumer) - and returns
 JSON-serializable metadata that callers harvest via
 `PlotTask._overlay_results`.
 
@@ -36,7 +38,7 @@ class Overlay(BaseModel):
     `rescaler` (optional) overrides `plot_config.rescaler` for the overlay's
     own use. Useful when the surrounding plot_method runs in already-latent
     space (e.g. with `IdentityRescaler` as in `ern_diff_density.yaml`) but
-    the overlay needs the original RAW→latent map to bin raw plot_data."""
+    the overlay needs the original RAW->latent map to bin raw plot_data."""
 
     name: str
     enabled: bool = True
@@ -132,7 +134,7 @@ def _grid_payload(name, kind, n_pixels, pixel_count, pixel_xy,
 class RegularGridOverlay(Overlay):
     """Bin plot_data on a uniform 2D grid; emit a rect per non-empty pixel.
 
-    Defaults bin (x[:,x_col], y[:,0]) — i.e. one input column on the
+    Defaults bin (x[:,x_col], y[:,0]) - i.e. one input column on the
     panel x-axis and the output on the y-axis. Set `y_col >= 0` to bin
     two input columns (e.g. for X1-vs-X2 smooth panels).
     """

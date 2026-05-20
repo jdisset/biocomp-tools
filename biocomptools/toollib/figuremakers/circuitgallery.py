@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Figuremaker for side-by-side circuit + diagram rendering."""
 
 import matplotlib.axes

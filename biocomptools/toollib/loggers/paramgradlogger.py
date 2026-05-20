@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ## {{{                          --     imports     --
 from __future__ import annotations
 
@@ -804,7 +806,7 @@ class ParamGradLogger(Logger):
                     lr_display_text = (
                         f"learning rate: {start_lr:.2e}"
                         if np.allclose(lr_array, start_lr)
-                        else f"learning rate: {start_lr:.2e} → {end_lr:.2e}"
+                        else f"learning rate: {start_lr:.2e} -> {end_lr:.2e}"
                     )
                 else:
                     effective_learning_rate = float(lr_array)

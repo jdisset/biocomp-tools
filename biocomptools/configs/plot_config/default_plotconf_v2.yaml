@@ -7,6 +7,7 @@
 !set_default vlims: [null, null]
 !set_default cmap: bc_blues
 !set_default colors_grey: "#000000"
+!set_default vlim_quantiles: [0.02, 0.98]
 
 rescaler: !include pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2
 
@@ -28,7 +29,7 @@ callstack_params:
     use_log_density: true
     xlims: ${xlims}
     ylims: ${vlims}
-    # vlims: [0, null]
+    vlims: [0, null]
     colorbar_params:
       size: [0.06, 0.85]
       position: [1.05, 0.075]
@@ -77,7 +78,7 @@ callstack_params:
     # Quantile fallback for any None entry in vlims — increases contrast by
     # ignoring outliers. Only takes effect when vlims has a None entry; set
     # to null to revert to raw min/max fallback.
-    vlim_quantiles: [0.02, 0.98]
+    vlim_quantiles: ${vlim_quantiles}
     heatmap_params:
       bad_color: "#ffffff"
       contours: 0
@@ -89,6 +90,28 @@ callstack_params:
         labelsize: 9
         pad: 3
         length: 4
+
+  smooth_grad_magnitude_2d_params:
+    draw_colorbar: true
+    xlims: ${xlims}
+    ylims: ${ylims}
+    vlims: [null, null]
+    vlim_quantiles: [0.0, 0.99]
+    heatmap_params:
+      bad_color: "#ffffff"
+      contours: 0
+
+    colorbar_params:
+      size: [0.06, 0.85]
+      position: [1.05, 0.075]
+      tick_props:
+        labelsize: 9
+        pad: 3
+        length: 4
+
+  gradient_field_2d_params:
+    xlims: ${xlims}
+    ylims: ${ylims}
 
   # Measured-vs-Predicted scatter (paper defaults: scatter + density + 1:1
   # line + minimal stats; trendline / fit-derived metrics / noise band off

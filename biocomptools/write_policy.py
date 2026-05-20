@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """WritePolicy: configurable per-data-category write intervals.
 
 Controls what data gets persisted to the DB and at what frequency.

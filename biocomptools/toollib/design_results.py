@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design metrics and results management.
 
 Data structures for design evaluation metrics. Metric computation is handled by

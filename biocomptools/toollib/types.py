@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Type definitions for biocomptools.toollib
 
 Single source of truth for common types used across datasources, networkprediction, etc.

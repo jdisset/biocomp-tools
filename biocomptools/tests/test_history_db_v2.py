@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for RunHistoryDB v2 granular schema."""
 
 import numpy as np
@@ -183,8 +185,7 @@ def test_available_keys(db):
     assert "yhatdep" in array_keys
 
 
-def test_save_step_legacy(db):
-    """Test legacy interface that takes raw step_history dict."""
+def test_save_step_history(db):
     sh = {
         "loss": 0.5,
         "learning_rate": 0.001,
@@ -192,7 +193,7 @@ def test_save_step_legacy(db):
         "yhatdep": np.ones((5, 3)),
         "apply_aux": {"layer": {"w": [1, 2]}},
     }
-    db.save_step_legacy(1, 100.0, sh)
+    db.save_step_history(1, 100.0, sh)
 
     bd = db.load_step_data(1)
     assert bd is not None

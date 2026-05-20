@@ -1,14 +1,6 @@
-"""Replay saved step history through loggers without re-running optimization.
-
-Supports two storage backends (auto-detected):
-- **DB mode** (``run_history.db``): Unified replay via LoggerRunner reading from DB.
-- **Legacy pkl mode** (``step_*.pkl`` files): degraded replay without stack/model
-  context (backward compat, will be removed).
-
-Usage:
-    biocomp-replay +biocomp-jobs/replay/diagnostic.yaml ++history_dir=/path/to/run
-    biocomp-replay +replay_config.yaml --last-n 100 --final-only
-"""
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""Replay saved step history through loggers without re-running optimization."""
 
 import json
 from collections.abc import Callable
@@ -21,12 +13,6 @@ from dracon.commandline import Arg, dracon_program
 from dracon.deferred import DeferredNode
 
 from biocomptools.logging_config import get_logger, setup_logging
-from biocomptools.logger_history import (
-    BatchData,
-    HistoryManager,
-    HistoryView,
-    LoggerContext,
-)
 from biocomptools.toollib.loggers.logger import Logger
 from biocomptools.toollib.loggers.designdiagnosticlogger import DesignDiagnosticLogger
 from biocomptools.toollib.loggers.designheatmaplogger import DesignHeatmapLogger
@@ -37,34 +23,6 @@ from jeanplot.core.models import Size
 from biocomptools.toollib.common import config
 
 logger = get_logger(__name__)
-
-
-def _get_all_steps(history_dir: Path) -> list[int]:
-    """Get sorted list of step numbers from history directory."""
-    steps: set[int] = set()
-    for f in history_dir.glob("step_*.pkl"):
-        parts = f.stem.split("_")
-        if len(parts) < 2:
-            continue
-        if len(parts) > 2 and parts[2] in ("end", "start"):
-            continue
-        try:
-            steps.add(int(parts[1]))
-        except ValueError:
-            continue
-    return sorted(steps)
-
-
-def _detect_history_source(history_dir: Path) -> str:
-    db_path = history_dir / "run_history.db"
-    if db_path.exists():
-        return "db"
-    parent_db = history_dir.parent / "run_history.db"
-    if parent_db.exists():
-        return "db"
-    if list(history_dir.glob("step_*.pkl")):
-        return "pkl"
-    raise FileNotFoundError(f"No run_history.db or step_*.pkl files found in {history_dir}")
 
 
 def _resolve_db_path(history_dir: Path) -> Path:
@@ -85,23 +43,6 @@ def replay_history(
     final_only: bool = False,
     max_history_len: int = 10000,
 ) -> None:
-    """Replay step history through loggers, auto-detecting DB vs pkl source."""
-    source = _detect_history_source(history_dir)
-
-    if source == "db":
-        _replay_from_db(history_dir, loggers, output_dir, step_filter, final_only, max_history_len)
-    else:
-        _replay_from_pkl(history_dir, loggers, output_dir, step_filter, final_only, max_history_len)
-
-
-def _replay_from_db(
-    history_dir: Path,
-    loggers: list[Logger],
-    output_dir: Path,
-    step_filter: Callable[[int], bool] | None,
-    final_only: bool,
-    max_history_len: int,
-) -> None:
     from biocomptools.history_db import RunHistoryDB
     from biocomptools.logger_runner import LoggerRunner
 
@@ -116,7 +57,6 @@ def _replay_from_db(
     if commit_hashes:
         logger.info(f"  Commit hashes: {commit_hashes}")
 
-    # Use LoggerRunner in replay mode — same code path as live
     runner = LoggerRunner(
         db=db,
         loggers=loggers,
@@ -124,97 +64,6 @@ def _replay_from_db(
         output_dir=output_dir,
     )
     runner.run()
-
-
-def _replay_from_pkl(
-    history_dir: Path,
-    loggers: list[Logger],
-    output_dir: Path,
-    step_filter: Callable[[int], bool] | None,
-    final_only: bool,
-    max_history_len: int,
-) -> None:
-    """Legacy pkl replay — degraded, no stack/model context."""
-    logger.info("Replay from legacy pkl files (degraded — no stack/model context)")
-    batches = HistoryManager.load_from_step_files(
-        history_dir, step_filter=step_filter, show_progress=True
-    )
-    logger.info(f"  Loaded {len(batches)} steps from pkl files")
-
-    _dispatch_replay_legacy(
-        batches,
-        loggers,
-        output_dir,
-        final_only,
-        max_history_len,
-    )
-
-
-def _dispatch_replay_legacy(
-    batches: list[BatchData],
-    loggers: list[Logger],
-    output_dir: Path,
-    final_only: bool,
-    max_history_len: int,
-) -> None:
-    """Iterate batches and dispatch to loggers (legacy pkl path)."""
-    if not batches:
-        logger.warning("No steps to replay")
-        return
-
-    history = HistoryManager(max_batches=max_history_len)
-
-    for lg in loggers:
-        try:
-            lg.initialize(None)
-        except Exception as e:
-            logger.warning(f"Logger {type(lg).__name__} initialize failed: {e}")
-
-    if not final_only:
-        for batch in batches:
-            history.append_batch(batch)
-            step = batch.step_index
-
-            for lg in loggers:
-                if not lg.should_fire(step):
-                    continue
-
-                view = history.get_view(window=lg.history_window)
-                ctx = LoggerContext.build(
-                    step=step,
-                    output_dir=output_dir,
-                    is_replay=True,
-                )
-                try:
-                    lg.on_batch(view, ctx)
-                except Exception as e:
-                    logger.error(f"on_batch failed for {type(lg).__name__} at step {step}: {e}")
-    else:
-        for batch in batches:
-            history.append_batch(batch)
-
-    # Dispatch on_end
-    end_loggers = [lg for lg in loggers if lg.should_fire_end()]
-    if end_loggers and batches:
-        final_batch = batches[-1]
-        view = HistoryView([final_batch])
-        ctx = LoggerContext.build(
-            step=final_batch.step_index,
-            output_dir=output_dir,
-            is_replay=True,
-            is_final=True,
-        )
-        for lg in end_loggers:
-            try:
-                lg.on_end(view, ctx)
-            except Exception as e:
-                logger.error(f"on_end failed for {type(lg).__name__}: {e}")
-
-    for lg in loggers:
-        try:
-            lg.finalize()
-        except Exception as e:
-            logger.warning(f"Logger {type(lg).__name__} finalize failed: {e}")
 
 
 DEFAULT_TYPES = [

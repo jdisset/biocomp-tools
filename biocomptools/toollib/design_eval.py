@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design evaluation utilities - batched prediction.
 
 Single source of truth for all design evaluation. All networks are batched into

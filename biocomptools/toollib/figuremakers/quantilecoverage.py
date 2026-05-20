@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Quantile coverage benchmark utilities for distribution-aware model evaluation."""
 
 from __future__ import annotations

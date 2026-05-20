@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from pydantic.functional_validators import BeforeValidator
 from pydantic import BaseModel, ConfigDict
 from typing import Any, Optional, List, Union, Dict, Annotated, Literal, Tuple, TypeAlias, Callable
@@ -91,7 +93,7 @@ _DKS_SERIALIZER = {"save": _dks_save, "load": _dks_load}
 class PredictionSamplingConfig(BaseModel):
     """Controls how NetworkPrediction samples the stochastic layers.
 
-    Grouped because these knobs move together — a `distribution` preset
+    Grouped because these knobs move together - a `distribution` preset
     flips several at once, and every prediction-bearing caller accepts
     the full set. Kept as one sub-model so a 10th knob is one edit.
     """
@@ -159,7 +161,7 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     followed by normalization and get_knn_mean_and_variance.
     Returns (mean, variance, n_eff) without intermediate weight arrays.
 
-    Skips rows below ``min_points`` valid neighbors (NaN in any case) — large win
+    Skips rows below ``min_points`` valid neighbors (NaN in any case) - large win
     on 3D lattices where most cells are empty.
     """
     eps = 1e-12
@@ -179,7 +181,7 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     n_outs = y.shape[1] if y.ndim > 1 else 1
 
     if not valid_rows.any():
-        # Everything is too_few → all NaN
+        # Everything is too_few -> all NaN
         nan_mat = np.full((n_grid, n_outs), np.nan)
         nan_neff = np.full((n_grid, 1), np.nan)
         return nan_mat, nan_mat.copy(), nan_neff
@@ -426,7 +428,7 @@ def _compute_data_kernel_state(
     """Pure model-independent state for grid stats. Cacheable per (data, params).
 
     Captures everything in ``_calculate_grid_stats`` that depends only on
-    ``(latent_x, latent_gt, params)`` — the kernel smoother lattice, the
+    ``(latent_x, latent_gt, params)`` - the kernel smoother lattice, the
     kernel interpolator outputs, the density-balanced subsample, and the
     split-half data nRMSE. The model-dependent residuals are computed
     fresh per call from these cached arrays.
@@ -591,6 +593,10 @@ def _calculate_grid_stats(
             model_rmse_latent / kernel_rmse_latent
             if kernel_rmse_latent > 0 else nan
         )
+        # Excess error over the kernel-smoother noise floor - single-pair,
+        # noise-invariant scalars for cross-network model comparison.
+        excess_rmse_latent = model_rmse_latent - kernel_rmse_latent
+        bias_mag_latent = float(np.sqrt(max(0.0, mse_model - mse_kernel)))
         if var_gt > 0:
             kernel_r_squared_latent = 1.0 - mse_kernel / var_gt
             model_r_squared_latent = 1.0 - mse_model / var_gt
@@ -621,6 +627,7 @@ def _calculate_grid_stats(
         kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
         kernel_r_squared_latent = model_r_squared_latent = ratio_r_squared = nan
         kernel_nrmse_local = model_nrmse_local = kratio = nan
+        excess_rmse_latent = bias_mag_latent = nan
         subsample_indices = np.array([], dtype=np.intp)
 
     return {
@@ -635,6 +642,8 @@ def _calculate_grid_stats(
         'kernel_rmse_latent': kernel_rmse_latent,
         'model_rmse_latent': model_rmse_latent,
         'ratio_rmse': ratio_rmse,
+        'excess_rmse_latent': excess_rmse_latent,
+        'bias_mag_latent': bias_mag_latent,
         'kernel_r_squared_latent': kernel_r_squared_latent,
         'model_r_squared_latent': model_r_squared_latent,
         'ratio_r_squared': ratio_r_squared,
@@ -701,7 +710,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
         BeforeValidator(validate_ground_truth),
     ] = None
     # Optional per-network column-protein identity. When supplied, verified
-    # against `network.get_inverted_input_proteins()` at construction time —
+    # against `network.get_inverted_input_proteins()` at construction time -
     # this is the boundary check that catches X-column scrambling
     # (see bugs/eval-x-axis-permutation-iRFP720.md). `None` entries (or a
     # `None` list) skip the check; producers that know the column convention
@@ -723,7 +732,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
     device: Literal['cpu', 'gpu'] = 'cpu'  # device preference for predictions
 
     # Optional grouped sampling config. When supplied, its fields win over the
-    # scalar fields above (transition state — scalar kwargs stay as-is for
+    # scalar fields above (transition state - scalar kwargs stay as-is for
     # backward compat until every call site is migrated).
     sampling: Optional[PredictionSamplingConfig] = None
 
@@ -823,7 +832,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 assert list(cp) == list(expected), (
                     f"Network {i} ({getattr(net, 'name', '?')}): predict_at columns are "
                     f"aligned to {list(cp)} but network expects {list(expected)}. "
-                    f"This is the X-column misalignment bug class — do not silence this "
+                    f"This is the X-column misalignment bug class - do not silence this "
                     f"assertion; fix the producer of predict_at."
                 )
 
@@ -1131,7 +1140,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 logger.info(f"dep_output_pos: {dependent_output_pos}")
 
             stat = self.get_network_stats(network_idx=network_idx)
-            # Drop array-valued grid overlays from the embedded plot metadata —
+            # Drop array-valued grid overlays from the embedded plot metadata -
             # they're consumed by data-holder helpers via `get_network_stats()`
             # directly and don't belong in the JSON-bound figure subject blob.
             pdata.metadata['prediction_stats'] = {
@@ -1246,7 +1255,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
         all_stats: List[Dict[str, Any] | None] = [None] * len(self.network_model.network)
 
         # Bench-mode hook: dump the inputs to _calculate_single_network_stats and
-        # short-circuit. Not part of the production path — only fires when
+        # short-circuit. Not part of the production path - only fires when
         # BIOCOMP_BENCH_CAPTURE is set in the environment.
         _bench_capture = os.environ.get("BIOCOMP_BENCH_CAPTURE")
         if _bench_capture:
@@ -1437,7 +1446,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
     ):
         """Get network stats. Without ``network_idx`` returns the full list
         (computing all missing entries). With ``network_idx`` returns just one
-        network's stats, computing it lazily if missing — used by per-figure
+        network's stats, computing it lazily if missing - used by per-figure
         workers to avoid eager all-up-front compute."""
         if (
             not hasattr(self, '_yhats')
@@ -1491,7 +1500,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
         import pandas as pd
 
         stats = self.get_network_stats()
-        # Drop array-valued fields (grid-mean / grid-weight overlays) — the
+        # Drop array-valued fields (grid-mean / grid-weight overlays) - the
         # CSV is for scalar metrics; arrays are consumed by plot helpers.
         stats = [
             {k: v for k, v in s.items() if not isinstance(v, np.ndarray)}
@@ -1883,7 +1892,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
     def load_results(output_dir: Path | str) -> list[tuple[PlotData, PlotData]]:
         """Load saved prediction results as (ground_truth, prediction) PlotData pairs.
 
-        No model or GPU needed — pure file I/O. Ready for the auto-dispatch plot system.
+        No model or GPU needed - pure file I/O. Ready for the auto-dispatch plot system.
 
         Returns:
             List of (gt_plotdata, pred_plotdata) tuples, one per network.

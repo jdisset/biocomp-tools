@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.library import PartsLibrary
 from biocomp.datautils import get_network_XY
 from tqdm import tqdm
@@ -85,7 +87,7 @@ class NetworkSelector(BaseModel):
 
     experiment_name: Optional[str | Regex | iRegex] = None
     recipe_name: Optional[str | Regex | iRegex] = None
-    recipe_short_name: Optional[str | Regex | iRegex] = None
+    recipe_display_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
     output_name: Optional[str] = None
     weight: float = 1.0
@@ -139,9 +141,9 @@ class NetworkSelector(BaseModel):
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
 
-            if self.recipe_short_name:
-                logger.debug(f"Applying recipe_short_name filter: {self.recipe_short_name}")
-                query = apply_regex_filter(query, col(Recipe.short_name), self.recipe_short_name)
+            if self.recipe_display_name:
+                logger.debug(f"Applying recipe_display_name filter: {self.recipe_display_name}")
+                query = apply_regex_filter(query, col(Recipe.display_name), self.recipe_display_name)
 
             logger.debug(f"Final network query: {query}")
 
@@ -267,8 +269,8 @@ class NetworkSelector(BaseModel):
             filter_parts.append(f"experiment '{self.experiment_name}'")
         if self.recipe_name:
             filter_parts.append(f"recipe '{self.recipe_name}'")
-        if self.recipe_short_name:
-            filter_parts.append(f"recipe_short_name '{self.recipe_short_name}'")
+        if self.recipe_display_name:
+            filter_parts.append(f"recipe_display_name '{self.recipe_display_name}'")
 
         if filter_parts:
             error_parts.append(f"No networks found for {', '.join(filter_parts)}")
@@ -313,8 +315,8 @@ class NetworkSelector(BaseModel):
                         suggestions.append(
                             f"Experiment '{self.experiment_name}' not found. Available experiments:\n- {all_experiments}"
                         )
-            # If we have a recipe name or recipe_short_name but no experiment, try to find matching recipes
-            elif self.recipe_name or self.recipe_short_name:
+            # If we have a recipe name or recipe_display_name but no experiment, try to find matching recipes
+            elif self.recipe_name or self.recipe_display_name:
                 recipe_query = (
                     select(Recipe)
                     .join(Experiment)
@@ -333,10 +335,10 @@ class NetworkSelector(BaseModel):
                             col(Recipe.name).regexp_match(f".*_{self.recipe_name}$")
                         )
 
-                # Apply recipe_short_name filter if specified
-                if self.recipe_short_name:
+                # Apply recipe_display_name filter if specified
+                if self.recipe_display_name:
                     recipe_query = apply_regex_filter(
-                        recipe_query, col(Recipe.short_name), self.recipe_short_name
+                        recipe_query, col(Recipe.display_name), self.recipe_display_name
                     )
                 available_recipes = session.exec(recipe_query).all()
                 if available_recipes:
@@ -348,8 +350,8 @@ class NetworkSelector(BaseModel):
                     filter_desc = []
                     if self.recipe_name:
                         filter_desc.append(f"recipe_name '{self.recipe_name}'")
-                    if self.recipe_short_name:
-                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    if self.recipe_display_name:
+                        filter_desc.append(f"recipe_display_name '{self.recipe_display_name}'")
                     filter_text = " and ".join(filter_desc)
                     suggestions.append(
                         f"Available recipes matching {filter_text}:\n- {recipe_lines}"
@@ -358,8 +360,8 @@ class NetworkSelector(BaseModel):
                     filter_desc = []
                     if self.recipe_name:
                         filter_desc.append(f"recipe_name '{self.recipe_name}'")
-                    if self.recipe_short_name:
-                        filter_desc.append(f"recipe_short_name '{self.recipe_short_name}'")
+                    if self.recipe_display_name:
+                        filter_desc.append(f"recipe_display_name '{self.recipe_display_name}'")
                     filter_text = " and ".join(filter_desc)
                     suggestions.append(f"No recipes found matching {filter_text}")
 

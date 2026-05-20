@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """biocomp-eval: Fast batch evaluation of trained models against datasets.
 
 Builds one compute stack, then iterates over models with fast param swaps.
@@ -47,7 +49,7 @@ def _load_ground_truth(eval_datasets_dir: str) -> list[PlotData]:
 
 
 def _save_stats_json(output_dir: Path, results: list[PlotData], model_signature: str):
-    """Save lightweight stats JSON — one file per model with all network stats."""
+    """Save lightweight stats JSON - one file per model with all network stats."""
     import json
 
     output_dir.mkdir(parents=True, exist_ok=True)

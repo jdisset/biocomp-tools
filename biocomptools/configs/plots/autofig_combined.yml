@@ -35,4 +35,4 @@ plot_tasks:
     <<{+<}:
       plot_method:
         kwargs:
-          title: "Predictions (rmse: ${str(round(D.metadata[prediction_stats']['rmse'], 4))})"
+          title: "Predictions (rmse: ${str(round(D.metadata['prediction_stats']['rmse'], 4))})"

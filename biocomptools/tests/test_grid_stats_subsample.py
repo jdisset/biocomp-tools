@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for the grid-stats helpers: kernel lattice interp, smoother, and the
 density-balanced subsample exposed in `_calculate_grid_stats`."""
 
@@ -36,7 +38,7 @@ def gridstats_params():
 
 
 def test_make_hypercube_ij_indexing_reshapes_naturally():
-    """Flatten → reshape with ``indexing='ij'`` recovers axis structure."""
+    """Flatten -> reshape with ``indexing='ij'`` recovers axis structure."""
     grid = make_hypercube(2, res=5, xmin=0.0, xmax=1.0)
     assert grid.shape == (25, 2)
     reshaped = grid.reshape(5, 5, 2)
@@ -166,7 +168,7 @@ def test_calculate_grid_stats_r_squared_consistent_with_rmse(synthetic_2d, grids
 
 
 def test_calculate_grid_stats_kernel_at_least_as_good_as_model(synthetic_2d, gridstats_params):
-    """Kernel-smoother is the optimal nonparametric → kernel_r² ≥ model_r²."""
+    """Kernel-smoother is the optimal nonparametric -> kernel_r² ≥ model_r²."""
     x, gt, yhat = synthetic_2d
     stats = _calculate_grid_stats(yhat, gt, x, gridstats_params)
     assert stats['kernel_r_squared_latent'] >= stats['model_r_squared_latent'] - 1e-6

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """biocomp-model-prepare: Prepare a model for distribution/archiving.
 
 Creates a clean output directory with:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import logging
 import multiprocessing
 import sys
@@ -157,4 +159,4 @@ def print_logger_hierarchy(logger_name: str):
         print(f"Handlers: {len(current.handlers)}")
         current = current.parent
         if current:
-            print("\nParent →")
+            print("\nParent ->")

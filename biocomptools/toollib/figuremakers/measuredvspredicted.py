@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Data holder for measured-vs-predicted scatter plots.
 
 Extracts (measured, predicted) pairs from NetworkPrediction objects,
@@ -16,10 +18,10 @@ NetworkPrediction has ``enable_gridstats=True``, which is the default):
 - **Noise floor** (opt-in via ``compute_noise_floor=True``): an MVP-shaped
   data-only panel built from the *same* Gaussian-KNN kernel that feeds
   the grid stats. Implementation: take the upstream ``grid_gt_mean_latent``
-  (kernel-smoothed gt mean at the hypercube lattice — already computed for
+  (kernel-smoothed gt mean at the hypercube lattice - already computed for
   ``grid_nrmse``), wrap it in a ``RegularGridInterpolator`` (linear), and
   evaluate at every actual data-point ``x_j``. Cloud =
-  ``(y_j, μ̂_kernel(x_j))`` per data point — same N as the model MVP, same
+  ``(y_j, μ̂_kernel(x_j))`` per data point - same N as the model MVP, same
   axes, same density semantics, just predicted by the kernel smoother
   instead of the model. ``μ̂_kernel`` is the optimal nonparametric
   predictor at the cube-view bandwidth, so cloud spread around ``y = x``
@@ -76,7 +78,7 @@ class MeasuredVsPredictedData(BaseModel):
     # Cube-view overlay controls. Grid means are auto-pulled when present
     # in the upstream stats (free); the noise-floor cloud is built from
     # the same lattice means via a `RegularGridInterpolator` evaluated at
-    # every data point — no extra KNN, no Gumbel sampling.
+    # every data point - no extra KNN, no Gumbel sampling.
     compute_noise_floor: bool = False
 
     _measured: NdArray = PrivateAttr()
@@ -213,7 +215,7 @@ class MeasuredVsPredictedData(BaseModel):
         else:
             gm, gp = np.asarray(grid_gt_latent), np.asarray(grid_yhat_latent)
         # Each row is one grid point; ravel concatenates output columns.
-        # `n_eff` is one value per grid point — broadcast across columns.
+        # `n_eff` is one value per grid point - broadcast across columns.
         n_outs = gm.shape[1] if gm.ndim == 2 else 1
         weights = np.broadcast_to(n_eff[:, None], (n_eff.shape[0], n_outs)).ravel()
         return gm.ravel(), gp.ravel(), weights
@@ -314,7 +316,7 @@ class MeasuredVsPredictedData(BaseModel):
     def noise_floor_measured(self) -> NdArray | None:
         """Measured (y_j) axis of the data-only kernel-smoother MVP cloud.
 
-        One entry per actual data point — the literal ground-truth
+        One entry per actual data point - the literal ground-truth
         observation. Paired index-wise with ``noise_floor_predicted``.
         Requires ``compute_noise_floor=True``.
         """
@@ -325,7 +327,7 @@ class MeasuredVsPredictedData(BaseModel):
         """Predicted axis (μ̂_kernel(x_j)) of the kernel-smoother MVP cloud.
 
         Bilinear interpolation of the upstream lattice ``grid_gt_mean_latent``
-        evaluated at each data-point input ``x_j`` — the kernel-smoother's
+        evaluated at each data-point input ``x_j`` - the kernel-smoother's
         best nonparametric prediction at the cube-view bandwidth.
         """
         return self._noise_floor_predicted

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for MeasuredVsPredictedData data holder."""
 
 from __future__ import annotations
@@ -135,7 +137,7 @@ def test_mvp_subsample_indices_multi_output_ravel_order():
 
 
 def test_mvp_falls_back_when_stats_empty():
-    """No stats → original random-sampling path (existing behavior)."""
+    """No stats -> original random-sampling path (existing behavior)."""
     pred = _make_mock_prediction(n_points=1000)
     pred.get_network_stats.return_value = []
     data = MeasuredVsPredictedData(
@@ -147,7 +149,7 @@ def test_mvp_falls_back_when_stats_empty():
 
 
 def test_mvp_falls_back_when_subsample_indices_missing():
-    """Stats present but no subsample_indices → fallback to random sampling."""
+    """Stats present but no subsample_indices -> fallback to random sampling."""
     pred = _make_mock_prediction(n_points=1000)
     pred.get_network_stats.return_value = [{'grid_nrmse': 0.1}]  # no subsample_indices
     data = MeasuredVsPredictedData(

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design Checkpoint Logger: Saves intermediate design optimization states as pickle files.
 
 Enables:

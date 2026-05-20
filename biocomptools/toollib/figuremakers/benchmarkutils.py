@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Benchmark summary utilities."""
 
 from dataclasses import dataclass
@@ -123,7 +125,7 @@ class BenchmarkData(GridStatsFields, BaseModel):
         network_model = NetworkModel(model=self._model, network=networks)
 
         # d.x is in display order (alphabetical); NetworkPrediction expects network order.
-        # input_order maps network→display, so argsort inverts it back. column_proteins
+        # input_order maps network->display, so argsort inverts it back. column_proteins
         # rides along through the same inversion so the boundary assertion in
         # NetworkPrediction can independently verify the restored wiring.
         predict_at_network_order = []

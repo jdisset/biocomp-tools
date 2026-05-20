@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that logged predictions match committed network predictions.
 
 This test captures the specific bug where heatmap logger shows good predictions

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for `training_set_count` / `trained_on_status` blurb helpers."""
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ def test_count_with_weights_excludes_zero():
 
 
 def test_count_weights_length_mismatch_falls_back():
-    """Mismatched length → ignore weights, fall back to name count."""
+    """Mismatched length -> ignore weights, fall back to name count."""
     m = _model(names=['a', 'b', 'c'], weights=[1.0])
     assert training_set_count(m) == (3, False)
 

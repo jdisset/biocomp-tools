@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
 import threading
@@ -307,7 +309,7 @@ def invoke_design_summary_plot(result: Any, *, output_dir: str | Path) -> None:
     invoke_fn = getattr(PlotJob, "invoke", None)
     assert callable(invoke_fn), "PlotJob.invoke is required for design summary plotting"
     invoke_fn(
-        'biocomp-jobs/plot/auto_figures/autofig_design_summary.yaml',
+        'paper-jobs/plot/figures/autofig_design_summary.yaml',
         result=result,
         output_dir=str(output_dir),
     )

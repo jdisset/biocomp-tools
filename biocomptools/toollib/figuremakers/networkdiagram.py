@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Network compute diagram figure for biocomp networks using jeanplot primitives."""
 
 from typing import Any, Literal
@@ -39,9 +41,9 @@ class LayoutSpec(BaseModel):
     def get_slot_order_for_layer(self, layer_idx: int) -> list[str] | None:
         """Get the ERN slot order for a specific topological layer.
 
-        - None → no slot ordering (use default sort)
-        - flat list[str] → same order for all layers
-        - list[list[str]] → per-layer order; out-of-range layers get None
+        - None -> no slot ordering (use default sort)
+        - flat list[str] -> same order for all layers
+        - list[list[str]] -> per-layer order; out-of-range layers get None
         """
         if self.ern_slot_order is None:
             return None
@@ -60,7 +62,7 @@ class LayoutSpec(BaseModel):
         - ern_slot_order: per-layer union of ERN type names (sorted alphabetically)
         - max_ern_layers: max ERN topological depth across all networks
 
-        Does NOT auto-compute canvas_size — set that manually.
+        Does NOT auto-compute canvas_size - set that manually.
         """
         max_layers = 0
         per_layer_types: dict[int, set[str]] = {}
@@ -850,7 +852,7 @@ class NetworkDiagram(Container):
                 )
                 labeled_sources.add(src)
 
-            # Edge part name annotation — filter by target node type
+            # Edge part name annotation - filter by target node type
             if self.show_edge_parts and e.content_embedding_names:
                 filtered = _filter_embeddings_for_target(
                     e.content_embedding_names, tgt_comp.node_type
@@ -1246,7 +1248,7 @@ def render_diagram_to_ax(
     """Render a network compute diagram to an existing matplotlib axes.
 
     ``aspect="equal"`` (default) preserves the diagram's data aspect ratio
-    inside the cell — produces whitespace bands when cell aspect ≠ content
+    inside the cell - produces whitespace bands when cell aspect ≠ content
     aspect. ``aspect="auto"`` stretches the diagram to fill the cell with
     no margins (boxes/text become slightly anisotropic; usually acceptable
     for schematic content).

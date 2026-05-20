@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.toollib.common import config, make_context_from_types
 from biocomptools.toollib.hashutils import get_package_git_hashes
@@ -152,7 +154,7 @@ class BaseOptimizationProgram(BaseModel, ABC):
         super().model_post_init(*args, **kwargs)
         logger.debug(f"{self.__class__.__name__} post init")
 
-        # Bridge legacy fields → WritePolicy
+        # Bridge legacy fields -> WritePolicy
         if self.save_all_steps and self.write_policy is None:
             logger.warning(
                 "save_all_steps is deprecated, use write_policy=WritePolicy(save_all=True)"

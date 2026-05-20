@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Shared canvas helpers for jeanplot-rendered figures."""
 
 from typing import Optional

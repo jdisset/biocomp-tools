@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
 from biocomptools.toollib.plot import Figure, PlotConfig, load_default_plotconf
@@ -56,12 +58,12 @@ TOPO_ORDER = [
     ("output", "output"),
 ]
 
-FWD_LABELS = {"source": "plasmid → DNA", "transcription": "DNA → mRNA", "translation": "mRNA → PRT"}
+FWD_LABELS = {"source": "plasmid -> DNA", "transcription": "DNA -> mRNA", "translation": "mRNA -> PRT"}
 INV_LABELS = {
-    "inv_output": "Fluo → PRT",
-    "inv_source": "DNA → plasmid",
-    "inv_transcription": "mRNA → DNA",
-    "inv_translation": "PRT → mRNA",
+    "inv_output": "Fluo -> PRT",
+    "inv_source": "DNA -> plasmid",
+    "inv_transcription": "mRNA -> DNA",
+    "inv_translation": "PRT -> mRNA",
 }
 BASIC_RECIPE = [[["hEF1a", "eYFP"], ["hEF1a", "eBFP2"]]]
 
@@ -457,7 +459,7 @@ class InnerNodesFigure(Figure):
             if ts == "output":
                 out.append(
                     NodeInfo(
-                        "PRT → Fluo",
+                        "PRT -> Fluo",
                         "Output",
                         self._apply(ly.f_apply, p, k, n_dup=len(ly.f_input_shapes)),
                         0,
@@ -780,7 +782,7 @@ class InnerNodesFigure(Figure):
         ai = 0
         if hs:
             self._multi_curve(
-                axes[ai], src, self._in_range("source"), cm, "Source\nplasmid → DNA", "position"
+                axes[ai], src, self._in_range("source"), cm, "Source\nplasmid -> DNA", "position"
             )
             ai += 1
         for n in basic:
@@ -795,7 +797,7 @@ class InnerNodesFigure(Figure):
                 uorf,
                 self._in_range("translation"),
                 cm,
-                "Translation\nmRNA → PRT",
+                "Translation\nmRNA -> PRT",
                 "uORFs",
             )
             ai += 1
@@ -833,7 +835,7 @@ class InnerNodesFigure(Figure):
                 inv_uorf,
                 self._in_range("inv_translation"),
                 cm,
-                "Inv Translation\nPRT → mRNA",
+                "Inv Translation\nPRT -> mRNA",
                 "uORFs",
             )
             ai += 1
@@ -849,7 +851,7 @@ class InnerNodesFigure(Figure):
                 inv_src,
                 self._in_range("inv_source"),
                 cm,
-                "Inv Source\nDNA → plasmid",
+                "Inv Source\nDNA -> plasmid",
                 "position",
             )
             ai += 1

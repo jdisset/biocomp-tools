@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import logging
 import shutil
 import sqlite3
@@ -1015,7 +1017,7 @@ class BiocompDBUpdater(BaseModel):
             )
         except Exception as e:
             self._logger.error(f"Exception in build_networks for {recipe.name}: {e}")
-            # Keep the full traceback — callers surface it in the end-of-phase
+            # Keep the full traceback - callers surface it in the end-of-phase
             # summary so failures aren't silently lost.
             return recipe, traceback.format_exc()
 
@@ -1374,7 +1376,7 @@ class BiocompDBUpdater(BaseModel):
                     )
                     if net_build_failures:
                         self._logger.warning(
-                            f"{n_fail} recipe(s) failed to build networks — plot jobs that "
+                            f"{n_fail} recipe(s) failed to build networks - plot jobs that "
                             f"target these recipes will raise 'No data found for []':"
                         )
                         for name, reason in sorted(net_build_failures):

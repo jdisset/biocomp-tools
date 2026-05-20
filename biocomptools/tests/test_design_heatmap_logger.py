@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for DesignHeatmapLogger, specifically the fresh prediction fix."""
 
 import numpy as np

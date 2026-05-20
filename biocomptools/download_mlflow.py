@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import mlflow
 import re
 import fnmatch
@@ -23,7 +25,7 @@ def _sanitize_path_component(name: str) -> str:
 class ArtifactDownloaderConfig(BaseModel):
     mlflow_tracking_uri: Annotated[
         str, Arg(positional=True, help="mlflow tracking server uri.")
-    ] = 'https://mlf.rachael.jdisset.com'
+    ] = ''
     experiment_name_regex: Annotated[
         str, Arg(short="e", help="regex to filter experiment names.")
     ] = Field(default='.*')

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design summary logger: saves metrics and generates plots via batched evaluation."""
 
 import numpy as np

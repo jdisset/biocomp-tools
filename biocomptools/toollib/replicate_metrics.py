@@ -1,13 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """σ_repeat: pairwise replicate-divergence metrics via Gaussian kNN smoothing.
 
 For ordered pair (A, B):
-    σ_RMSE(A→B) = RMSE(B.Y, kernel_A(B.X))
-    σ_RRE(A→B)  = σ_RMSE(A→B) / RMSE(B.Y, kernel_B(B.X))
+    σ_RMSE(A->B) = RMSE(B.Y, kernel_A(B.X))
+    σ_RRE(A->B)  = σ_RMSE(A->B) / RMSE(B.Y, kernel_B(B.X))
 
 Two consumers downstream:
 
-- `compute_group(...)` + `write_yaml(...)` — write the per-group metric YAML.
-- `pair_panels(...)` — return a list of `mvp_panel`-compatible dicts (one per
+- `compute_group(...)` + `write_yaml(...)` - write the per-group metric YAML.
+- `pair_panels(...)` - return a list of `mvp_panel`-compatible dicts (one per
   ordered (i,j) pair, including diagonal self-fits) that can be fed straight
   into `paper-jobs/plot/figures/autofig_dataset_row.yaml` rows. Bypasses the
   `MeasuredVsPredictedData` model (which is NetworkPrediction-shaped) by
@@ -37,7 +39,7 @@ class KernelParams:
 
 @dataclass
 class RescalingParams:
-    """Log10 + clip-to-quantiles + global min-max → [0,1] using constants
+    """Log10 + clip-to-quantiles + global min-max -> [0,1] using constants
     pooled across all runs in the group."""
 
     floor: float = 1.0
@@ -337,7 +339,7 @@ def pair_panels(
                 yt, yp = yt[idx], yp[idx]
             same = ri is rj
             p = pair_lookup.get((ri.label, rj.label))
-            title = f"{ri.basename}\nself-fit" if same else f"{ri.basename} → {rj.basename}"
+            title = f"{ri.basename}\nself-fit" if same else f"{ri.basename} -> {rj.basename}"
             extras = None if same or p is None else {"σ_RMSE": p.sigma_rmse, "σ_RRE": p.sigma_rre}
             panels.append(
                 {

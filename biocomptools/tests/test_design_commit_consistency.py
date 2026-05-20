@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that committed network predictions match evaluation predictions.
 
 This test verifies that the design optimization output is consistent between:

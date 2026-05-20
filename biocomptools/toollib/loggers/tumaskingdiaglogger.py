@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """TU Masking Diagnostic Logger: Per-network convergence diagnostics for TU masking optimization.
 
 Tracks metrics identified by ML experts as diagnostic for TU masking issues:

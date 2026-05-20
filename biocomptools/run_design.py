@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomptools.optimtools import (
     BaseOptimizationProgram,
     run_optimization_program,
@@ -64,22 +66,20 @@ def _target_name(t) -> str:
 
 
 def _create_swapped_network(network: Network) -> Network | None:
-    """Create a copy of the network with swapped input_order (x<->y axes)."""
-    input_order = network.metadata.get("input_order")
-    if input_order is None or len(input_order) != 2:
+    """Create a copy of the network with swapped input axes (x<->y)."""
+    from biocomp.recipe import InputAxis
+
+    axes = network.get_input_axes()
+    if axes is None or len(axes) != 2:
         return None
 
+    flip = {"x": "y", "y": "x"}
     swapped = network.model_copy(deep=True)
-    swapped_order = [input_order[1], input_order[0]]
-    swapped.apply_input_order(swapped_order)
+    swapped.apply_input_axes([
+        InputAxis(name=axes[1].name, axis=flip.get(axes[1].axis or "", axes[1].axis)),
+        InputAxis(name=axes[0].name, axis=flip.get(axes[0].axis or "", axes[0].axis)),
+    ])
     swapped.name = f"{network.name}_swapped"
-
-    if "axis_mapping" in swapped.metadata:
-        old_mapping = swapped.metadata["axis_mapping"]
-        swapped.metadata["axis_mapping"] = {
-            k: ("y" if v == "x" else "x") for k, v in old_mapping.items()
-        }
-
     return swapped
 
 

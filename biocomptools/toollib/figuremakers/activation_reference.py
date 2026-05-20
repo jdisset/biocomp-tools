@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Overlay of "ideal" activation functions (ReLU, GELU, SELU) on the
 ERN-diff latent axes, for visual comparison against the learned ERN
 response shown by `ern_diff_density.histogram`.
 
-All three curves are evaluated in latent space directly — the same
-convention used by `ern_diff_density` for its dashed ReLU reference —
+All three curves are evaluated in latent space directly - the same
+convention used by `ern_diff_density` for its dashed ReLU reference -
 so they share the same latent xlims/ylims and MEF tick labeling.
 """
 

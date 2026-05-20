@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Genetic circuit figure for biocomp networks using jeanplot."""
 
 from typing import Optional, Any, Literal
@@ -81,7 +83,7 @@ def render_circuit_to_ax(
     renderer = MatplotlibRenderer()
     renderer.render_component(ax, schematic, adjust_lims=True)
 
-    # Optional fixed-canvas widening — schematic content is left at its
+    # Optional fixed-canvas widening - schematic content is left at its
     # rendered data coords, lims are expanded around it so smaller recipes
     # appear small inside a uniformly-sized canvas. Text stays in data
     # space (jeanplot's data-unit auto-refresh handles re-sizing on draw).

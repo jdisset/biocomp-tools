@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """End-to-end tests for async logger handler optimizations.
 
-Tests exercise the full LoggerDispatcher → AsyncLoggerHandler → consumer thread →
+Tests exercise the full LoggerDispatcher -> AsyncLoggerHandler -> consumer thread ->
 thread pool dispatch pipeline with synthetic training loops and capture loggers.
 
 Validates three fixes:

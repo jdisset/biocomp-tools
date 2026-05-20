@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Density of `(projection(X), Y)` pooled across 2-input networks in latent space.
 
 `projection="diff"` (X2 - X1) anchors the single-ERN ReLU paper figure;
@@ -76,7 +78,7 @@ class TwoInputProjectionData(BaseModel):
     knn_stats_params: dict = Field(default_factory=lambda: dict(_DEFAULT_KNN_STATS))
     max_centroid_offset_frac: float = 1.0
     # The latent rescaler is log-like, so combining two latent values does
-    # arithmetic in *log* space — sum becomes product, diff becomes log
+    # arithmetic in *log* space - sum becomes product, diff becomes log
     # ratio. Set True to compute the projection in raw fluorescence then
     # rescale (signed-log for diff), so the axis is in real MEF units.
     project_in_raw_space: bool = False

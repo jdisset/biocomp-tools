@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from sqlmodel import Field, SQLModel, create_engine, Relationship
 from typing import List, Optional, Annotated, Any, TypeVar
 import sqlalchemy as sa
@@ -110,7 +112,7 @@ class Experiment(BiocompDB, table=True):
     ) -> List["Recipe"]:
         """
         Returns a list of Recipe objects. Prefers .recipe.yaml over .recipe.json5
-        when both exist next to each other (YAML carries short_name + input_order).
+        when both exist next to each other (YAML carries display_name + input_order).
         """
         recipes = []
         if not self.content:
@@ -205,7 +207,7 @@ class Network(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     recipe_name: str = Field(foreign_key="recipe.name")
     network_info: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    short_name: Optional[str] = None  # human-friendly alias for display
+    display_name: Optional[str] = None  # human-friendly alias for display
 
     recipe: Optional["Recipe"] = Relationship(back_populates="networks")
 
@@ -227,7 +229,7 @@ class Network(BiocompDB, table=True):
             name=self.name,
             recipe_name=self.recipe_name,
             network_info=self.network_info,
-            short_name=self.short_name,
+            display_name=self.display_name,
         )
 
         # can't copy recipe by accessing the recipe arg
@@ -246,7 +248,7 @@ class Network(BiocompDB, table=True):
         cls,
         network: bc.network.Network,
         recipe_name=None,
-        short_name: Optional[str] = None,
+        display_name: Optional[str] = None,
         **kwargs,
     ):
         network_info = extract_network_info(network)
@@ -257,7 +259,7 @@ class Network(BiocompDB, table=True):
             name=f"{recipe_name}_{'-'.join(network_info['markers'])}",
             recipe_name=recipe_name,
             network_info=network_info,
-            short_name=short_name,
+            display_name=display_name,
             **kwargs,
         )
         obj._network = network
@@ -309,8 +311,8 @@ class Network(BiocompDB, table=True):
         raise ValueError(msg)
 
     def title(self):
-        if self.short_name:
-            return self.short_name
+        if self.display_name:
+            return self.display_name
         if self._network is None:
             return f"{self.name}"
         fresh_info = extract_network_info(self._network)
@@ -326,7 +328,7 @@ class Recipe(BiocompDB, table=True):
     name: str = Field(primary_key=True)
     content: dict = Field(sa_column=Column(JSON))
     hash: str = Field(default=None)
-    short_name: Optional[str] = None  # for easier display in UI
+    display_name: Optional[str] = None  # for easier display in UI
 
     xp: Optional[str] = Field(foreign_key="experiment.name", default=None)
     file: ForcedOptionalStr = None
@@ -382,12 +384,12 @@ class Recipe(BiocompDB, table=True):
             content = bcr.model_dump(mode='python')
             # recipe 'name' in the stored dict should be the local recipe short-name
             content['name'] = filepath.name.removesuffix('.recipe.yaml')
-            short_name = (bcr.metadata or {}).get('short_name') or content['name']
+            display_name = bcr.display_name or content['name']
         else:
             import json5
             with open(filepath, 'r') as f:
                 content = json5.load(f)
-            short_name = content.get('name', filepath.stem)
+            display_name = content.get('display_name') or content.get('name', filepath.stem)
 
         if xp_name is not None:
             name = f"{xp_name}_{content.get('name', filepath.stem)}"
@@ -397,7 +399,7 @@ class Recipe(BiocompDB, table=True):
         return Recipe(
             name=name,
             content=content,
-            short_name=short_name,
+            display_name=display_name,
             xp=xp_name,
             file=str(file_path),
             **kwargs,
@@ -494,7 +496,7 @@ class Recipe(BiocompDB, table=True):
                 name=unique_name,
                 recipe_name=self.name,
                 network_info=network_info,
-                short_name=self.short_name,
+                display_name=self.display_name,
             )
             network._network = net
             network_models.append(network)

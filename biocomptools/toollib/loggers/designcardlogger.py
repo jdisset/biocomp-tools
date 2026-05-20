@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Compact circuit card logger for design replay.
 
 Generates a 1x3 figure per step: circuit schematic, network diagram, and

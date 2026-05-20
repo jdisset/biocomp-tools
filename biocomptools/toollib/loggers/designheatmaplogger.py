@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design Heatmap Logger: Rich ASCII visualization of target vs prediction during optimization."""
 
 import numpy as np
@@ -933,7 +935,7 @@ class DesignHeatmapLogger(Logger):
         dmanager = db.load_artifact("dmanager")
         dconfig = db.load_artifact("dconfig")
         if model is None or dmanager is None:
-            logger.warning("DB missing model/dmanager artifacts — heatmap replay unavailable")
+            logger.warning("DB missing model/dmanager artifacts - heatmap replay unavailable")
             return
 
         self._model = model

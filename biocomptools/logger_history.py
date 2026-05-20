@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Centralized history management for loggers.
 
 Provides batch-level data storage and windowed views for logger callbacks.
@@ -24,8 +26,8 @@ if not hasattr(np, "float"):
 def _unwrap_triage_dict(v: Any) -> Any:
     """Unwrap internal triage wrappers back to original types.
 
-    {"_list": [...]} → np.asarray(list)  (small array wrapper)
-    {"_value": "None"} → None            (None wrapper)
+    {"_list": [...]} -> np.asarray(list)  (small array wrapper)
+    {"_value": "None"} -> None            (None wrapper)
     """
     if not isinstance(v, dict):
         return v

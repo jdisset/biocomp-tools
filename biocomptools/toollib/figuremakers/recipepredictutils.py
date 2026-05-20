@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Recipe prediction utilities for uniform vs experimental X sampling."""
 
 from typing import TYPE_CHECKING, Optional

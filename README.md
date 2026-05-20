@@ -1,10 +1,50 @@
 # biocomp-tools
-The biocomp-tools repo is a collection of tools, modules, functions that are used in the biocomp project, which is a machine learning research project that trains a foundation model of synthetic biology. It also defines some pydantic models of several important classes.
-2 major tools are:
-- the plotting module (biocomp-plot): uses biocomp plotting functions and dracon to plot varied biological data (mostly flow cytometry data). It revolves around the concept of Figure and Tasks.
-- the training tool (biocomp-training): it deploys training runs of the core biocomp model
 
-Another central concept is that of DataSources, which are classes that provide data either to plot, predict on, or train on.
-Biocomp-tools also provide useful classes and helpers to define set-based selection of data (e.g. for training or plotting, we can define union, intersection, difference of experimental data, apply filters, etc.)
-It also provides helpers to wrap around a model (which needs to be saved with it's hyperparameters, aka ComputeConfig) and make predictions with it.
+The Python side of the biocompiler. Training, plotting, dataset selection,
+design, replay, hyperopt. Companion to the core `biocomp` framework.
 
+If you don't know what a BNN or a circuit is, read `biocomp/README.md` first.
+Then come back.
+
+## what's in here
+
+- **`biocomp-plot`** - plot stuff. Mostly flow cytometry. YAML-driven via dracon.
+- **`biocomp-train`** - train models.
+- **`biocomp-design`** - design circuits (inverse mode).
+- **`biocomp-replay`** - re-run loggers on a saved run without re-doing the work.
+- **`biocomp-hyperopt`** / **`biocomp-design-hyperopt`** - optuna sweeps.
+- **`biocomp-eval`** / **`biocomp-check`** / **`biocomp-updatedb`** / **`biocomp-circuitplot`** / **`biocomp-model-prepare`** - smaller tools you'll find as you need them.
+
+The package also defines the pydantic models used everywhere
+(`BiocompModel`, `NetworkPrediction`, `NetworkSet`, ...) and a few core ideas:
+
+- **DataSources** - anything that gives you data to plot, predict on, or train on.
+- **NetworkSet / Union / Difference / Filters** - set-algebra over experimental data.
+- **Figures + Tasks** - composable plot units, defined in YAML.
+
+## install
+
+editable install from a checkout:
+
+```bash
+pip install -e .
+```
+
+you'll also need `biocomp` (sibling repo) and a few env vars - look at
+`biocomptools/configs/default.yaml` for the list (root path, db path, mlflow
+server, parts-db, etc.).
+
+## quick start
+
+```bash
+biocomp-train +biocomp-jobs/train/start
+biocomp-plot +biocomp-jobs/plot/dataset_prediction.yaml
+biocomp-design +biocomp-jobs/design/start ++architecture=two_and_one
+```
+
+real examples live in `biocomp-jobs/` (separate repo). docs live in
+`biocomp-doc/` (also separate). dracon syntax: see the dracon repo.
+
+## license
+
+MIT. see `LICENSE`.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Logger for data-driven design optimization - saves metrics and loss history."""
 
 import numpy as np

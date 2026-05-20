@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import matplotlib as mpl
 from dracon.draconstructor import resolve_all_lazy
 from typing import TypeVar, Union

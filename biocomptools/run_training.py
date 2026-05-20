@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomptools.optimtools import (
     BaseOptimizationProgram,
     run_optimization_program,

@@ -1,10 +1,10 @@
-"""Per-run SQLite database for step history and replay artifacts.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""Per-run SQLite DB for step history + replay artifacts.
 
-SSOT for all optimization data. Dual storage layer:
-- SQLModel (via SQLAlchemy engine) for RunInfo/RunArtifact (typed domain objects)
-- Raw sqlite3 conn for step_scalar/step_dict/step_array/step_blob (bulk I/O)
-
-Both layers share the same underlying sqlite3 connection via WAL mode.
+Two layers, one sqlite3 connection (WAL):
+- SQLModel for RunInfo/RunArtifact
+- Raw sqlite3 for step_{scalar,dict,array,blob}
 """
 
 import io
@@ -25,14 +25,9 @@ from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# SQLModel domain tables (typed, loaded once)
-# ---------------------------------------------------------------------------
-
-
 class RunInfo(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    run_type: str  # "training" | "design"
+    run_type: str
     start_time: float
     end_time: float | None = None
     config_json: str = "{}"
@@ -49,10 +44,6 @@ class RunArtifact(SQLModel, table=True):
     size_bytes: int = 0
     created_at: float = 0.0
 
-
-# ---------------------------------------------------------------------------
-# Raw sqlite3 schema for time-series step data
-# ---------------------------------------------------------------------------
 
 _STEP_TABLES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS step (
@@ -114,13 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_trace_component ON trace_event(component);
 
 
 class RunHistoryDB:
-    """Per-run SQLite database — SSOT for all optimization data.
-
-    Dual storage layer:
-    - SQLModel (via SQLAlchemy engine) for RunInfo/RunArtifact
-    - Raw sqlite3 conn for step_scalar/step_dict/step_array/step_blob
-    """
-
     def __init__(self, path: Path, *, read_only: bool = False) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +125,6 @@ class RunHistoryDB:
         if version < 2 and not read_only:
             self._conn.executescript(_STEP_TABLES_SCHEMA)
 
-        # SQLAlchemy engine sharing the same underlying sqlite3 connection
         self._engine = create_engine(
             "sqlite://",
             creator=lambda: self._conn,
@@ -170,11 +153,7 @@ class RunHistoryDB:
         }
         if "step_scalar" in tables or "step" in tables:
             return 2
-        return 0  # empty
-
-    # ====================================================================
-    # Domain objects (SQLModel)
-    # ====================================================================
+        return 0
 
     def save_run_info(
         self,
@@ -248,14 +227,6 @@ class RunHistoryDB:
     def is_run_finished(self) -> bool:
         row = self._conn.execute("SELECT end_time FROM runinfo LIMIT 1").fetchone()
         return row is not None and row[0] is not None
-
-    # Compat aliases
-    def update_end_time(self) -> None:
-        self.mark_finished()
-
-    # ====================================================================
-    # Step data — Write API (raw sqlite3)
-    # ====================================================================
 
     def save_step(self, step: int, timestamp: float, loss: float | None) -> None:
         sql_loss = None if (loss is not None and np.isnan(loss)) else loss
@@ -331,10 +302,6 @@ class RunHistoryDB:
 
     def commit(self) -> None:
         self._conn.commit()
-
-    # ====================================================================
-    # Step data — Read API (raw sqlite3)
-    # ====================================================================
 
     def get_step_range(self) -> tuple[int, int]:
         row = self._conn.execute("SELECT MIN(step), MAX(step) FROM step").fetchone()
@@ -456,8 +423,6 @@ class RunHistoryDB:
             ).fetchall()
         return {k: dill.loads(blob) for k, blob in rows}
 
-    # ---- Composite loading for HistoryView ----
-
     def load_step_data(
         self,
         step: int,
@@ -520,10 +485,7 @@ class RunHistoryDB:
                 batches.append(bd)
         return batches
 
-    # ---- Introspection ----
-
     def get_blob_steps(self, key: str) -> list[int]:
-        """Return sorted list of steps that have a blob stored under *key*."""
         rows = self._conn.execute(
             "SELECT DISTINCT step FROM step_blob WHERE key=? ORDER BY step",
             (key,),
@@ -573,8 +535,7 @@ class RunHistoryDB:
                 batches.append(bd)
         return batches
 
-    def save_step_legacy(self, step: int, timestamp: float, step_history: dict[str, Any]) -> None:
-        """Write a raw step_history dict with automatic triage into granular tables."""
+    def save_step_history(self, step: int, timestamp: float, step_history: dict[str, Any]) -> None:
         from biocomptools.step_history_triage import triage_step_history
 
         triaged = triage_step_history(step_history)
@@ -585,23 +546,12 @@ class RunHistoryDB:
         self.save_blobs(step, triaged.blobs)
         self.commit()
 
-    # Backward compat alias
-    def step_count(self) -> int:
-        return self.get_step_count()
-
-    def step_range(self) -> tuple[int, int]:
-        return self.get_step_range()
-
     def close(self) -> None:
         self._conn.close()
         self._engine.dispose()
 
 
-# ---- Internal helpers ----
-
-
 def _json_default(obj: Any) -> Any:
-    """Fallback serializer for JSON."""
     import enum
 
     if isinstance(obj, enum.Enum):

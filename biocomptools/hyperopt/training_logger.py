@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Rich training logger for hyperopt with live progress bar and loss display."""
 
 import numpy as np

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Integration tests for hyperparameter optimization.
 
 These tests verify that hyperparameters are correctly propagated from

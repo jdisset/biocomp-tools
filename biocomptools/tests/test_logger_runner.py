@@ -1,4 +1,6 @@
-"""Tests for LoggerRunner — unified live + replay dispatch."""
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""Tests for LoggerRunner - unified live + replay dispatch."""
 
 import threading
 import time

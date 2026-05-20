@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Unified target data preparation for design evaluation.
 
 Single source of truth for extracting and preparing data from design targets.

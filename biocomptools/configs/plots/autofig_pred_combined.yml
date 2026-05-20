@@ -28,12 +28,6 @@ plot_tasks:
 
   - !deferred
     !define D: ${predicted_data}
-    !define _trigger_prediction: ${D.y} # just a trick to trigger the lazy eval'd prediction. (allows access to rmse)
-
+    !define _trigger_prediction: ${D.y} # touch .y so the lazy prediction (and rmse) is computed
     !define axnum: 1
     <<: !include pkg:biocomptools:configs/plots/tasks/auto
-
-    # <<{+<}:
-    #   plot_method:
-    #     kwargs:
-    #       title: "Predictions (rmse: ${str(round(D.metadata['prediction_stats']['rmse'], 4))})"

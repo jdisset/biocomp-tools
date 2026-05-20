@@ -8,13 +8,3 @@ nets:
   - !each(rotation) ${rotations}:
       - !define ERNS: ${rotation}
         <<: !include file:$DIR/twoandone.yaml
-
-  # - !each(permutation) ${permutations}:
-  #     - !define ERNS: ${permutation}
-  #       <<: !include file:$DIR/twoandoneskip.yaml
-  # - - !define ERNS: ${BASE_ERNS}
-  #     <<: !include file:$DIR/three.yaml
-  #
-# all:
-#   !each(ern) ${construct(&/nets)}:
-#     - ${ern}

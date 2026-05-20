@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design result visualization utilities.
 
 DesignResult is a pure data holder - all values must be precomputed via DesignEvaluator.

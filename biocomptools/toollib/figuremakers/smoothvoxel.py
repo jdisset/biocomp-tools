@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Figuremaker utilities for smooth voxel-conditioned violin plots."""
 
 from __future__ import annotations

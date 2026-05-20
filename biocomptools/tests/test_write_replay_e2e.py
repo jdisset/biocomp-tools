@@ -1,7 +1,9 @@
-"""E2E tests: StepWriter → RunHistoryDB → LoggerRunner replay pipeline.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""E2E tests: StepWriter -> RunHistoryDB -> LoggerRunner replay pipeline.
 
-Validates the full round-trip: optimization loop writes data → DB stores it →
-replay reads it → loggers receive correct data.
+Validates the full round-trip: optimization loop writes data -> DB stores it ->
+replay reads it -> loggers receive correct data.
 """
 
 import threading
@@ -264,7 +266,7 @@ class TestRoundtripDataIntegrity:
     """Round-trip data integrity (tests 1-4)."""
 
     def test_full_roundtrip_training_data(self, db):
-        """20 steps training data → StepWriter → replay → verify all data categories."""
+        """20 steps training data -> StepWriter -> replay -> verify all data categories."""
         _write_training_loop(db, 20, WritePolicy(save_all=True))
 
         capture = AllDataCaptureLogger(call_at_interval=1)
@@ -286,7 +288,7 @@ class TestRoundtripDataIntegrity:
             assert "yhatdep" in capture._array_keys[i]
 
     def test_full_roundtrip_design_data(self, db):
-        """15 steps design data → StepWriter → replay → verify design-specific keys."""
+        """15 steps design data -> StepWriter -> replay -> verify design-specific keys."""
         _write_training_loop(db, 15, WritePolicy(save_all=True), _make_design_step_history)
 
         capture = AllDataCaptureLogger(call_at_interval=1)
@@ -307,7 +309,7 @@ class TestRoundtripDataIntegrity:
             assert "sublosses" in capture._metric_keys[i]
 
     def test_array_values_roundtrip(self, db):
-        """10 steps → replay → verify yhatdep values match per step."""
+        """10 steps -> replay -> verify yhatdep values match per step."""
         _write_training_loop(db, 10, WritePolicy(save_all=True))
 
         capture = ArrayValueLogger(call_at_interval=1)
@@ -320,7 +322,7 @@ class TestRoundtripDataIntegrity:
             np.testing.assert_array_almost_equal(actual, expected)
 
     def test_blob_values_roundtrip(self, db):
-        """5 steps → replay → verify latest_params blob correct."""
+        """5 steps -> replay -> verify latest_params blob correct."""
         _write_training_loop(db, 5, WritePolicy(save_all=True))
 
         capture = ArrayValueLogger(call_at_interval=1)
@@ -480,7 +482,7 @@ class TestHighLevelAPI:
     """High-level replay_history API (test 12)."""
 
     def test_replay_history_high_level_api(self, tmp_path):
-        """Create DB at history_dir/run_history.db → write → replay_history()."""
+        """Create DB at history_dir/run_history.db -> write -> replay_history()."""
         from biocomptools.run_replay import replay_history
 
         history_dir = tmp_path / "run_output"
@@ -505,7 +507,7 @@ class TestFullIntegration:
     """Full integration with LoggerDispatcher (test 13)."""
 
     def test_dispatcher_writes_to_db_then_replay_reads(self, tmp_path):
-        """LoggerDispatcher writes → shutdown → replay from same DB."""
+        """LoggerDispatcher writes -> shutdown -> replay from same DB."""
         from biocomptools.logger_dispatch import LoggerDispatcher
 
         db = RunHistoryDB(tmp_path / "integration.db")
@@ -565,11 +567,11 @@ class TestSelectiveLoading:
         runner.run()
 
         for step, mkeys in selective._metric_keys_by_step.items():
-            # learning_rate is a scalar — should NOT be loaded (only "sublosses" requested)
+            # learning_rate is a scalar - should NOT be loaded (only "sublosses" requested)
             assert "learning_rate" not in mkeys, (
                 f"learning_rate should be filtered out at step {step}"
             )
-            # sublosses is a dict — should be loaded
+            # sublosses is a dict - should be loaded
             assert "sublosses" in mkeys, f"sublosses should be present at step {step}"
 
         for step, akeys in selective._array_keys_by_step.items():
@@ -583,7 +585,7 @@ class TestEdgeCases:
     """Edge cases (test 15)."""
 
     def test_empty_replay_no_steps(self, db):
-        """DB with RunInfo but no steps → no on_batch, no on_end."""
+        """DB with RunInfo but no steps -> no on_batch, no on_end."""
         db.mark_finished()
 
         capture = AllDataCaptureLogger(call_at_interval=1)

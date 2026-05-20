@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Utilities for pickling JAX arrays and lazy data structures.
 
 These utilities handle serialization challenges with:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """NSGA2 Design Logger: tracks multi-objective optimization with pareto front visualization."""
 
 import json
@@ -104,7 +106,7 @@ class NSGA2DesignLogger(Logger):
         loss_label_line += loss_labels[-1].rjust(width // 4)
         lines.append(loss_label_line)
 
-        lines.append("      " + "Pattern Loss →".center(width))
+        lines.append("      " + "Pattern Loss ->".center(width))
         lines.append("  ↑ TU Count")
 
         return "\n".join(lines)

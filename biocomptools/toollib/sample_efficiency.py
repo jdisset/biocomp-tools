@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Helpers for sample efficiency studies.
 
 Used by broodmon YAML jobs to generate deterministic random subsets

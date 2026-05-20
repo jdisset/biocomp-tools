@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design Subloss Logger: Comprehensive debugging visualization for design optimization.
 
 Produces detailed diagnostic plots at each logged step:

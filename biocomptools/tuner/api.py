@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """biocomp-tuner: Interactive design parameter explorer with web UI."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ### {{{                          --     import     --
 from tqdm import tqdm
 from pathlib import Path

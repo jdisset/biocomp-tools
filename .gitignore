@@ -17,3 +17,10 @@ repo*
 biocomptools/tuner-ui/node_modules
 biocomptools/tuner-ui/package-lock.json
 biocomptools/tuner_app_react
+
+tmp/
+runner_logs/
+.ruff_cache/
+.pytest_cache/
+.venv/
+repomix-output.txt

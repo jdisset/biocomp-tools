@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
 import sys
@@ -485,7 +487,7 @@ def _plot_shap_page(study: optuna.Study, analysis: dict, cmap_div, top_n: int = 
     ax.invert_yaxis()
     ax.axvline(0, color='gray', linewidth=0.5, linestyle='--')
     ax.set_xlabel(
-        'SHAP value (impact on objective)\n← reduces objective | increases objective →', fontsize=11
+        'SHAP value (impact on objective)\n← reduces objective | increases objective ->', fontsize=11
     )
 
     oob_str = f"OOB R²={oob_r2:.3f} | " if oob_r2 is not None else ""

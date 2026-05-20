@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design Loss History Logger: single-panel loss history for the best network.
 
 Plots total loss, weighted sublosses, and active penalties for the best-performing
@@ -127,7 +129,7 @@ class DesignLossHistoryLogger(Logger):
 
         fig, ax = plt.subplots(figsize=(12, 6))
         fig.suptitle(
-            f"Design Loss History — best network{title_suffix}", fontsize=13, fontweight="bold"
+            f"Design Loss History - best network{title_suffix}", fontsize=13, fontweight="bold"
         )
 
         losses = [h.get("loss", np.nan) for h in self._history]

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Logging utilities for hyperopt."""
 
 from typing import Callable

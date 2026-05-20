@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Shared utilities for logger implementations."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """TunerSession: Core session management for biocomp-tuner."""
 
 from __future__ import annotations

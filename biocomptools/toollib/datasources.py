@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ## {{{                          --     imports     --
 from pydantic import model_validator, ConfigDict
 from typing import Any, Optional, List
@@ -151,17 +153,22 @@ class DBSource(DataSource, NetworkSet):
             logger.debug(f"DBSource: XY data for {network.name}: X{X.shape}, Y{Y.shape}")
             return X, Y
 
-        # Fall back to the recipe's own input_order annotation when the caller
-        # hasn't set one. Lets a recipe declare its preferred x1/x2/x3 mapping
-        # once (in the JSON5) and have all forward plots pick it up.
         effective_input_order = self.input_order
         if effective_input_order is None and network.recipe is not None:
             recipe_content = network.recipe.content or {}
-            recipe_order = recipe_content.get('input_order') if isinstance(recipe_content, dict) else None
+            recipe_order = None
+            if isinstance(recipe_content, dict):
+                axes = recipe_content.get('input_axes')
+                if axes:
+                    recipe_order = [
+                        ax['name'] if isinstance(ax, dict) else ax for ax in axes
+                    ]
+                else:
+                    recipe_order = recipe_content.get('input_order')
             if recipe_order:
                 effective_input_order = recipe_order
                 logger.debug(
-                    f"DBSource: using recipe.input_order={recipe_order} for {network.name}"
+                    f"DBSource: using recipe input order {recipe_order} for {network.name}"
                 )
 
         try:

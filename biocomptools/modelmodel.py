@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, BeforeValidator, Field
@@ -738,7 +740,7 @@ class NetworkModel(BaseModel):
 
         collecting = collect_in_indices is not None or collect_out_indices is not None
 
-        # run all batches — no per-batch sync, just dispatch
+        # run all batches - no per-batch sync, just dispatch
         all_yhats = []
         all_collected_in = []
         all_collected_out = []

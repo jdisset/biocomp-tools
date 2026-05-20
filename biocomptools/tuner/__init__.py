@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """biocomp-tuner: Interactive web tool for exploring design parameter space."""
 
 from .session import TunerSession, TunerResult, TunerConfig

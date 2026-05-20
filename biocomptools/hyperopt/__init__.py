@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Hyperparameter optimization module for biocomp."""
 
 from .samplers import create_sampler

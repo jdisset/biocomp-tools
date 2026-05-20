@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Shared base classes and utilities for hyperparameter optimization.
 
 This module provides:
@@ -243,9 +245,9 @@ def expand_schedule_hyperparams(
     """Expand schedule hyperparams to full 3-phase specification.
 
     Handles three cases for each schedule:
-    1. Constant: Just the base name (e.g., 'w_sinkhorn') → all phases get same value
-    2. Linear: phase1_value + phase3_end_value → computes phase2_end_value via interpolation
-    3. Full 3-phase: All three values explicitly provided → used as-is
+    1. Constant: Just the base name (e.g., 'w_sinkhorn') -> all phases get same value
+    2. Linear: phase1_value + phase3_end_value -> computes phase2_end_value via interpolation
+    3. Full 3-phase: All three values explicitly provided -> used as-is
 
     Args:
         hp: Raw hyperparams dict from trial.suggest()
@@ -311,7 +313,7 @@ def expand_schedule_hyperparams(
                 p2_val = p1_val
             result[p2_key] = p2_val
             logger.debug(
-                f"Schedule '{sched_name}': linear p1={p1_val:.4f} → p2={p2_val:.4f} → p3={p3_val:.4f}"
+                f"Schedule '{sched_name}': linear p1={p1_val:.4f} -> p2={p2_val:.4f} -> p3={p3_val:.4f}"
             )
 
         elif has_p1 and has_p2 and has_p3:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """CMA-ES Logger: EC-specific monitoring for evolutionary design optimization.
 
 Tracks and visualizes:
@@ -120,7 +122,7 @@ class CMAESLogger(Logger):
         )
         table.add_row("σ (Step Size)", f"{sigma:.6f}", sigma_status)
         table.add_row(
-            "Valid Pop", f"{n_valid}", "[green]✓[/green]" if n_valid > 0 else "[red]✗[/red]"
+            "Valid Pop", f"{n_valid}", "[green]ok[/green]" if n_valid > 0 else "[red]x[/red]"
         )
 
         console.print(table)

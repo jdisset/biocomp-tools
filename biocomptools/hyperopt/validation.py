@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Validation loss computation for hyperopt."""
 
 import numpy as np

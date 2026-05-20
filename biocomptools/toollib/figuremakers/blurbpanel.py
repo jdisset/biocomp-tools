@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Markdown-blurb panel renderer.
 
-A lightweight markdown→matplotlib renderer for adding contextual notes
+A lightweight markdown->matplotlib renderer for adding contextual notes
 (model description, citation, build info) as a column in `autofig_dataset_row`
 layouts. Uses `matplotlib.offsetbox` packers so vertical spacing is handled
-by the layout engine — no manual line-height math.
+by the layout engine - no manual line-height math.
 
 Supported markdown:
   * `# H1`, `## H2`, `### H3`     (heading sizes)
@@ -23,7 +25,7 @@ panel's available width while preserving inline styling. Pass
 ``wrap_chars=int`` to force a column width, or ``wrap=False`` to disable.
 
 Anything richer (links, tables, nested lists, fenced code) falls back to
-plain text — the goal is a readable info panel, not a full markdown engine.
+plain text - the goal is a readable info panel, not a full markdown engine.
 """
 
 from __future__ import annotations
@@ -193,7 +195,7 @@ def render_blurb_to_ax(
     The axes are stripped of ticks and spines; the layout is handled by
     matplotlib's offsetbox packers, so there's no fragile line-height math.
 
-    Word-wrapping is on by default — paragraph and bullet lines wrap to fit
+    Word-wrapping is on by default - paragraph and bullet lines wrap to fit
     the panel's width while preserving inline styling. ``wrap_chars`` lets
     you force a fixed column width; ``wrap=False`` disables wrapping.
     """

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ## {{{                          --     imports     --
 
 from biocomptools.logging_config import get_logger, setup_logging
@@ -26,6 +28,12 @@ from biocomp.plotutils import (
     GridLayout,
     MultiRowGridLayout,
     MergeSpec,
+    diagonal_xy,
+    diagonal_xy_raw,
+    plot_diagonal_paths,
+    slice_panel_args,
+    plot_slice_overlay,
+    IDENTITY_RESCALER,
 )
 from biocomptools.toollib.datasources import DataSource, DBSource
 
@@ -47,6 +55,9 @@ from biocomptools.toollib.figuremakers.datasetsummary import (
     expand_panel_atomics,
     compose_rows,
     compose_atomics,
+    build_rows,
+    panel_plot_method,
+    panel_plot_config,
     layout_dimensions,
     extract_plot_data_metadata,
     extract_model_metadata,
@@ -54,6 +65,7 @@ from biocomptools.toollib.figuremakers.datasetsummary import (
     build_figure_metadata,
     predicted_stats,
     build_prediction_pipeline,
+    maybe_build_mvp,
     filter_compatible,
     format_z_label,
     smart_title,
@@ -61,6 +73,17 @@ from biocomptools.toollib.figuremakers.datasetsummary import (
     trained_on_status,
 )
 from biocomptools.toollib.figuremakers.measuredvspredicted import MeasuredVsPredictedData
+from biocomptools.toollib.analysis.generalization.shapley_figure import (
+    ShapleyDetailFigure,
+    ShapleyDetailConfig,
+)
+from biocomptools.toollib.analysis.generalization.heatmap_figure import (
+    HorizontalHeatmapFigure,
+    ClassSummaryHeatmapFigure,
+    HeatmapConfig,
+)
+from biocomptools.toollib.analysis.generalization.views import GenViewConfig
+from biocomptools.toollib.analysis.generalization.pivot_build import load_metrics_csv
 from biocomptools.modelmodel import BiocompModel, NetworkModel
 from biocomptools.toollib.modelselector import ModelSelector
 from biocomptools.toollib.networkselector import (
@@ -192,12 +215,17 @@ def construct_figure(
 
 
 def warm_caches_for_figure(figure):
+    # NOTE: every `tc.construct(...)` mutates the DeferredNode's internal
+    # composition state, so the *subsequent* construct (done by
+    # `_prepare_mpl` with the real FIG) can return an empty dict if the
+    # task uses a `<<: !include` merge (as `tasks/mvp_panel.yaml` does).
+    # Always work on a fresh copy here.
     try:
         from biocomp.plotting.plotting_smooth import knn_grid
         from biocomp.plotutils import LazyPlotData
         for tc in figure.plot_tasks:
             try:
-                pt = tc.construct(context={"FIG": _DUMMY_FIG_AX})
+                pt = tc.copy(reroot=True).construct(context={"FIG": _DUMMY_FIG_AX})
             except Exception:
                 continue
             if not hasattr(pt, "plot_method") or pt.plot_method is None:
@@ -283,7 +311,7 @@ _THREAD_ENV_KEYS = (
 
 
 def _lock_thread_env() -> None:
-    """Pin numerics libs to 1 thread before BLAS imports — each loky worker = 1 core."""
+    """Pin numerics libs to 1 thread before BLAS imports - each loky worker = 1 core."""
     import os as _os
     for k in _THREAD_ENV_KEYS:
         _os.environ.setdefault(k, "1")
@@ -331,6 +359,13 @@ DEFAULT_TYPES = [
     PartialFunction,
     DataRescaler,
     UORFMatrixFigure,
+    ShapleyDetailFigure,
+    ShapleyDetailConfig,
+    HorizontalHeatmapFigure,
+    ClassSummaryHeatmapFigure,
+    HeatmapConfig,
+    GenViewConfig,
+    load_metrics_csv,
     InnerNodesFigure,
     InnerNodesFigureSpec,
     BenchmarkData,
@@ -376,6 +411,9 @@ _HELPER_FUNCS = {
     'expand_panel_atomics': expand_panel_atomics,
     'compose_rows': compose_rows,
     'compose_atomics': compose_atomics,
+    'build_rows': build_rows,
+    'panel_plot_method': panel_plot_method,
+    'panel_plot_config': panel_plot_config,
     'layout_dimensions': layout_dimensions,
     'extract_plot_data_metadata': extract_plot_data_metadata,
     'extract_model_metadata': extract_model_metadata,
@@ -383,12 +421,20 @@ _HELPER_FUNCS = {
     'build_figure_metadata': build_figure_metadata,
     'predicted_stats': predicted_stats,
     'build_prediction_pipeline': build_prediction_pipeline,
+    'maybe_build_mvp': maybe_build_mvp,
     'filter_compatible': filter_compatible,
     'format_z_label': format_z_label,
     'smart_title': smart_title,
     'training_set_count': training_set_count,
     'trained_on_status': trained_on_status,
     'BIOCOMP_ROOT': Path(config.paths.root).expanduser().resolve(),
+    'get_cmap': plt.get_cmap,
+    'diagonal_xy': diagonal_xy,
+    'diagonal_xy_raw': diagonal_xy_raw,
+    'plot_diagonal_paths': plot_diagonal_paths,
+    'slice_panel_args': slice_panel_args,
+    'plot_slice_overlay': plot_slice_overlay,
+    'IDENTITY_RESCALER': IDENTITY_RESCALER,
 }
 
 DEFAULT_CONTEXT = {**make_context_from_types(DEFAULT_TYPES), **_HELPER_FUNCS}
@@ -479,7 +525,15 @@ class PlotJob(BaseModel):
         else:
             out_paths = self._run_sequential(order, temp_paths, txt_mode, stdout_txt, overwrite)
 
-        logger.info(f"{total_figures} figures completed in {time.time() - t0:.2f}s")
+        elapsed = time.time() - t0
+        written = [r for r in out_paths if r is not None and getattr(r, "path", None)]
+        if written:
+            paths_block = "\n  ".join(str(r.path) for r in written)
+            logger.info(
+                f"{total_figures} figures completed in {elapsed:.2f}s:\n  {paths_block}"
+            )
+        else:
+            logger.info(f"{total_figures} figures completed in {elapsed:.2f}s (no output paths)")
 
         merged_path = None
         if self.merge_spec and out_paths:

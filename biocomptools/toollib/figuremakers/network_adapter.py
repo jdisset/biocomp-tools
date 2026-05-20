@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Adapter for biocomp Network to visualization data structures."""
 
 from typing import Any

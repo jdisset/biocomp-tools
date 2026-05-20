@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Hyperparameter optimization for design runs using CMA-ES.
 
 Uses JAX-native schedule evaluation to avoid recompilation between trials.
@@ -217,8 +219,8 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         Values have shape (n_replicates, n_targets) to match other non_grad params.
 
         Handles three schedule specification modes:
-        1. Constant: Just base name (e.g., 'w_sinkhorn') → prepopulates all 3 phase values
-        2. Linear: phase1_value + phase3_end_value → prepopulates all 3 (phase2 computed at injection)
+        1. Constant: Just base name (e.g., 'w_sinkhorn') -> prepopulates all 3 phase values
+        2. Linear: phase1_value + phase3_end_value -> prepopulates all 3 (phase2 computed at injection)
         3. Full 3-phase: All three phase values explicitly provided
 
         Also prepopulates non-optimized params from loss_fn_defaults as constants.
@@ -426,8 +428,8 @@ class DesignHyperoptProgram(BaseHyperoptProgram):
         """Inject hyperparams into params tree in-place. Paths must already exist (pre-populated).
 
         Uses expand_schedule_hyperparams to handle:
-        1. Constant schedules: base name → all 3 phases get same value
-        2. Linear schedules: phase1 + phase3 → phase2 computed via interpolation
+        1. Constant schedules: base name -> all 3 phases get same value
+        2. Linear schedules: phase1 + phase3 -> phase2 computed via interpolation
         3. Full 3-phase: all values used as-is
         """
         ns = HYPEROPT_SCHEDULE_NAMESPACE

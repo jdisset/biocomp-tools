@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design Aux Logger: Captures and visualizes auxiliary data from design optimization runs.
 
 Produces:

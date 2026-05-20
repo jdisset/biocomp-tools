@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path

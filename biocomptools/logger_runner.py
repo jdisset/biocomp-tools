@@ -1,9 +1,6 @@
-"""LoggerRunner: unified dispatch for live and replay modes.
-
-Reads step data from RunHistoryDB, dispatches to loggers.
-Same code path for live (polls DB for new steps) and replay (reads sequentially).
-Supports thread and process execution modes for loggers.
-"""
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""LoggerRunner: dispatches loggers in live and replay modes."""
 
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -20,11 +17,6 @@ logger = get_logger(__name__)
 
 
 class LoggerRunner:
-    """Reads from RunHistoryDB, dispatches to loggers.
-
-    Identical code path for live and replay.
-    """
-
     def __init__(
         self,
         db: RunHistoryDB,
@@ -56,7 +48,6 @@ class LoggerRunner:
         self._pending_futures: list[Future[Any]] = []
 
     def run(self) -> None:
-        """Main dispatch loop."""
         self._initialize_loggers()
         last_step = -1
 
@@ -74,7 +65,6 @@ class LoggerRunner:
                     self._dispatch_step(step)
                     last_step = step
 
-            # Wait for pending futures before end dispatch
             self._wait_pending()
             self._dispatch_on_end(last_step)
         finally:
@@ -82,8 +72,6 @@ class LoggerRunner:
             self._shutdown_pools()
 
     def _dispatch_step(self, step: int) -> None:
-        """Check each logger's schedule, dispatch accordingly."""
-        # Clean up completed futures periodically
         self._clean_futures()
 
         for lg in self._loggers:
@@ -103,19 +91,16 @@ class LoggerRunner:
                 future.add_done_callback(_make_done_callback(type(lg).__name__, step))
                 self._pending_futures.append(future)
             elif lg.execution_mode == "inline":
-                # Inline mode — run directly in dispatch loop (no thread overhead)
                 try:
                     self._run_logger_in_thread(lg, step)
                 except Exception as e:
                     logger.error(f"on_batch failed for {type(lg).__name__} at step {step}: {e}")
             else:
-                # Thread mode (default) — run in thread pool
                 future = self._thread_pool.submit(self._run_logger_in_thread, lg, step)
                 future.add_done_callback(_make_done_callback(type(lg).__name__, step))
                 self._pending_futures.append(future)
 
     def _run_logger_in_thread(self, lg: Logger, step: int) -> None:
-        """Run a logger in thread mode — shares process, reads from DB."""
         t0 = time.time()
         view = self._build_view(lg, step)
         t_load = time.time() - t0
@@ -134,18 +119,11 @@ class LoggerRunner:
         logger.debug(f"{t_total:.2f}s {name}@{step} (load={t_load:.2f}s)")
 
     def _build_view(self, lg: Logger, step: int) -> HistoryView:
-        """Load data from DB into HistoryView for this logger."""
         window = lg.history_window
-        if window is not None:
-            start = max(0, step - window)
-        else:
-            start = 0
-
-        # Determine required keys from logger declarations
+        start = max(0, step - window) if window is not None else 0
         scalar_keys = lg.required_metrics or None
 
-        # Route required_arrays into correct DB tables (array vs blob).
-        # None = "load all" (no filter), [] = "load nothing".
+        # None = load all, [] = load nothing
         array_keys: list[str] | None = None
         blob_keys: list[str] | None = None
         if lg.required_arrays:
@@ -163,7 +141,6 @@ class LoggerRunner:
         return HistoryView(batches)
 
     def _dispatch_on_end(self, last_step: int) -> None:
-        """Dispatch on_end for loggers that should fire at end."""
         if last_step < 0:
             return
 
@@ -197,7 +174,6 @@ class LoggerRunner:
             except Exception as e:
                 logger.warning(f"Logger {name} initialize failed: {e}")
 
-        # Dispatch on_start for loggers that want it
         for lg in self._loggers:
             if not lg.should_fire_start():
                 continue
@@ -237,9 +213,7 @@ class LoggerRunner:
             self._process_pool.shutdown(wait=True, cancel_futures=False)
 
 
-# ---------------------------------------------------------------------------
-# Top-level functions for ProcessPoolExecutor (must be picklable)
-# ---------------------------------------------------------------------------
+# Top-level for ProcessPoolExecutor picklability.
 
 
 def _run_logger_in_process(
@@ -250,23 +224,16 @@ def _run_logger_in_process(
     logger_class_name: str,
     output_dir: Path | None,
 ) -> None:
-    """Run a single logger invocation in a spawned subprocess.
-
-    Each process opens its own read-only DB connection.
-    Logger is reconstructed from its model_dump() config.
-    """
     import importlib
 
     from biocomptools.history_db import RunHistoryDB
 
     db = RunHistoryDB(db_path, read_only=True)
 
-    # Reconstruct logger from config
     mod = importlib.import_module(logger_class_module)
     logger_class = getattr(mod, logger_class_name)
     lg = logger_class(**logger_config)
 
-    # Reconstruct stack if logger needs it
     stack, model, dmanager = None, None, None
     if getattr(lg, "_needs_stack", False):
         model = db.load_artifact("model")
@@ -275,7 +242,6 @@ def _run_logger_in_process(
         if model and dmanager:
             stack = _rebuild_stack_from_artifacts(dmanager, dconfig, model)
 
-    # Build view from DB (selective loading)
     window = lg.history_window
     start = max(0, step - (window or step))
     scalar_keys = lg.required_metrics or None
@@ -310,7 +276,6 @@ def _rebuild_stack_from_artifacts(
     dconfig: Any,
     model: Any,
 ) -> Any:
-    """Rebuild ComputeStack from stored artifacts."""
     if dconfig is not None:
         try:
             from biocomp.design_prune_controller import build_stack_from_dconf
@@ -322,8 +287,6 @@ def _rebuild_stack_from_artifacts(
 
 
 def _make_done_callback(name: str, step: int):
-    """Create a done callback for logging errors."""
-
     def _on_done(fut: Future[Any]) -> None:
         try:
             fut.result()

@@ -69,6 +69,7 @@ version = "0.2.1"
 description = "A set of tools and utils for the biocompiler."
 authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 readme = "README.md"
+license = {file = "LICENSE"}
 dependencies = [
 	"biocomp",
 	"jeanplot",
@@ -110,4 +111,5 @@ biocomp-model-prepare = "biocomptools.model_prepare:main"
 biocomp-replay = "biocomptools.run_replay:main"
 biocomp-tuner = "biocomptools.tuner.api:main"
 biocomp-interactive-link = "biocomptools.toollib.interactive_link:main"
+biocomp-extract-metrics = "biocomptools.toollib.analysis.generalization.metrics_extract:main"
 
