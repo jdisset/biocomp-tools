@@ -1,0 +1,24 @@
+# Cube-view overlay for `smooth_3d_params`. Include inside a
+# `callstack_params.smooth_3d_params` block:
+#
+#   smooth_3d_params:
+#     <<{+<}: !include pkg:biocomptools:configs/plot_config/cube_view_v1
+vlims: [0, 0.72]
+show_inner_spines: false
+show_slice_ticks: false
+show_front_face_ticks: true
+draw_colorbar: false
+xaxis_labelpad: 10
+yaxis_labelpad: 10
+colorbar_position: [1.5, 0.4]
+cube_edge_props:
+  bottom_right:
+    zaxis_title:
+      offset: [50, 0]
+smooth_2d_params:
+  heatmap_params:
+    opacity: 0.35
+    show_image: true
+    clip_to_lowest_contour: true
+    contours: ["otsu:0.65"]
+    contours_linewidth: 0.2
