@@ -8,7 +8,8 @@ Then come back.
 
 ## what's in here
 
-- **`biocomp-plot`** - plot stuff. Mostly flow cytometry. YAML-driven via dracon.
+- **`biocomp-plot`** - plot stuff. Mostly flow cytometry. YAML-driven via dracon. (Legacy; new work uses `jeanplot` — see `jeanplot_panels/` below.)
+- **`biocomptools.jeanplot_panels`** - jeanplot Component shells over biocomp-domain draw functions (CircuitPanel, NetworkDiagramPanel, MVPNetworkPanel, BlurbPanel, smooth-voxel / benchmark / quantile-coverage panels, the `build_per_network_row` Container composer, plus biocomp-aware data holders). Used by `paper-jobs/plot/` to render via `jeanplot +foo.yaml` while keeping all biocomp data loading on this side. `!import biocomptools.jeanplot_panels` in any `jeanplot` YAML brings every panel + helper into tag namespace.
 - **`biocomp-train`** - train models.
 - **`biocomp-design`** - design circuits (inverse mode).
 - **`biocomp-replay`** - re-run loggers on a saved run without re-doing the work.
