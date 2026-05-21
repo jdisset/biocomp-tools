@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""SmoothVoxelPanel + BenchmarkDistributionPanel - smooth voxel violins."""
-
 from typing import Any
 
 import matplotlib.axes
@@ -10,11 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class SmoothVoxelPanel(PlotPanel):
-    """Smooth voxel-conditioned violin (single or split) on one axes.
-
-    Wraps ``biocomptools.toollib.figuremakers.smoothvoxel.render_smooth_voxel_example``.
-    """
-
     plot_data: None = None
     dataset_file: str
     mode: str = "single"
@@ -45,11 +38,6 @@ class SmoothVoxelPanel(PlotPanel):
 
 
 class BenchmarkDistributionPanel(PlotPanel):
-    """Split smooth-voxel violin comparing ground truth vs prediction for one benchmark item.
-
-    Wraps ``biocomptools.toollib.figuremakers.smoothvoxel.render_benchmark_distribution``.
-    """
-
     plot_data: None = None
     item: Any
     bench: Any

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""MVPNetworkPanel - biocomp MVP scatter + optional noise floor + grid overlay."""
-
 from typing import Any, Literal
 
 import matplotlib.axes
@@ -10,14 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class MVPNetworkPanel(PlotPanel):
-    """Measured-vs-predicted panel backed by ``MeasuredVsPredictedData``.
-
-    Two modes:
-    - ``mode="mvp"`` (default): model scatter; optional grid overlay.
-    - ``mode="floor"``: kernel-smoother noise-floor cloud (requires the
-      data holder to have been built with ``compute_noise_floor=True``).
-    """
-
     plot_data: None = None
     mvp_data: Any
     mode: Literal["mvp", "floor"] = "mvp"

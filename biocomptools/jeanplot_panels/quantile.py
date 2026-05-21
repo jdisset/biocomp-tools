@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""QuantileCoveragePanel - quantile-coverage benchmark summary panel."""
-
 from typing import Any
 
 import matplotlib.axes
@@ -10,13 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class QuantileCoveragePanel(PlotPanel):
-    """Quantile-coverage benchmark summary.
-
-    Wraps ``biocomptools.toollib.figuremakers.quantilecoverage.render_quantile_coverage_summary``.
-    Either pass a precomputed ``result`` dict, or pass ``dataset_file`` (and model
-    identifier) and let the renderer compute it on the spot.
-    """
-
     plot_data: None = None
     result: dict | None = None
     dataset_file: str | None = None

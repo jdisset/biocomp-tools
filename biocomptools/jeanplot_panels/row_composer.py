@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Per-network row composer.
-
-Builds a nested ``jeanplot.Container`` tree representing one network's
-plotting row. Replaces the ``build_rows`` + ``compose_atomics`` +
-``layout_dimensions`` + ``MultiRowGridLayout`` machinery in
-``datasetsummary.py`` with native jeanplot composition.
-
-The returned tree is a ``Container`` ready to be a child of a ``Figure``.
-Each leaf is one of the biocomp ``jeanplot_panels`` panels or one of
-jeanplot's built-in ``SmoothPanel{1D,2D,3D}`` / ``MVPPanel``.
-
-Inputs / outputs deliberately stay close to the YAML-side surface so a
-paper-jobs file can call this helper through ``!fn`` and get the same
-shape it used to compose by hand.
-"""
-
 from typing import Any, Literal, Sequence
 
 from jeanplot.core.container import Container
@@ -47,7 +31,6 @@ _DEFAULT_KIND_WIDTHS: dict[str, Any] = {
 
 
 def _resolve_data_dim(pd: Any) -> int:
-    """Read input-dimensionality from a biocomp or jeanplot PlotData."""
     if hasattr(pd, "dimensions"):
         return int(pd.dimensions.input)
     x = pd.x if hasattr(pd, "x") else pd.xval
@@ -55,14 +38,12 @@ def _resolve_data_dim(pd: Any) -> int:
 
 
 def _as_jeanplot_pd(pd: Any):
-    """Accept biocomp PlotData OR a NetworkPlotData wrapper OR a jeanplot PlotData."""
     from jeanplot.data.plot_data import PlotData as JeanplotPlotData
 
     if isinstance(pd, (NetworkPlotData, NetworkPredictedPlotData)):
         return pd.to_jeanplot()
     if isinstance(pd, JeanplotPlotData):
         return pd
-    # biocomp PlotData - convert via field copy
     from biocomptools.jeanplot_panels.data import _biocomp_to_jeanplot
 
     return _biocomp_to_jeanplot(pd)
@@ -86,7 +67,6 @@ def _build_data_panel(
     rescaler: Any | None,
     slice_grid_kwargs: dict | None,
 ) -> Container:
-    """Dispatch a biocomp PlotData to the right SmoothPanel{1,2,3}D."""
     jpd = _as_jeanplot_pd(pd)
     dim = _resolve_data_dim(jpd)
     if dim == 1:
@@ -107,7 +87,6 @@ def _build_slices_only_panel(
     rescaler: Any | None,
     slice_grid_kwargs: dict | None,
 ) -> Container:
-    """3D slice grid without the cube view (slices-only mode)."""
     import numpy as np
 
     from jeanplot.core.container import Container as _C
@@ -149,7 +128,6 @@ def _gap_spacer(width: float) -> Container:
 
 
 def _wrap_cell(child: Container, width: float, height: float) -> Container:
-    """Anchor a per-kind width on a cell so the row layout honors it."""
     child.min_dimensions = Size(width=float(width), height=float(height))
     return child
 
@@ -185,8 +163,6 @@ def build_per_network_row(
     needs_pred_data = predicted_data is not None
     needs_mvp = mvp_data is not None
 
-    # Fall back to plot_data.metadata['built_network'] when caller didn't
-    # pass an explicit network for circuit/diagram cells.
     if network is None and hasattr(plot_data, "metadata"):
         network = plot_data.metadata.get("built_network")
 

@@ -1,18 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""BlurbPanel - markdown-blurb side panel for biocomp dataset summaries."""
-
 import matplotlib.axes
 
 from jeanplot.panels.base import PlotPanel
 
 
 class BlurbPanel(PlotPanel):
-    """Markdown blurb panel.
-
-    Wraps ``biocomptools.toollib.figuremakers.blurbpanel.render_blurb_to_ax``.
-    """
-
     plot_data: None = None
     text: str = ""
     fontsize: float = 9

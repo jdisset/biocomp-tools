@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""ActivationsPanel - overlay of ReLU/GELU/SELU reference curves in latent space."""
-
 from typing import Any
 
 import matplotlib.axes
@@ -10,11 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class ActivationsPanel(PlotPanel):
-    """Render ReLU/GELU/SELU curves on an existing latent-space axis.
-
-    Wraps ``biocomptools.toollib.figuremakers.activation_reference.plot_activations``.
-    """
-
     plot_data: None = None
     xlims: tuple[float, float] = (-0.7, 0.7)
     ylims: tuple[float, float] = (-0.05, 0.7)

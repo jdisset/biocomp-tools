@@ -21,11 +21,6 @@ from biocomptools.jeanplot_panels.circuit import CircuitPanel
 
 
 class BenchmarkHeaderPanel(PlotPanel):
-    """Summary header showing model info, aggregate metrics, and per-item barplot.
-
-    Wraps ``biocomptools.toollib.figuremakers.benchmarkutils.render_summary_header``.
-    """
-
     plot_data: None = None
     bench: Any
 
@@ -38,11 +33,6 @@ class BenchmarkHeaderPanel(PlotPanel):
 
 
 class BenchmarkMetricsPanel(PlotPanel):
-    """Per-item metrics box (nRMSE, SNR, dim, training status).
-
-    Wraps ``biocomptools.toollib.figuremakers.benchmarkutils.render_metrics_panel``.
-    """
-
     plot_data: None = None
     item: Any
     bench: Any = None
@@ -56,29 +46,13 @@ class BenchmarkMetricsPanel(PlotPanel):
 
 
 class BenchmarkCircuitMergedLeftPanel(CircuitPanel):
-    """Circuit schematic for the left column of a benchmark row.
-
-    Same drawing as ``CircuitPanel`` - the "merged" semantics
-    (spans multiple rows) is expressed by the caller's Container layout.
-    """
+    pass
 
 
 class BenchmarkMetricsMergedRightPanel(BenchmarkMetricsPanel):
-    """Per-item metrics for the right column of a benchmark row.
-
-    Same drawing as ``BenchmarkMetricsPanel`` - spanning is layout.
-    """
-
+    pass
 
 class BenchmarkSliceGridPanel(Container):
-    """R x C slice grid for a 3D benchmark item.
-
-    Container of ``SmoothPanel2D`` cells, each at a fixed z-slice.
-    The biocomp world's ``render_slice_grid`` took a list of pre-allocated
-    axes; here we let the jeanplot renderer allocate one axes per child
-    via the nested Container tree.
-    """
-
     plot_data: Any
     rows: int = 3
     cols: int = 3

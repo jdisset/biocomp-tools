@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""NetworkDiagramPanel - jeanplot adapter for biocomp compute-graph diagrams."""
-
 from typing import Any, Literal
 
 import matplotlib.axes
@@ -10,12 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class NetworkDiagramPanel(PlotPanel):
-    """Render a biocomp ``Network``'s compute-graph diagram on its axes.
-
-    Thin wrapper around
-    ``biocomptools.toollib.figuremakers.networkdiagram.render_diagram_to_ax``.
-    """
-
     plot_data: None = None
     network: Any
     simplified: bool = True

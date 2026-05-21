@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""biocomptools.jeanplot_panels - biocomp domain plotting as jeanplot Components.
-
-Each Panel subclasses ``jeanplot.panels.base.PlotPanel`` and delegates
-``draw(ax)`` to an existing ``render_*_to_ax`` function in
-``biocomptools.toollib.figuremakers``. No drawing logic is duplicated.
-
-The ``build_per_network_row`` composer assembles a nested ``Container``
-tree for a single network's plotting row (replaces the legacy
-``build_rows`` + ``compose_atomics`` + ``MultiRowGridLayout`` chain).
-
-``JEANPLOT_PANEL_TYPES`` and ``JEANPLOT_PANEL_HELPERS`` are the surfaces
-through which a ``jeanplot-plot`` CLI context is augmented with these
-biocomp-aware types and helpers.
-"""
-
 from biocomptools.jeanplot_panels.activations import ActivationsPanel
 from biocomptools.jeanplot_panels.biocomp_figure_adapter import BiocompFigureAdapter
 from biocomptools.jeanplot_panels.benchmark import (

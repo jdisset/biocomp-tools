@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""EmptyPanel + ConstantTextPanel - layout filler / static-text panels."""
-
 import matplotlib.axes
 
 from jeanplot.panels.base import PlotPanel
 
 
 class EmptyPanel(PlotPanel):
-    """An axis-less spacer panel; optionally renders centred grey text."""
-
     plot_data: None = None
     text: str = ""
 
@@ -20,8 +16,6 @@ class EmptyPanel(PlotPanel):
 
 
 class ConstantTextPanel(PlotPanel):
-    """Render a fixed string at a specified axis-fraction position."""
-
     plot_data: None = None
     text: str = ""
     x: float = 0.5

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""CircuitPanel - jeanplot adapter for biocomp genetic-circuit schematics."""
 
 from typing import Any, Literal
 
@@ -10,13 +9,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class CircuitPanel(PlotPanel):
-    """Render a biocomp ``Network``'s genetic-circuit schematic on its axes.
-
-    Thin wrapper around
-    ``biocomptools.toollib.figuremakers.geneticcircuit.render_circuit_to_ax``.
-    All knobs of the underlying renderer are exposed as typed fields.
-    """
-
     plot_data: None = None
     network: Any
     hide_marker_tus: bool = True

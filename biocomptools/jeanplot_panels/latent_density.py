@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""LatentProjectionHistogramPanel - 2-input latent projection density histogram."""
-
 from typing import Any
 
 import matplotlib.axes
@@ -10,11 +8,6 @@ from jeanplot.panels.base import PlotPanel
 
 
 class LatentProjectionHistogramPanel(PlotPanel):
-    """Density histogram of a 2-input latent projection (e.g. ERN diff).
-
-    Wraps ``biocomptools.toollib.figuremakers.latent_projection_density.histogram``.
-    """
-
     plot_data: Any
     rescaler: Any | None = None
     label_rescaler: Any | None = None
