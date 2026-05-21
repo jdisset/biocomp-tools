@@ -16,6 +16,7 @@ biocomp-aware types and helpers.
 """
 
 from biocomptools.jeanplot_panels.activations import ActivationsPanel
+from biocomptools.jeanplot_panels.biocomp_figure_adapter import BiocompFigureAdapter
 from biocomptools.jeanplot_panels.benchmark import (
     BenchmarkCircuitMergedLeftPanel,
     BenchmarkHeaderPanel,
@@ -48,6 +49,7 @@ from biocomptools.jeanplot_panels.voxel import (
 
 
 JEANPLOT_PANEL_TYPES = [
+    BiocompFigureAdapter,
     CircuitPanel,
     NetworkDiagramPanel,
     BlurbPanel,
@@ -113,6 +115,7 @@ def get_jeanplot_panel_helpers() -> dict:
 
 __all__ = [
     "ActivationsPanel",
+    "BiocompFigureAdapter",
     "BenchmarkCircuitMergedLeftPanel",
     "BenchmarkDistributionPanel",
     "BenchmarkHeaderPanel",
