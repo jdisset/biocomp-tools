@@ -43,10 +43,22 @@ def load_default_plotconf():
     return pc
 
 
+def load_default_rescaler() -> DataRescaler:
+    import dracon as dr
+    from dracon.lazy import resolve_all_lazy
+
+    rescaler = dr.load(
+        "pkg:biocomptools:configs/data_config/rescaler/EBFP2_compressed_v2",
+        enable_interpolation=True,
+    )
+    resolve_all_lazy(rescaler)
+    return rescaler
+
+
 class PlotConfig(BaseModel):
     rc_context: Dict[str, Any] = {}
     callstack_params: Dict[str, Any] = {}  # nested parameters for the plotting function
-    rescaler: Optional[DataRescaler] = None
+    rescaler: Optional[DataRescaler] = Field(default_factory=load_default_rescaler)
 
     def _auto_extract_metadata(
         self,
@@ -133,11 +145,11 @@ class PlotConfig(BaseModel):
             metadata.update(extra_meta)
             return res, metadata
 
-        def prepared_func(
-            *args, rc=self.rc_context, cs=callstack_conf, rescaler=self.rescaler, **kwargs
-        ):
-            full_kwargs = {"rescaler": rescaler, **cs, **kwargs}
+        if self.rescaler is not None:
+            plot_method.set_missing_kwargs({"rescaler": self.rescaler})
 
+        def prepared_func(*args, rc=self.rc_context, cs=callstack_conf, **kwargs):
+            full_kwargs = {**cs, **kwargs}
             with mpl.rc_context(rc=rc):
                 return wrapped_plot_method(*args, **full_kwargs)
 
@@ -383,8 +395,8 @@ class Figure(BaseModel):
 
                 kwargs = dict(pt.plot_method.kwargs)
                 kwargs["ax"] = None
-                if pt.plot_config.rescaler:
-                    kwargs["rescaler"] = pt.plot_config.rescaler
+                if pt.plot_config.rescaler is not None:
+                    kwargs.setdefault("rescaler", pt.plot_config.rescaler)
 
                 cs = ut.generate_full_nested_config(
                     pt.plot_config.callstack_params, namespace="biocomp.plotting"
