@@ -79,6 +79,10 @@ callstack_params:
     # ignoring outliers. Only takes effect when vlims has a None entry; set
     # to null to revert to raw min/max fallback.
     vlim_quantiles: ${vlim_quantiles}
+    # Per-axis labelpad (points); null inherits axes.labelpad from rc_context.
+    # Same convention as smooth_3d's {x,y,z}axis_labelpad.
+    xaxis_labelpad: null
+    yaxis_labelpad: null
     heatmap_params:
       bad_color: "#ffffff"
       contours: 0
@@ -97,6 +101,8 @@ callstack_params:
     ylims: ${ylims}
     vlims: [null, null]
     vlim_quantiles: [0.0, 0.99]
+    xaxis_labelpad: null
+    yaxis_labelpad: null
     heatmap_params:
       bad_color: "#ffffff"
       contours: 0

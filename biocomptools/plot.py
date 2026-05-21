@@ -33,6 +33,8 @@ from biocomp.plotutils import (
     plot_diagonal_paths,
     slice_panel_args,
     plot_slice_overlay,
+    plot_slice_chords,
+    plot_addition_vs_removal_overlay,
     IDENTITY_RESCALER,
 )
 from biocomptools.toollib.datasources import DataSource, DBSource
@@ -434,6 +436,8 @@ _HELPER_FUNCS = {
     'plot_diagonal_paths': plot_diagonal_paths,
     'slice_panel_args': slice_panel_args,
     'plot_slice_overlay': plot_slice_overlay,
+    'plot_slice_chords': plot_slice_chords,
+    'plot_addition_vs_removal_overlay': plot_addition_vs_removal_overlay,
     'IDENTITY_RESCALER': IDENTITY_RESCALER,
 }
 
