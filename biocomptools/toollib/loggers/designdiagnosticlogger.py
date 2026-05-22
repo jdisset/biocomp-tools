@@ -892,7 +892,7 @@ class DesignDiagnosticLogger(Logger):
         use_symlog: bool = True,
     ):
         try:
-            from biocomp.plotting.plotting_particle import particle_plot
+            from jeanplot.plots.particle import particle_plot
 
             particle_plot(
                 ax,

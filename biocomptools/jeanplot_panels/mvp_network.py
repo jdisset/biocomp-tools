@@ -18,7 +18,7 @@ class MVPNetworkPanel(PlotPanel):
     def draw(self, ax: matplotlib.axes.Axes):
         mvp = self.mvp_data
         if self.mode == "floor":
-            from biocomp.plotting.plotting_mvp import noise_floor_panel
+            from jeanplot.plots.mvp import noise_floor_panel
 
             assert mvp.noise_floor_measured is not None, (
                 "MVPNetworkPanel(mode='floor') requires compute_noise_floor=True"
@@ -36,7 +36,7 @@ class MVPNetworkPanel(PlotPanel):
             )
             return
 
-        from biocomp.plotting.plotting_mvp import measured_vs_predicted
+        from jeanplot.plots.mvp import measured_vs_predicted
 
         measured_vs_predicted(
             ax=ax,

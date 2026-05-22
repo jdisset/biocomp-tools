@@ -977,7 +977,7 @@ def panel_plot_method(
         mvp = panel["mvp_data"]
         show_grid = panel.get("show_grid_overlay", True)
         return {
-            "func": "biocomp.plotting.plotting_mvp.measured_vs_predicted",
+            "func": "jeanplot.plots.mvp.measured_vs_predicted",
             "kwargs": {
                 "ax": ax,
                 "measured": mvp.measured,
@@ -1000,7 +1000,7 @@ def panel_plot_method(
         )
         show_grid = panel.get("show_grid_overlay", False)
         return {
-            "func": "biocomp.plotting.plotting_mvp.noise_floor_panel",
+            "func": "jeanplot.plots.mvp.noise_floor_panel",
             "kwargs": {
                 "ax": ax,
                 "measured": mvp.noise_floor_measured,

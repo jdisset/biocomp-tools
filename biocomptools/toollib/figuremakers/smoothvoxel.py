@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from matplotlib.axes import Axes
 
-from biocomp.plotting.plotting_smooth import smooth_voxel_conditioned_violin
+from jeanplot.plots.violin import smooth_voxel_conditioned_violin
 from biocomptools.logging_config import get_logger
 from biocomptools.toollib.figuremakers.quantilecoverage import _load_dataset, _load_model
 
