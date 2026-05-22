@@ -27,7 +27,6 @@ from biocomp.plotutils import (
     SimpleLayout,
     GridLayout,
     MultiRowGridLayout,
-    MergeSpec,
     diagonal_xy,
     diagonal_xy_raw,
     plot_diagonal_paths,
@@ -38,6 +37,7 @@ from biocomp.plotutils import (
     IDENTITY_RESCALER,
 )
 from biocomptools.toollib.datasources import DataSource, DBSource
+from biocomptools.toollib.merge import MergeSpec
 
 from biocomptools.toollib.networkprediction import NetworkPrediction, PredictionSamplingConfig
 from biocomptools.toollib.typical_experimental_distribution import sample_latent
@@ -185,6 +185,13 @@ def urlencoded(s: str) -> str:
     return urllib.parse.quote(s, safe='')
 
 
+def _figure_output_paths(figure):
+    """Return (output_dir, output_file) for either jeanplot.Figure or
+    legacy BiocompPlotFigure (which nests them under .figure_spec)."""
+    spec = getattr(figure, "figure_spec", None)
+    return (spec if spec is not None else figure)
+
+
 def construct_figure(
     figure_node,
     output_path_override: str | None = None,
@@ -195,12 +202,13 @@ def construct_figure(
         figure = figure_node.construct(deferred_paths=['/plot_tasks.*'])
         if dict_like(figure):
             figure = Figure(**figure)  # type: ignore
-        assert isinstance(figure, Figure), f"Expected Figure, got {type(figure)}"
         if output_path_override:
-            figure.figure_spec.output_dir = str(Path(output_path_override).parent)
-            figure.figure_spec.output_file = Path(output_path_override).name
-        figure.text_mode = text_mode
-        figure.stdout_txt_plot = stdout_txt_plot
+            target = _figure_output_paths(figure)
+            target.output_dir = str(Path(output_path_override).parent)
+            target.output_file = Path(output_path_override).name
+        if hasattr(figure, "text_mode"):
+            figure.text_mode = text_mode
+            figure.stdout_txt_plot = stdout_txt_plot
     except DraconError:
         raise
     except Exception as e:
@@ -262,9 +270,12 @@ _DUMMY_FIG_AX = _DummyFigAx()
 
 
 def _result_path(f) -> str:
+    spec = getattr(f, "figure_spec", None)
+    target = spec if spec is not None else f
     return str(
-        getattr(f.figure_spec, '_output_path_override', None)
-        or f.figure_spec.output_path
+        getattr(target, "_output_path_override", None)
+        or getattr(target, "output_path", None)
+        or (Path(target.output_dir) / target.output_file if getattr(target, "output_file", None) else None)
         or "(no file output)"
     )
 
@@ -272,18 +283,26 @@ def _result_path(f) -> str:
 def run_figure(f, **kw) -> FigureResult:
     t0 = time.time()
     try:
-        f.run(**kw)
-        if not f.is_txt_output:
+        if hasattr(f, "run"):
+            f.run(**kw)
+        else:
+            f.render()
+        if not getattr(f, "is_txt_output", False):
             plt.close('all')
     except Exception as e:
         logger.error(f"Error running figure: {e}")
         logger.exception(e)
         raise
     logger.debug(f"Figure {_result_path(f)} completed in {time.time() - t0:.2f}s")
+    spec = getattr(f, "figure_spec", None)
     return FigureResult(
         path=_result_path(f),
-        figure_spec=f.figure_spec,
-        metadata=getattr(f.figure_spec, 'metadata', {}),
+        figure_spec=spec if spec is not None else FigureSpec(
+            output_dir=str(getattr(f, "output_dir", "./")),
+            output_file=str(getattr(f, "output_file", "unnamed.png")),
+            metadata=getattr(f, "metadata", {}) or {},
+        ),
+        metadata=getattr(spec, 'metadata', getattr(f, 'metadata', {})) if spec or hasattr(f, "metadata") else {},
     )
 
 

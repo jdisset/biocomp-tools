@@ -45,14 +45,8 @@ from dracon.deferred import DeferredNode
 from dracon.diagnostics import DraconError, handle_dracon_error
 from pydantic import BaseModel, ConfigDict
 
-from biocomp.plotutils import (
-    FigureLayout,
-    FigureSpec,
-    GridLayout,
-    MultiRowGridLayout,
-    PlotData,
-    SimpleLayout,
-)
+from biocomp.plotutils import PlotData
+from jeanplot.panels import Figure
 from biocomptools.logging_config import get_logger, setup_logging
 from biocomptools.toollib.datasources import DBSource
 from biocomptools.toollib.networkselector import (
@@ -68,7 +62,7 @@ from biocomptools.toollib.networkselector import (
     iRegex,
 )
 from biocomptools.toollib.overlays import OVERLAY_TYPES
-from biocomptools.toollib.plot import BiocompPlotFigure, PlotConfig, PlotTask
+from biocomptools.toollib.plot import PlotConfig, PlotTask
 
 logger = get_logger(__name__)
 
@@ -422,7 +416,6 @@ def _pool_plot_data(plot_data_list, n_subsample: int | None, seed: int) -> PlotD
     description="Brush-interactive linked-pixel multi-panel renderer.",
     context_types=[
         Figure, PlotTask, PlotConfig,
-        FigureSpec, FigureLayout, SimpleLayout, GridLayout, MultiRowGridLayout,
         *OVERLAY_TYPES, *_DATASET_TYPES,
     ],
 )

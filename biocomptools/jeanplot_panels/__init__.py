@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
 from biocomptools.jeanplot_panels.activations import ActivationsPanel
-from biocomptools.jeanplot_panels.biocomp_figure_adapter import BiocompFigureAdapter
 from biocomptools.jeanplot_panels.benchmark import (
     BenchmarkCircuitMergedLeftPanel,
     BenchmarkHeaderPanel,
@@ -27,6 +26,7 @@ from biocomptools.jeanplot_panels.heatmap import (
     ClassSummaryHeatmapPanel,
     HorizontalHeatmapPanel,
 )
+from biocomptools.jeanplot_panels.inner_nodes import InnerNodesPanel
 from biocomptools.jeanplot_panels.latent_density import LatentProjectionHistogramPanel
 from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
@@ -39,6 +39,7 @@ from biocomptools.jeanplot_panels.pipelines import (
 from biocomptools.jeanplot_panels.quantile import QuantileCoveragePanel
 from biocomptools.jeanplot_panels.row_composer import build_per_network_row
 from biocomptools.jeanplot_panels.shapley import ShapleyDetailPanel
+from biocomptools.jeanplot_panels.uorf_matrix import UORFMatrixPanel
 from biocomptools.jeanplot_panels.voxel import (
     BenchmarkDistributionPanel,
     SmoothVoxelPanel,
@@ -46,7 +47,6 @@ from biocomptools.jeanplot_panels.voxel import (
 
 
 JEANPLOT_PANEL_TYPES = [
-    BiocompFigureAdapter,
     CircuitPanel,
     NetworkDiagramPanel,
     BlurbPanel,
@@ -57,7 +57,9 @@ JEANPLOT_PANEL_TYPES = [
     FluoDensitiesPanel,
     HorizontalHeatmapPanel,
     ClassSummaryHeatmapPanel,
+    InnerNodesPanel,
     ShapleyDetailPanel,
+    UORFMatrixPanel,
     DesignMetricsPanel,
     LatticeHeatmapPanel,
     NetworkDiagramFullWidthPanel,
@@ -117,7 +119,6 @@ def get_jeanplot_panel_helpers() -> dict:
 
 __all__ = [
     "ActivationsPanel",
-    "BiocompFigureAdapter",
     "BenchmarkCircuitMergedLeftPanel",
     "BenchmarkDistributionPanel",
     "BenchmarkHeaderPanel",
@@ -132,6 +133,7 @@ __all__ = [
     "EmptyPanel",
     "FluoDensitiesPanel",
     "HorizontalHeatmapPanel",
+    "InnerNodesPanel",
     "JEANPLOT_PANEL_TYPES",
     "LatentProjectionHistogramPanel",
     "LatticeHeatmapPanel",
@@ -145,6 +147,7 @@ __all__ = [
     "QuantileCoveragePanel",
     "ShapleyDetailPanel",
     "SmoothVoxelPanel",
+    "UORFMatrixPanel",
     "build_per_network_row",
     "get_jeanplot_panel_helpers",
     "load_paper_dataset",

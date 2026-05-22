@@ -182,7 +182,7 @@ def test_network_plot_data_adapter_roundtrip():
 def test_default_types_registration_count():
     from biocomptools.jeanplot_panels import JEANPLOT_PANEL_TYPES
 
-    assert len(JEANPLOT_PANEL_TYPES) == 27
+    assert len(JEANPLOT_PANEL_TYPES) == 28
 
 
 def test_helpers_registration_includes_row_composer():

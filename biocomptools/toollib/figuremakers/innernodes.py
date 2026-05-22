@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-from __future__ import annotations
-
-from biocomptools.toollib.plot import BiocompPlotFigure, PlotConfig, load_default_plotconf
 from biocomptools.modelmodel import BiocompModel, NetworkModel, load_model
 from biocomptools.logging_config import get_logger
-from biocomp.plotutils import FigureSpec
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit as Unit
 from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, load_lib
+from biocomp.plotutils import FigureSpec
 import biocomp.biorules as br
+from biocomptools.toollib._bbox_subfig import BBoxSubFig, carve_bbox
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.figure import Figure as MplFigure
 from typing import Annotated, Any, Callable
 from pathlib import Path
-from pydantic import Field, BeforeValidator
+from pydantic import BaseModel, ConfigDict, BeforeValidator
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
@@ -25,9 +22,6 @@ logger = get_logger(__name__)
 
 
 CMAP = "bc_blues"
-# CMAP = 'bc_reds'
-# CMAP = 'bc_greens'
-
 N_SAMPLES, SHOW_INVERSE, CMAP_TRUNCATE_MIN = 100_000, True, 0.25
 INV_OUT_RANGE = (0, 0.7)
 DEFAULT_RANGE = (0.01, 0.8)
@@ -58,7 +52,11 @@ TOPO_ORDER = [
     ("output", "output"),
 ]
 
-FWD_LABELS = {"source": "plasmid -> DNA", "transcription": "DNA -> mRNA", "translation": "mRNA -> PRT"}
+FWD_LABELS = {
+    "source": "plasmid -> DNA",
+    "transcription": "DNA -> mRNA",
+    "translation": "mRNA -> PRT",
+}
 INV_LABELS = {
     "inv_output": "Fluo -> PRT",
     "inv_source": "DNA -> plasmid",
@@ -108,17 +106,25 @@ def _norm(s: str) -> str:
     return s.lower().replace(" ", "_")
 
 
-class InnerNodesFigure(BiocompPlotFigure):
+class InnerNodesFigureSpec(FigureSpec):
+    """Back-compat alias kept so legacy YAMLs that still reference
+    `!InnerNodesFigureSpec` continue to construct. New code should use
+    `InnerNodesPanel` from `biocomptools.jeanplot_panels`."""
+
+    pass
+
+
+class InnerNodesFigure(BaseModel):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     n_samples: int = N_SAMPLES
-    figure_spec: FigureSpec = Field(default_factory=FigureSpec)
-    plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     print_summary: bool = True
     show_distribution: bool = False
     n_trendline_points: int = 200
     max_trajectory_points: int = 1000
     history_dir: Path | None = None
     embedding_trajectories: dict[str, list[tuple[float, ...]]] | None = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _cache: dict = {}
     _ranges: dict[str, tuple[float, float]] = {}
@@ -549,12 +555,6 @@ class InnerNodesFigure(BiocompPlotFigure):
         name_to_idx: dict[str, int] | None = None,
         max_points: int = 1000,
     ) -> dict[str, list[tuple[float, ...]]]:
-        """Resolve trajectories from in-memory data or disk fallback.
-
-        name_to_idx maps node names to their position in the full embedding
-        array (codebook index). When None, falls back to positional index
-        within ``names``.
-        """
         if embedding_trajectories is not None:
             result: dict[str, list[tuple[float, ...]]] = {}
             for i, name in enumerate(names):
@@ -563,12 +563,10 @@ class InnerNodesFigure(BiocompPlotFigure):
                 if key in embedding_trajectories:
                     result[name] = embedding_trajectories[key]
             return result
-        # Fall back to disk loading if history_dir is available
         if history_dir is None or not history_dir.exists():
             return {}
         from biocomptools.logger_history import HistoryManager
 
-        max_steps = max_points
         try:
             batches = HistoryManager.load_from_step_files(history_dir, show_progress=False)
         except Exception as e:
@@ -576,8 +574,8 @@ class InnerNodesFigure(BiocompPlotFigure):
             return {}
         if not batches:
             return {}
-        if len(batches) > max_steps:
-            indices = np.linspace(0, len(batches) - 1, max_steps, dtype=int)
+        if len(batches) > max_points:
+            indices = np.linspace(0, len(batches) - 1, max_points, dtype=int)
             batches = [batches[i] for i in indices]
         trajectories: dict[str, list[tuple[float, ...]]] = {n: [] for n in names}
         for batch in batches:
@@ -600,7 +598,6 @@ class InnerNodesFigure(BiocompPlotFigure):
     def _resolve_trajectories(
         self, emb_type: str, names: list[str], name_to_idx: dict[str, int] | None = None
     ) -> dict[str, list[tuple[float, ...]]]:
-        """Resolve trajectories from in-memory data or disk fallback."""
         return self._resolve_trajectories_static(
             self.embedding_trajectories,
             self.history_dir,
@@ -619,7 +616,6 @@ class InnerNodesFigure(BiocompPlotFigure):
             if not isinstance(n.emb_val, tuple) or len(n.emb_val) < 2:
                 continue
             col = cm(i / max(1, len(nodes) - 1))
-            # draw trajectory if available
             if n.name in trajectories and len(trajectories[n.name]) > 1:
                 pts = trajectories[n.name]
                 xs = [p[0] for p in pts]
@@ -628,7 +624,6 @@ class InnerNodesFigure(BiocompPlotFigure):
                 ax.scatter(xs[0], ys[0], color=col, s=20, marker="x", alpha=0.5, zorder=3)
                 all_coords.extend(xs)
                 all_coords.extend(ys)
-            # final position
             ax.scatter(
                 n.emb_val[0],
                 n.emb_val[1],
@@ -639,8 +634,7 @@ class InnerNodesFigure(BiocompPlotFigure):
                 linewidth=0.8,
                 zorder=5,
             )
-            all_coords.append(n.emb_val[0])
-            all_coords.append(n.emb_val[1])
+            all_coords.extend([n.emb_val[0], n.emb_val[1]])
             ax.annotate(
                 n.name,
                 (n.emb_val[0], n.emb_val[1]),
@@ -655,9 +649,8 @@ class InnerNodesFigure(BiocompPlotFigure):
         hi = max(all_coords) if all_coords else 2.0
         pad = (hi - lo) * 0.1 if hi > lo else 0.5
         lim = (lo - pad, hi + pad)
-        ax.set(xlim=lim, ylim=lim)
+        ax.set(xlim=lim, ylim=lim, xlabel="Embedding dim 0", ylabel="Embedding dim 1")
         ax.set_title(title, fontweight="bold", fontsize=12)
-        ax.set(xlabel="Embedding dim 0", ylabel="Embedding dim 1")
         ax.set_box_aspect(1)
 
     def _emb_visualization(
@@ -687,17 +680,17 @@ class InnerNodesFigure(BiocompPlotFigure):
             ax.set_title(title, fontweight="bold", fontsize=12)
             logger.warning(f"Skipping embedding visualization for {emb_type}: dim={dim} > 2")
 
-    def _ern_2d(self, sf, nodes, layer_label: str = ""):
+    def _ern_2d(self, sub: BBoxSubFig, nodes, layer_label: str = ""):
         if not nodes:
             return
-        sf.suptitle(f"ERN Nodes{layer_label}", fontsize=16, fontweight="bold", y=1.05)
+        sub.suptitle(f"ERN Nodes{layer_label}", fontsize=16, fontweight="bold", y=1.0)
         rng = self._in_range("sequestron_ERN")
         x = np.linspace(rng[0], rng[1], 100)
         xx, yy = np.meshgrid(x, x)
         gi = np.column_stack([xx.ravel(), yy.ravel()])
         cm = self._cmap(False)
         ne = min(4, len(nodes))
-        axes = sf.subplots(1, ne + 1, width_ratios=[1] * ne + [0.05], gridspec_kw={"wspace": 0.3})
+        axes = sub.subplots(1, ne + 1, width_ratios=[1] * ne + [0.05], gridspec_kw={"wspace": 0.3})
         outs = [self._eval(n, gi) for n in nodes[:ne]]
         vmin, vmax = min(o.min() for o in outs), max(o.max() for o in outs)
         for i, (n, o) in enumerate(zip(nodes[:ne], outs, strict=True)):
@@ -714,11 +707,11 @@ class InnerNodesFigure(BiocompPlotFigure):
             axes[i].set_title(f"ERN\n({n.name})", fontweight="bold", fontsize=12)
         plt.colorbar(im, cax=axes[-1]).set_label("Output")
 
-    def _ern_1d(self, sf, nodes, layer_label: str = ""):
+    def _ern_1d(self, sub: BBoxSubFig, nodes, layer_label: str = ""):
         if not nodes:
             return
-        sf.suptitle(f"ERN Repression Curves{layer_label}", fontsize=16, fontweight="bold", y=1.05)
-        axes = sf.subplots(1, 3, width_ratios=[1, 1, 1.1], gridspec_kw={"wspace": 0.3})
+        sub.suptitle(f"ERN Repression Curves{layer_label}", fontsize=16, fontweight="bold", y=1.0)
+        axes = sub.subplots(1, 3, width_ratios=[1, 1, 1.1], gridspec_kw={"wspace": 0.3})
         rng = self._in_range("sequestron_ERN")
         nr = np.linspace(rng[0], rng[1], 100)
         span = rng[1] - rng[0]
@@ -769,15 +762,15 @@ class InnerNodesFigure(BiocompPlotFigure):
             x_eval_fn=lambda n, x: n.apply_fn(x, ph, node_id=n.node_id, random_var=0.5),
         )
 
-    def _fwd_row(self, sf, basic, uorf, src, out):
+    def _fwd_row(self, sub: BBoxSubFig, basic, uorf, src, out):
         out = out or []
         if not any([basic, uorf, src, out]):
             return
-        sf.suptitle("Forward Nodes", fontsize=16, fontweight="bold", y=1.05)
+        sub.suptitle("Forward Nodes", fontsize=16, fontweight="bold", y=1.0)
         cm = self._cmap(True)
         hs, hu = len(src) > 1, bool(uorf)
         np_ = len(basic) + (1 if hs else 0) + (2 if hu else 0) + len(out)
-        axes = sf.subplots(1, np_, gridspec_kw={"wspace": 0.3})
+        axes = sub.subplots(1, np_, gridspec_kw={"wspace": 0.3})
         axes = [axes] if np_ == 1 else list(axes)
         ai = 0
         if hs:
@@ -818,15 +811,15 @@ class InnerNodesFigure(BiocompPlotFigure):
             axes[ai].set_title(f"{n.node_type}\n{n.name}", fontweight="bold", fontsize=12)
             ai += 1
 
-    def _inv_row(self, sf, inv, inv_uorf, inv_src):
+    def _inv_row(self, sub: BBoxSubFig, inv, inv_uorf, inv_src):
         inv_src = inv_src or []
         if not inv and not inv_uorf and not inv_src:
             return
-        sf.suptitle("Inverse Nodes", fontsize=16, fontweight="bold", y=1.05)
+        sub.suptitle("Inverse Nodes", fontsize=16, fontweight="bold", y=1.0)
         cm = self._cmap(True)
         hs = len(inv_src) > 1
         np_ = len(inv) + (1 if inv_uorf else 0) + (1 if hs else 0)
-        axes = sf.subplots(1, np_, gridspec_kw={"wspace": 0.3})
+        axes = sub.subplots(1, np_, gridspec_kw={"wspace": 0.3})
         axes = [axes] if np_ == 1 else list(axes)
         ai = 0
         if inv_uorf:
@@ -856,11 +849,12 @@ class InnerNodesFigure(BiocompPlotFigure):
             )
             ai += 1
 
-    def create_figure(self) -> MplFigure:
+    def compute_rows(self) -> list[tuple[str, Any]]:
         ern = sorted(self._build_ern(), key=lambda n: n.emb_scalar or 0, reverse=True)
         cc = self.model.compute_config
         use_ern_layer_id = (
-            cc and cc.node_functions
+            cc
+            and cc.node_functions
             and cc.node_functions.get("sequestron_ERN") is not None
             and cc.node_functions["sequestron_ERN"].kwargs.get("use_ern_layer_id", False)
         )
@@ -900,44 +894,41 @@ class InnerNodesFigure(BiocompPlotFigure):
             if use_ern_layer_id:
                 rows.extend([("ern", (ern, " (Layer 1)")), ("ern_1d", (ern, " (Layer 1)"))])
                 if ern_l1:
-                    rows.extend([("ern", (ern_l1, " (Layer 2)")), ("ern_1d", (ern_l1, " (Layer 2)"))])
+                    rows.extend(
+                        [("ern", (ern_l1, " (Layer 2)")), ("ern_1d", (ern_l1, " (Layer 2)"))]
+                    )
             else:
                 rows.extend([("ern", (ern, "")), ("ern_1d", (ern, ""))])
         if any([basic, uorf, src, out]):
             rows.append(("fwd", (basic, uorf, src, out)))
         if (inv or inv_uorf or inv_src) and SHOW_INVERSE:
             rows.append(("inv", (inv, inv_uorf, inv_src)))
-        if not rows:
-            fig = plt.figure(figsize=(10, 5))
-            fig.text(0.5, 0.5, "No data available", ha="center", va="center", fontsize=16)
-            return fig
+        return rows
 
-        fig = plt.figure(figsize=(20, 5 * len(rows)))
-        sfs = fig.subfigures(len(rows), 1, hspace=0.25)
-        sfs = [sfs] if len(rows) == 1 else list(sfs)
+    def draw_into(self, ax) -> None:
+        rows = self.compute_rows()
+        if not rows:
+            ax.text(
+                0.5,
+                0.5,
+                "No data available",
+                ha="center",
+                va="center",
+                fontsize=16,
+                transform=ax.transAxes,
+            )
+            return
+        root = carve_bbox(ax)
+        row_subs = root.split_rows(len(rows), hspace=0.25)
         fns = {
             "ern": lambda s, d: self._ern_2d(s, d[0], layer_label=d[1]),
             "ern_1d": lambda s, d: self._ern_1d(s, d[0], layer_label=d[1]),
             "fwd": lambda s, d: self._fwd_row(s, *d),
             "inv": lambda s, d: self._inv_row(s, *d),
         }
-        for sf, (rt, d) in zip(sfs, rows, strict=True):
+        for sub, (rt, d) in zip(row_subs, rows, strict=True):
             try:
-                fns[rt](sf, d)
+                fns[rt](sub, d)
             except Exception as e:
                 logger.warning(f"Row '{rt}' rendering failed: {e}")
-                sf.text(0.5, 0.5, f"{rt}: render error", ha="center", va="center")
-        fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.05)
-        return fig
-
-    def run(self, overwrite: bool = True, finalize: bool = True):
-        self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig = self.create_figure()
-        fig.savefig(self.figure_spec.output_path, bbox_inches="tight", dpi=150)
-        plt.close(fig)
-
-
-class InnerNodesFigureSpec(FigureSpec):
-    """Figure spec for inner nodes figure (subclass of FigureSpec for pickling compatibility)."""
-
-    pass
+                sub.text(0.5, 0.5, f"{rt}: render error", ha="center", va="center")

@@ -4,14 +4,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
-from dataclasses import dataclass
 
 from biocomptools.toollib.loggers.metrics_models import (
     StepMetrics,
     ReplicateMetrics,
     NetworkDataPairMetrics,
 )
-from biocomp.plotutils import FigureSpec
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -197,28 +195,8 @@ class MetricsPlotter:
 
         plt.suptitle(f'{title_prefix} Metrics History - Step {metrics_history[-1].step}')
 
-        metadata = {
-            'logger_name': logger_name,
-            'title_prefix': title_prefix,
-            'final_step': metrics_history[-1].step,
-            'n_replicates': n_replicates,
-            'n_networks': n_networks,
-            'network_names': all_networks,
-        }
-        if training_id is not None:
-            metadata['training_id'] = training_id
-
-        @dataclass
-        class FigAx:
-            figure: object
-            axes: object = None
-
-        fig_spec = FigureSpec(
-            output_dir=str(output_path.parent),
-            output_file=output_path.name,
-            metadata={'plot_method': 'plot_metrics_history', 'metadata': metadata},
-        )
-        fig_spec.save_figure(FigAx(figure=fig))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, bbox_inches='tight', dpi=150)
         plt.close(fig)
 
 

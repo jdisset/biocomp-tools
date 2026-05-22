@@ -41,27 +41,22 @@ class PlotLogger(Logger):
     def _build_base_context(
         self, step: int, best_model: object, extra_ctx: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        from biocomptools.toollib.figuremakers.innernodes import (
-            InnerNodesFigure,
-            InnerNodesFigureSpec,
-        )
+        from biocomptools.toollib.figuremakers.innernodes import InnerNodesFigure
+        from biocomptools.jeanplot_panels import InnerNodesPanel
         from biocomptools.toollib.figuremakers.benchmarkutils import (
             BenchmarkData,
             BenchmarkItem,
             render_summary_header,
             render_metrics_panel,
         )
-        from biocomp.plotutils import FigureSpec, FigureLayout
 
         ctx = {
             "InnerNodesFigure": InnerNodesFigure,
-            "InnerNodesFigureSpec": InnerNodesFigureSpec,
+            "InnerNodesPanel": InnerNodesPanel,
             "BenchmarkData": BenchmarkData,
             "BenchmarkItem": BenchmarkItem,
             "render_summary_header": render_summary_header,
             "render_metrics_panel": render_metrics_panel,
-            "FigureSpec": FigureSpec,
-            "FigureLayout": FigureLayout,
             "best_model": best_model,
             "step": step,
             "save_dir": self._save_dir,
