@@ -68,7 +68,7 @@ from biocomptools.toollib.networkselector import (
     iRegex,
 )
 from biocomptools.toollib.overlays import OVERLAY_TYPES
-from biocomptools.toollib.plot import Figure, PlotConfig, PlotTask
+from biocomptools.toollib.plot import BiocompPlotFigure, PlotConfig, PlotTask
 
 logger = get_logger(__name__)
 

@@ -62,12 +62,12 @@ def test_generate_full_nested_config_warns():
 
 
 def test_legacy_figure_warns():
-    from biocomptools.toollib.plot import Figure
+    from biocomptools.toollib.plot import BiocompPlotFigure
     from biocomp.plotutils import FigureSpec
 
-    reset_seen()  # FigureSpec also warns; isolate Figure check
+    reset_seen()
     with pytest.warns(DeprecationWarning) as record:
-        Figure(figure_spec=FigureSpec())
+        BiocompPlotFigure(figure_spec=FigureSpec())
     messages = [str(w.message) for w in record]
     assert any("biocomptools.toollib.plot.Figure" in m for m in messages)
     assert any("jeanplot" in m for m in messages)

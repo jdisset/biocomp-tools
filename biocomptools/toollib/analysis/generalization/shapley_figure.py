@@ -17,7 +17,7 @@ from dracon import Arg
 from matplotlib.colors import SymLogNorm, TwoSlopeNorm
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from biocomptools.toollib.plot import Figure
+from biocomptools.toollib.plot import BiocompPlotFigure
 
 from ._render import (
     _FigaxStub,
@@ -227,7 +227,7 @@ class ShapleyDetailConfig(BaseModel):
         return self
 
 
-class ShapleyDetailFigure(Figure):
+class ShapleyDetailFigure(BiocompPlotFigure):
     view: ViewConfig
     view_name: str = ""
     shapley_conf: ShapleyDetailConfig = Field(default_factory=ShapleyDetailConfig)

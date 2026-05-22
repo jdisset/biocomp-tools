@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import List, Optional, Dict, Tuple
 from biocomp.utils import PartialFunction
 from biocomp.plotutils import GridLayout
-from biocomptools.toollib.plot import PlotTask, PlotConfig, Figure, load_default_plotconf
+from biocomptools.toollib.plot import PlotTask, PlotConfig, BiocompPlotFigure, load_default_plotconf
 from biocomp.plotutils import PlotData
 from biocomptools.logging_config import get_logger
 from matplotlib.lines import Line2D
@@ -180,7 +180,7 @@ ANNOTATION_STYLE = {
 }
 
 
-class UORFMatrixFigure(Figure):
+class UORFMatrixFigure(BiocompPlotFigure):
     """A figure that automatically distributes data across a matrix based on uORF values"""
 
     # Input data as list of PlotData objects

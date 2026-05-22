@@ -7,7 +7,7 @@ from pydantic import Field
 import matplotlib.pyplot as plt
 import matplotlib.axes
 
-from biocomptools.toollib.plot import Figure
+from biocomptools.toollib.plot import BiocompPlotFigure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -95,7 +95,7 @@ def render_circuit_to_ax(
         ax.set_title(title, fontsize=12, fontweight="bold")
 
 
-class GeneticCircuitFigure(Figure):
+class GeneticCircuitFigure(BiocompPlotFigure):
     """Figure that renders a genetic circuit schematic using jeanplot."""
 
     network: Any = Field(description="biocomp Network object")

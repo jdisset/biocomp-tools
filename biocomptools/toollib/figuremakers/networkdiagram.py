@@ -19,7 +19,7 @@ from jeanplot.gene.elements import _format_ratio_multiplier
 
 from biocomp.graphengine import is_inverse_node_type
 from biocomp.ratio_schema import get_slot_entries
-from biocomptools.toollib.plot import Figure
+from biocomptools.toollib.plot import BiocompPlotFigure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -1323,7 +1323,7 @@ def render_diagram_to_ax(
         ax.set_title(title, fontsize=12, fontweight="bold")
 
 
-class NetworkDiagramFigure(Figure):
+class NetworkDiagramFigure(BiocompPlotFigure):
     """Figure that renders a network compute diagram using jeanplot."""
 
     network: Any = Field(description="biocomp Network object")

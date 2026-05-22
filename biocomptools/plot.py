@@ -43,7 +43,8 @@ from biocomptools.toollib.networkprediction import NetworkPrediction, Prediction
 from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
 from biocomptools.toollib.common import config
-from biocomptools.toollib.plot import PlotConfig, PlotTask, Figure
+from biocomptools.toollib.plot import PlotConfig, PlotTask, BiocompPlotFigure
+from jeanplot.panels import Figure
 from biocomptools.toollib.overlays import OVERLAY_TYPES
 from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
     UORFMatrixFigure,
@@ -332,6 +333,7 @@ def _loky_pool(nworkers: int):
 
 DEFAULT_TYPES = [
     Figure,
+    BiocompPlotFigure,
     FigureResult,
     PlotResult,
     PlotConfig,

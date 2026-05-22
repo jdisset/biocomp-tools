@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
-from biocomptools.toollib.plot import Figure, PlotConfig, load_default_plotconf
+from biocomptools.toollib.plot import BiocompPlotFigure, PlotConfig, load_default_plotconf
 from biocomptools.modelmodel import BiocompModel, NetworkModel, load_model
 from biocomptools.logging_config import get_logger
 from biocomp.plotutils import FigureSpec
@@ -108,7 +108,7 @@ def _norm(s: str) -> str:
     return s.lower().replace(" ", "_")
 
 
-class InnerNodesFigure(Figure):
+class InnerNodesFigure(BiocompPlotFigure):
     model: Annotated[BiocompModel, BeforeValidator(load_model)]
     n_samples: int = N_SAMPLES
     figure_spec: FigureSpec = Field(default_factory=FigureSpec)

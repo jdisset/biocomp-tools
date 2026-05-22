@@ -16,7 +16,7 @@ from dracon import Arg
 from matplotlib.colors import Normalize, SymLogNorm, TwoSlopeNorm
 from pydantic import BaseModel, ConfigDict, Field
 
-from biocomptools.toollib.plot import Figure
+from biocomptools.toollib.plot import BiocompPlotFigure
 
 from ._render import (
     _FigaxStub,
@@ -152,7 +152,7 @@ def _set_fold_cb_ticks(cb, norm):
     cb.set_ticklabels([labels[i] for i in order])
 
 
-class HorizontalHeatmapFigure(Figure):
+class HorizontalHeatmapFigure(BiocompPlotFigure):
     view: GenViewConfig
     view_name: str = ""
     heatmap_conf: HeatmapConfig = Field(default_factory=HeatmapConfig)
@@ -209,7 +209,7 @@ class HorizontalHeatmapFigure(Figure):
                                        title, cb_label, view, cfg)
 
 
-class ClassSummaryHeatmapFigure(Figure):
+class ClassSummaryHeatmapFigure(BiocompPlotFigure):
     view: GenViewConfig
     view_name: str = ""
     heatmap_conf: HeatmapConfig = Field(default_factory=HeatmapConfig)

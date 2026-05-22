@@ -246,7 +246,7 @@ TXT_PLOT_FUNC_MAP = {
 }
 
 
-class Figure(BaseModel):
+class BiocompPlotFigure(BaseModel):
     figure_spec: Annotated[FigureSpec, BeforeValidator(resolve)]
     plot_config: PlotConfig = Field(default_factory=load_default_plotconf)
     plot_tasks: List[DeferredNode[PlotTask]] = []
