@@ -267,7 +267,11 @@ InvNode:
     curve_type: !StraightCurve {}
 
   Connection[style_class=src-source]:
-    curve_type.start_vector: [30, 0]
+    curve_type: !SimpleBezierCurve
+      start_mode: vector
+      end_mode: vector
+      start_vector: [30, 0]
+      end_vector: [-25, 0]
 
   Container[style_class=layer]:
     layout.gap: 10
