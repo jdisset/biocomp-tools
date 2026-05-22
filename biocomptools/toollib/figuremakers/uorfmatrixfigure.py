@@ -570,7 +570,7 @@ class UORFMatrixFigure(BiocompPlotFigure):
                 if gd:
                     all_grid_data.extend(gd)
             if all_grid_data:
-                from biocomp.plotting.plotting_smooth import grid_data_to_b64
+                from jeanplot.data.grid import grid_data_to_b64
 
                 metadata["grid_data"] = grid_data_to_b64(all_grid_data)
 

@@ -14,7 +14,7 @@ import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomptools.toollib.types import InputOrderElement
 from jeanplot.knn import get_gaussian_weighted_knn
-from biocomp.plotting.plotting_core import build_tree, knn_stats
+from jeanplot.plots.smooth_kernel import build_tree, knn_stats
 from biocomp.datautils import density_balanced_indices
 from scipy.interpolate import RegularGridInterpolator
 from biocomp.metric_utils import (

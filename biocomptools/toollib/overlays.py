@@ -245,7 +245,7 @@ class KnnCellOverlay(Overlay):
     latent_ylims: tuple[float, float] = (0.0, 1.0)
 
     def apply(self, ax, plot_data, plot_config) -> dict:
-        from biocomp.plotting.plotting_smooth import knn_grid as canonical_knn_grid
+        from jeanplot.plots.smooth_kernel import knn_grid as canonical_knn_grid
         from biocomptools.toollib.figuremakers.latent_projection_density import (
             _signed_fwd,
         )

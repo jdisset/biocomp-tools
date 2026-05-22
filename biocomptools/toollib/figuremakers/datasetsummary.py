@@ -506,9 +506,7 @@ def format_z_label(z_latent: float, rescaler=None, fmt: str | None = None, prefi
         return f"{prefix}{float(z_latent):.2f}"
     raw = float(rescaler.inv(float(z_latent)))
     if fmt is None:
-        from biocomp.plotting.plotting_core import format_powers
-        # n_decimals=0 -> "4e3" instead of "4.4e3"; matches the visual
-        # density of x/y tick labels which are mostly integer-mantissa.
+        from jeanplot.plots.ticks import format_powers
         return f"{prefix}{format_powers(raw, n_decimals=0)}"
     return f"{prefix}{raw:{fmt}}"
 

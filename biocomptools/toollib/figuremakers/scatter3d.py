@@ -24,12 +24,12 @@ def _is_latent(vals: np.ndarray, tol: float = 0.05) -> bool:
 
 
 def _nice_ticks(data_vals: np.ndarray, rescaler=None) -> tuple[list[float], list[str]]:
-    from biocomp.plotting.plotting_core import format_powers, powers_of_ten
+    from jeanplot.plots.ticks import format_powers, powers_of_ten
 
     vmin, vmax = float(data_vals.min()), float(data_vals.max())
 
     if rescaler is not None and _is_latent(data_vals):
-        from biocomp.plotting.plotting_core import get_transformed_ticks_and_labels
+        from jeanplot.plots.ticks import get_transformed_ticks_and_labels
 
         _, labels = get_transformed_ticks_and_labels([vmin, vmax], rescaler)
         return [float(p) for p, _ in labels], [_strip_latex(lbl) for _, lbl in labels]

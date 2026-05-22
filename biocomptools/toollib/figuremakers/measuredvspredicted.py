@@ -267,7 +267,7 @@ class MeasuredVsPredictedData(BaseModel):
         return gt_v.ravel(), kernel_pred_raw.ravel(), yh_v.ravel()
 
     def _lattice_query(self, measured: NdArray, predicted: NdArray) -> tuple[NdArray, NdArray]:
-        from biocomp.plotting.plotting_core import build_tree, knn_stats
+        from jeanplot.plots.smooth_kernel import build_tree, knn_stats
 
         assert self.lattice_res is not None
         lattice = np.linspace(measured.min(), measured.max(), self.lattice_res)[:, None]
