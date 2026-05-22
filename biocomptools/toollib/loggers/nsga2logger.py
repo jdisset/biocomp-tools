@@ -120,7 +120,7 @@ class NSGA2DesignLogger(Logger):
         yres: int = 24,
     ) -> str:
         """Create ASCII heatmap of prediction grid."""
-        from biocomp.plotting.ascii_heatmap import heatmap_with_labels
+        from jeanplot.plots.ascii_heatmap import heatmap_with_labels
 
         pred_grid = prediction
         if pred_grid.ndim == 1:

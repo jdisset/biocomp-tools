@@ -240,9 +240,9 @@ def resolve(obj):
 
 TXT_PLOT_FUNC_MAP = {
     "biocomp.plotutils.smooth": "biocomp.plotutils.smooth_txt",
-    "biocomp.plotting.plotting_smooth.smooth_1d": "biocomp.plotting.plotting_txt.smooth_1d_txt",
-    "biocomp.plotting.plotting_smooth.smooth_2d": "biocomp.plotting.plotting_txt.smooth_2d_txt",
-    "biocomp.plotting.plotting_3d.smooth_3d": "biocomp.plotting.plotting_txt.smooth_3d_txt",
+    "jeanplot.plots.smooth_1d.smooth_1d": "jeanplot.plots.txt.smooth_1d_txt",
+    "jeanplot.plots.smooth_2d.smooth_2d": "jeanplot.plots.txt.smooth_2d_txt",
+    "jeanplot.plots.smooth_3d.smooth_3d": "jeanplot.plots.txt.smooth_3d_txt",
 }
 
 
@@ -372,7 +372,7 @@ class Figure(BaseModel):
                 self.figure_spec.finalize(self._figax)
 
     def _run_txt(self, overwrite: bool = True, finalize: bool = True):
-        from biocomp.plotting.plotting_txt import TextPlotResult
+        from jeanplot.plots.txt import TextPlotResult
 
         txt_parts = []
         metadata = {"plot_tasks": []}

@@ -25,7 +25,7 @@ import yaml
 from numpy.typing import NDArray as NdArray
 from pydantic import BaseModel, ConfigDict
 
-from biocomp.plotting.knn_utils_np import make_tree, get_knn_mean_only
+from jeanplot.knn import make_tree, get_knn_mean_only
 
 
 @dataclass

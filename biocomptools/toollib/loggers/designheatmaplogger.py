@@ -13,7 +13,7 @@ from biocomptools.toollib.design_pipeline import CommitCache, precommit_pairs
 from biocomptools.toollib.design_selection import normalize_losses_for_ranking
 from biocomptools.logger_history import HistoryView, LoggerContext
 from biocomptools.logging_config import get_logger
-from biocomp.plotting.ascii_heatmap import heatmap
+from jeanplot.plots.ascii_heatmap import heatmap
 from biocomp.designloss import GridLossWeights
 from biocomp.designutils import side_by_side_txt_plot
 

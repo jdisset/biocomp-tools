@@ -13,7 +13,7 @@ from biocomptools.logging_config import get_logger
 import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomptools.toollib.types import InputOrderElement
-from biocomp.plotting.knn_utils_np import get_gaussian_weighted_knn
+from jeanplot.knn import get_gaussian_weighted_knn
 from biocomp.plotting.plotting_core import build_tree, knn_stats
 from biocomp.datautils import density_balanced_indices
 from scipy.interpolate import RegularGridInterpolator
@@ -165,7 +165,7 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     on 3D lattices where most cells are empty.
     """
     eps = 1e-12
-    from biocomp.plotting.knn_utils_np import KNN_WORKERS, _query
+    from jeanplot.knn.tree import KNN_WORKERS, _query
     n_grid = grid.shape[0]
     distances, indices = _query(tree, grid, k=k, workers=KNN_WORKERS)
     finite_mask = np.isfinite(distances)
