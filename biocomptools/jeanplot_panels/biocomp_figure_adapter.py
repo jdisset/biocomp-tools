@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Deprecated adapter bridging legacy biocomp `Figure` into jeanplot.
-
-Slated for removal once all paper-jobs YAML files migrate to native
-jeanplot panels.
-"""
+"""Adapter bridging legacy biocomp `Figure` into jeanplot."""
 
 from typing import Any
 
 from jeanplot.panels.figure import Figure as JpFigure
-
-from biocomp._legacy_deprecation import warn_legacy
 
 
 class BiocompFigureAdapter(JpFigure):
@@ -18,10 +12,6 @@ class BiocompFigureAdapter(JpFigure):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        warn_legacy(
-            "biocomptools.jeanplot_panels.BiocompFigureAdapter",
-            "native jeanplot panels (see paper-jobs/plot/fig1_matrix_gradient.yaml)",
-        )
         bf = self.biocomp_figure
         spec = getattr(bf, "figure_spec", None)
         if spec is None:

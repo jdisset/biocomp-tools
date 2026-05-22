@@ -593,13 +593,11 @@ class TestLayoutSpec:
 
 class TestGeneticCircuit:
     def test_import(self):
-        from biocomptools.toollib.figuremakers.geneticcircuit import (
-            render_circuit_to_ax,
-            GeneticCircuitFigure,
-        )
+        from biocomptools.toollib.figuremakers.geneticcircuit import render_circuit_to_ax
+        from biocomptools.jeanplot_panels import CircuitPanel
 
         assert render_circuit_to_ax is not None
-        assert GeneticCircuitFigure is not None
+        assert CircuitPanel is not None
 
     def test_render_circuit(self, simple_network, cleanup):
         from biocomptools.toollib.figuremakers.geneticcircuit import render_circuit_to_ax

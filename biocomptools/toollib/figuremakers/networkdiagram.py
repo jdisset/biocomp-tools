@@ -5,7 +5,6 @@
 from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr
 from collections import defaultdict
-import matplotlib.pyplot as plt
 import matplotlib.axes
 
 from jeanplot.core.component import AnchorComponent
@@ -19,7 +18,6 @@ from jeanplot.gene.elements import _format_ratio_multiplier
 
 from biocomp.graphengine import is_inverse_node_type
 from biocomp.ratio_schema import get_slot_entries
-from biocomptools.toollib.plot import BiocompPlotFigure
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -1323,41 +1321,3 @@ def render_diagram_to_ax(
         ax.set_title(title, fontsize=12, fontweight="bold")
 
 
-class NetworkDiagramFigure(BiocompPlotFigure):
-    """Figure that renders a network compute diagram using jeanplot."""
-
-    network: Any = Field(description="biocomp Network object")
-    simplified: bool = True
-    disabled_tu_ids: set[str] | None = None
-    style_overrides: dict | None = None
-    show_ratios: bool = False
-    ratio_normalization: Literal["min", "sum"] = "sum"
-    variable_thickness: bool = False
-    show_edge_parts: bool = False
-    thickness_range: tuple[float, float] = (0.5, 4.0)
-    layout_spec: LayoutSpec | None = None
-
-    def run(self, overwrite: bool = True):
-        if not overwrite and self.figure_spec.output_path.exists():
-            logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
-            return
-        figsize = self.figure_spec.extra_args.get("figsize", (10, 8))
-        dpi = self.figure_spec.extra_args.get("dpi", 150)
-        fig, ax = plt.subplots(figsize=figsize)
-        render_diagram_to_ax(
-            network=self.network,
-            ax=ax,
-            simplified=self.simplified,
-            disabled_tu_ids=self.disabled_tu_ids,
-            style_overrides=self.style_overrides,
-            show_ratios=self.show_ratios,
-            ratio_normalization=self.ratio_normalization,
-            variable_thickness=self.variable_thickness,
-            show_edge_parts=self.show_edge_parts,
-            thickness_range=self.thickness_range,
-            layout_spec=self.layout_spec,
-        )
-        self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(self.figure_spec.output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1)
-        plt.close(fig)
-        logger.info(f"Saved network diagram to {self.figure_spec.output_path}")

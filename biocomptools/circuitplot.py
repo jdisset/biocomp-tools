@@ -11,16 +11,10 @@ from dracon import dracon_program, Arg
 from biocomp.recipe import Recipe
 from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, PartsLibrary
-from biocomp.plotutils import FigureSpec
 
-from biocomptools.toollib.figuremakers.geneticcircuit import (
-    GeneticCircuitFigure,
-    render_circuit_to_ax,
-)
-from biocomptools.toollib.figuremakers.networkdiagram import (
-    NetworkDiagramFigure,
-    render_diagram_to_ax,
-)
+from biocomptools.jeanplot_panels import CircuitPanel, NetworkDiagramPanel
+from biocomptools.toollib.figuremakers.geneticcircuit import render_circuit_to_ax
+from biocomptools.toollib.figuremakers.networkdiagram import render_diagram_to_ax
 from biocomptools.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -29,7 +23,7 @@ logger = get_logger(__name__)
 @dracon_program(
     name='biocomp-circuitplot',
     description='Generate circuit diagrams and network schematics from recipes.',
-    context_types=[Recipe, FigureSpec, GeneticCircuitFigure, NetworkDiagramFigure],
+    context_types=[Recipe, CircuitPanel, NetworkDiagramPanel],
 )
 class CircuitPlotConfig(BaseModel):
     recipe: Optional[Recipe] = Field(default=None, description="Recipe object")
@@ -108,29 +102,34 @@ def run_circuitplot(config: CircuitPlotConfig):
     output = Path(config.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    fig_spec = FigureSpec(
-        output_dir=str(output.parent),
-        output_file=output.name,
-        extra_args={"figsize": config.figsize, "dpi": config.dpi},
-    )
+    from jeanplot.panels.figure import Figure as JpFigure
+    from jeanplot.core import Size
+
+    panel_size = Size(width=config.figsize[0], height=config.figsize[1])
+
+    def _render_panel(panel):
+        panel.min_dimensions = panel_size
+        fig = JpFigure(
+            output_dir=str(output.parent),
+            output_file=output.name,
+            children=[panel],
+            dpi=config.dpi,
+        )
+        fig.render()
 
     if config.plot_type == "circuit":
-        figure = GeneticCircuitFigure(
-            figure_spec=fig_spec,
+        _render_panel(CircuitPanel(
             network=network,
             hide_marker_tus=config.hide_marker_tus,
             style_overrides=config.style,
-        )
-        figure.run()
+        ))
 
     elif config.plot_type == "diagram":
-        figure = NetworkDiagramFigure(
-            figure_spec=fig_spec,
+        _render_panel(NetworkDiagramPanel(
             network=network,
             simplified=config.simplified,
             style_overrides=config.style,
-        )
-        figure.run()
+        ))
 
     elif config.plot_type == "all":
         fig, axes = plt.subplots(1, 2, figsize=(config.figsize[0] * 2, config.figsize[1]))

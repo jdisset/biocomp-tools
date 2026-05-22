@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Genetic circuit figure for biocomp networks using jeanplot."""
+"""Genetic circuit rendering for biocomp networks using jeanplot."""
 
 from typing import Optional, Any, Literal
-from pydantic import Field
-import matplotlib.pyplot as plt
 import matplotlib.axes
-
-from biocomptools.toollib.plot import BiocompPlotFigure
-from biocomptools.logging_config import get_logger
-
-logger = get_logger(__name__)
 
 
 _GENETIC_SCHEMATIC_THEME_CACHE: dict | None = None
@@ -93,40 +86,3 @@ def render_circuit_to_ax(
 
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")
-
-
-class GeneticCircuitFigure(BiocompPlotFigure):
-    """Figure that renders a genetic circuit schematic using jeanplot."""
-
-    network: Any = Field(description="biocomp Network object")
-    hide_marker_tus: bool = True
-    hide_disabled_tus: bool = False
-    disabled_tu_ids: Optional[set[str]] = None
-    grid_gap: tuple[float, float] = (40.0, 20.0)
-    connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal"
-    style_overrides: Optional[dict] = None
-
-    def run(self, overwrite: bool = True):
-        if not overwrite and self.figure_spec.output_path.exists():
-            logger.info(f"Skipping existing figure {self.figure_spec.output_path}")
-            return
-
-        figsize = self.figure_spec.extra_args.get("figsize", (10, 8))
-        dpi = self.figure_spec.extra_args.get("dpi", 150)
-
-        fig, ax = plt.subplots(figsize=figsize)
-        render_circuit_to_ax(
-            network=self.network,
-            ax=ax,
-            hide_marker_tus=self.hide_marker_tus,
-            hide_disabled_tus=self.hide_disabled_tus,
-            disabled_tu_ids=self.disabled_tu_ids,
-            grid_gap=self.grid_gap,
-            connection_style=self.connection_style,
-            style_overrides=self.style_overrides,
-        )
-
-        self.figure_spec.output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(self.figure_spec.output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.1)
-        plt.close(fig)
-        logger.info(f"Saved genetic circuit to {self.figure_spec.output_path}")
