@@ -37,16 +37,15 @@ def _resolve_data_dim(pd: Any) -> int:
     return int(x.shape[1] if x.ndim > 1 else 1)
 
 
-def _as_jeanplot_pd(pd: Any):
+def _as_jeanplot_pd(pd: Any, rescaler: Any = None):
     from jeanplot.data.plot_data import PlotData as JeanplotPlotData
-
-    if isinstance(pd, (NetworkPlotData, NetworkPredictedPlotData)):
-        return pd.to_jeanplot()
-    if isinstance(pd, JeanplotPlotData):
-        return pd
     from biocomptools.jeanplot_panels.data import _biocomp_to_jeanplot
 
-    return _biocomp_to_jeanplot(pd)
+    if isinstance(pd, (NetworkPlotData, NetworkPredictedPlotData)):
+        return _biocomp_to_jeanplot(pd.source, rescaler=rescaler)
+    if isinstance(pd, JeanplotPlotData):
+        return pd
+    return _biocomp_to_jeanplot(pd, rescaler=rescaler)
 
 
 def _resolve_width(kind: str, kind_widths: dict, pd: Any | None = None) -> float:
@@ -60,14 +59,20 @@ def _resolve_width(kind: str, kind_widths: dict, pd: Any | None = None) -> float
     return float(kw)
 
 
+def _drop_none(d: dict | None) -> dict:
+    # YAML knobs default to None to mean "absent"; strip them before splat
+    # so Pydantic field defaults apply instead of clashing with non-Optional types.
+    return {k: v for k, v in (d or {}).items() if v is not None}
+
+
 def _build_data_panel(
     pd: Any,
     *,
     title: str | None,
     rescaler: Any | None,
-    slice_grid_kwargs: dict | None,
+    slice_grid_kwargs: dict,
 ) -> Container:
-    jpd = _as_jeanplot_pd(pd)
+    jpd = _as_jeanplot_pd(pd, rescaler=rescaler)
     dim = _resolve_data_dim(jpd)
     if dim == 1:
         return SmoothPanel1D(plot_data=jpd, rescaler=rescaler, title=title)
@@ -75,7 +80,7 @@ def _build_data_panel(
         return SmoothPanel2D(plot_data=jpd, rescaler=rescaler, title=title)
     if dim == 3:
         return SmoothPanel3D(
-            plot_data=jpd, rescaler=rescaler, title=title, **(slice_grid_kwargs or {})
+            plot_data=jpd, rescaler=rescaler, title=title, **slice_grid_kwargs
         )
     raise ValueError(f"unsupported data dim={dim}")
 
@@ -85,17 +90,16 @@ def _build_slices_only_panel(
     *,
     title: str | None,
     rescaler: Any | None,
-    slice_grid_kwargs: dict | None,
+    slice_grid_kwargs: dict,
 ) -> Container:
     import numpy as np
 
     from jeanplot.core.container import Container as _C
     from jeanplot.core.models import LayoutConstraints as _LC
 
-    jpd = _as_jeanplot_pd(pd)
-    sg_kw = dict(slice_grid_kwargs or {})
-    rows, cols = sg_kw.get("slice_grid", (3, 3))
-    zslices = sg_kw.get("zslices", [0.05, 0.4])
+    jpd = _as_jeanplot_pd(pd, rescaler=rescaler)
+    rows, cols = slice_grid_kwargs.get("slice_grid", (3, 3))
+    zslices = slice_grid_kwargs.get("zslices", [0.05, 0.4])
     n = rows * cols
     zs = np.linspace(float(zslices[0]), float(zslices[-1]), n)
     cells = []
@@ -159,7 +163,8 @@ def build_per_network_row(
     ``layout="stacked"``: a Container(direction=column) where each cell
     sits on its own row.
     """
-    kw = dict(_DEFAULT_KIND_WIDTHS, **(kind_widths or {}))
+    kw = dict(_DEFAULT_KIND_WIDTHS, **_drop_none(kind_widths))
+    slice_grid_kwargs = _drop_none(slice_grid_kwargs)
     needs_pred_data = predicted_data is not None
     needs_mvp = mvp_data is not None
 

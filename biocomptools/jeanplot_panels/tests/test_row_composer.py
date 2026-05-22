@@ -135,6 +135,77 @@ def test_blurb_panel_carries_text():
     assert blurb.title == "Notes"
 
 
+def test_none_kwargs_dropped_for_3d_data():
+    # Regression: YAML knobs default to None to mean "absent". Splatting
+    # {"zslices": None, ...} into SmoothPanel3D(zslices: list[float]) used to
+    # raise pydantic "Input should be a valid list". Composer must drop None
+    # so Pydantic defaults apply.
+    from jeanplot.panels.smooth_3d import SmoothPanel3D
+
+    net = _FakeNetwork()
+    pd = _make_plot_data(3, network=net)
+    row = build_per_network_row(
+        panels=["ground_truth"],
+        plot_data=pd,
+        network=net,
+        slice_grid_kwargs={
+            "slice_grid": [3, 3],
+            "slice_zrange": [0.0, 0.5],
+            "slice_zvalues": None,
+            "zslices": None,
+            "cube_frac_w": 0.45,
+        },
+    )
+    cell = next(c for c in row.children if isinstance(c, SmoothPanel3D))
+    # Pydantic default kicked in instead of None.
+    assert cell.zslices == [0.05, 0.25, 0.4, 0.55]
+
+
+def test_none_kwargs_dropped_for_slices_panel():
+    # Same class of bug for the slices-only panel: `sg_kw.get("zslices", default)`
+    # returns None when the key is present-but-None. Composer must drop None
+    # so the fallback default applies.
+    from jeanplot.panels.smooth_2d import SmoothPanel2D
+
+    net = _FakeNetwork()
+    pd = _make_plot_data(3, network=net)
+    row = build_per_network_row(
+        panels=["ground_truth_slices"],
+        plot_data=pd,
+        network=net,
+        slice_grid_kwargs={"slice_grid": None, "zslices": None},
+    )
+    # Should build a Container of SmoothPanel2D cells; no NoneType errors.
+    leaves = []
+
+    def _walk(c):
+        if isinstance(c, SmoothPanel2D):
+            leaves.append(c)
+        for ch in getattr(c, "children", []) or []:
+            _walk(ch)
+
+    _walk(row)
+    assert len(leaves) == 9  # default slice_grid=(3,3)
+
+
+def test_none_kind_widths_dropped():
+    # kind_widths={"diagram": None} used to override the per-kind default with
+    # None, then float(None) blew up. None means "use default" here too.
+    net = _FakeNetwork()
+    pd = _make_plot_data(2, network=net)
+    row = build_per_network_row(
+        panels=["diagram", "ground_truth"],
+        plot_data=pd,
+        network=net,
+        kind_widths={"diagram": None},
+    )
+    # Diagram cell still present with the default width.
+    from biocomptools.jeanplot_panels import NetworkDiagramPanel
+
+    diag = next(c for c in row.children if isinstance(c, NetworkDiagramPanel))
+    assert diag.min_dimensions.width == 5.0  # _DEFAULT_KIND_WIDTHS["diagram"]
+
+
 def test_prediction_panel_dropped_when_missing():
     net = _FakeNetwork()
     pd = _make_plot_data(2, network=net)

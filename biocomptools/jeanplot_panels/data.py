@@ -9,15 +9,18 @@ from jeanplot.data.plot_data import PlotData as JeanplotPlotData
 from biocomptools.toollib.figuremakers.measuredvspredicted import MeasuredVsPredictedData
 
 
-def _biocomp_to_jeanplot(pd: Any) -> JeanplotPlotData:
-    """Convert a biocomp ``PlotData`` (or ``LazyPlotData``) to ``jeanplot.PlotData``.
+def _biocomp_to_jeanplot(pd: Any, rescaler: Any = None) -> JeanplotPlotData:
+    """Convert a biocomp ``PlotData`` to ``jeanplot.PlotData``.
 
-    Biocomp's ``PlotData`` has ``.x``, ``.y``, ``.input_names``, ``.output_name``,
-    ``.metadata``; jeanplot's has ``xval``, ``yval``, ``input_names``,
-    ``output_name``, ``metadata``. Field names match modulo ``x`` -> ``xval``.
+    biocomp data lives in raw experimental units; jeanplot panels expect
+    latent ([0, 1]) space and use ``rescaler`` to project axis ticks back to
+    raw at render time. Pass a rescaler here to project at the boundary.
     """
     x = np.asarray(pd.x, dtype=np.float32)
     y = np.asarray(pd.y, dtype=np.float32)
+    if rescaler is not None:
+        x = np.asarray(rescaler.fwd(x), dtype=np.float32)
+        y = np.asarray(rescaler.fwd(y), dtype=np.float32)
     output_name = pd.output_name
     if isinstance(output_name, list) and len(output_name) == 1:
         output_name = output_name[0]
@@ -35,10 +38,11 @@ class NetworkPlotData(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source: Any
+    rescaler: Any = None
 
     @property
     def jeanplot(self) -> JeanplotPlotData:
-        return _biocomp_to_jeanplot(self.source)
+        return _biocomp_to_jeanplot(self.source, rescaler=self.rescaler)
 
     def to_jeanplot(self) -> JeanplotPlotData:
         return self.jeanplot
@@ -48,10 +52,11 @@ class NetworkPredictedPlotData(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source: Any
+    rescaler: Any = None
 
     @property
     def jeanplot(self) -> JeanplotPlotData:
-        return _biocomp_to_jeanplot(self.source)
+        return _biocomp_to_jeanplot(self.source, rescaler=self.rescaler)
 
     def to_jeanplot(self) -> JeanplotPlotData:
         return self.jeanplot
