@@ -22,6 +22,7 @@ from biocomptools.jeanplot_panels.design import (
     NetworkDiagramFullWidthPanel,
 )
 from biocomptools.jeanplot_panels.empty import ConstantTextPanel, EmptyPanel
+from biocomptools.jeanplot_panels.fluo import FluoDensitiesPanel
 from biocomptools.jeanplot_panels.latent_density import LatentProjectionHistogramPanel
 from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
@@ -48,6 +49,7 @@ JEANPLOT_PANEL_TYPES = [
     ActivationsPanel,
     EmptyPanel,
     ConstantTextPanel,
+    FluoDensitiesPanel,
     DesignMetricsPanel,
     LatticeHeatmapPanel,
     NetworkDiagramFullWidthPanel,
@@ -119,6 +121,7 @@ __all__ = [
     "ConstantTextPanel",
     "DesignMetricsPanel",
     "EmptyPanel",
+    "FluoDensitiesPanel",
     "JEANPLOT_PANEL_TYPES",
     "LatentProjectionHistogramPanel",
     "LatticeHeatmapPanel",

@@ -2,14 +2,10 @@
 # Copyright (c) 2026 Jean Disset
 """Recipe prediction utilities for uniform vs experimental X sampling."""
 
-from typing import TYPE_CHECKING, Optional
-
 from pydantic import BaseModel, PrivateAttr, model_validator
 
+from biocomp.plotutils import PlotData
 from biocomptools.toollib.networkprediction import PredictionSamplingConfig
-
-if TYPE_CHECKING:
-    from biocomp.plotutils import PlotData
 
 
 class RecipePredictionData(BaseModel):
@@ -23,10 +19,10 @@ class RecipePredictionData(BaseModel):
     resolution: int = 50
     n_samples: int = 5000
     seed: int = 42
-    input_order: Optional[list] = None
+    input_order: list | None = None
 
     # Grouped sampling config (forwarded to NetworkPrediction).
-    sampling: Optional[PredictionSamplingConfig] = None
+    sampling: PredictionSamplingConfig | None = None
 
     _uniform_data: PlotData = PrivateAttr()
     _experimental_data: PlotData = PrivateAttr()

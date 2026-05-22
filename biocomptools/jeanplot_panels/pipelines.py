@@ -20,25 +20,32 @@ def load_paper_dataset(dataset_file: str) -> list[Any]:
     """Read a NetworkSet/CleanupFilter YAML, return ``filter_compatible`` output."""
     from biocomptools.toollib.datasources import DBSource
     from biocomptools.toollib.figuremakers.datasetsummary import filter_compatible
+    from biocomptools.toollib import networkselector as _ns
     import dracon as dr
 
-    content = dr.load(dataset_file, enable_interpolation=True)
+    loader = dr.DraconLoader(
+        enable_interpolation=True,
+        capture_globals=True,
+        context={
+            "NetworkSet": _ns.NetworkSet,
+            "NetworkSetUnion": _ns.NetworkSetUnion,
+            "NetworkSetIntersection": _ns.NetworkSetIntersection,
+            "NetworkSetDifference": _ns.NetworkSetDifference,
+            "NetworkSelector": _ns.NetworkSelector,
+            "NetworkFilter": _ns.NetworkFilter,
+            "CleanupFilter": _ns.CleanupFilter,
+            "Regex": _ns.Regex,
+            "iRegex": _ns.iRegex,
+        },
+    )
+    content = loader.load(dataset_file)
     src = DBSource(content=content)
     return filter_compatible(src.get_data())
 
 
 def network_plot_data(D: list[Any], index: int = 0, rescaler: Any = None) -> JeanplotPlotData:
     """Build a jeanplot ``PlotData`` for one network, optionally rescaling x/y."""
-    pd = D[index]
-    jp = _biocomp_to_jeanplot(pd)
-    if rescaler is not None:
-        jp = jp.model_copy(
-            update={
-                "xval": rescaler.fwd(jp.xval),
-                "yval": rescaler.fwd(jp.yval),
-            }
-        )
-    return jp
+    return _biocomp_to_jeanplot(D[index], rescaler=rescaler)
 
 
 def paper_per_network_pds(
@@ -59,10 +66,106 @@ def opt_list(item: Any) -> list:
     return [item] if item is not None else []
 
 
+def paper_predict(
+    xp_name: str,
+    rcp_name: str,
+    model_name: str | None = None,
+    model_path: str | None = None,
+    calibration_regex: str = ".*[Ff][Ii][Nn][Aa][Ll].*",
+    input_order: list[list[int]] = [[0, 1, 2]],  # noqa: B006
+    z_value: str = "uniform",
+    max_evals: int = 300000,
+):
+    """Load model+experiment, run a NetworkPrediction, return the first PlotData."""
+    from biocomp.network import recipe_to_networks  # noqa: F401  (ensure builders registered)
+    from biocomptools.modelmodel import BiocompModel, NetworkModel
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.networkprediction import NetworkPrediction
+    from biocomptools.toollib.networkselector import iRegex
+
+    model = BiocompModel.resolve(name=model_name, path=model_path)
+    src = DBSource(content=[{
+        "experiment_name": xp_name,
+        "recipe_name": rcp_name,
+        "calibration_name": iRegex(calibration_regex),
+    }])
+    d_train = [src.get_data()[0]]
+    pred = NetworkPrediction(
+        predict_at=[d.x for d in d_train],
+        ground_truth=[d.y for d in d_train],
+        per_prediction_info=[d.metadata for d in d_train],
+        input_order=input_order,
+        z_value=z_value,
+        max_evals=max_evals,
+        network_model=NetworkModel(
+            network=[d.metadata["built_network"] for d in d_train],
+            model=model,
+        ),
+    )
+    return pred.get_data()[0]
+
+
+def matrix_predict(
+    xp: str,
+    recipe: str,
+    calib: str = ".*FINAL",
+    model_name: str | None = None,
+    model_path: str | None = None,
+    input_order: list[list[int]] = [[1, 0]],  # noqa: B006
+    z_value: str = "uniform",
+    max_evals: int = 300000,
+):
+    """Load a uORF-bundled matrix experiment, return ``(model, D, uorf_info)``.
+
+    ``D`` is the lazy NetworkPrediction output. ``uorf_info`` is the per-network
+    uORF annotation list pulled from the model's training dataset.
+    """
+    from biocomptools.modelmodel import BiocompModel, NetworkModel
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.figuremakers.uorfmatrixfigure import (
+        bundle_uorf_data,
+        extract_uorf_info,
+    )
+    from biocomptools.toollib.networkprediction import NetworkPrediction
+    from biocomptools.toollib.networkselector import NetworkSet, Regex
+
+    model = BiocompModel.resolve(name=model_name, path=model_path)
+    data = DBSource(content=[{
+        "experiment_name": Regex(xp),
+        "recipe_name": Regex(recipe),
+        "calibration_name": Regex(calib),
+    }])
+    matrix_pd = bundle_uorf_data(data.get_data())[0]
+
+    pred = NetworkPrediction(
+        predict_at=[d.x for d in matrix_pd],
+        ground_truth=[d.y for d in matrix_pd],
+        per_prediction_info=[d.metadata for d in matrix_pd],
+        input_order=input_order,
+        z_value=z_value,
+        max_evals=max_evals,
+        network_model=NetworkModel(
+            network=[d.metadata["built_network"] for d in matrix_pd],
+            model=model,
+        ),
+    )
+
+    training = getattr(model, "training_dataset", None)
+    if training is not None:
+        training_set = NetworkSet(content=training.network_data_pairs)
+        uorf_info = [extract_uorf_info(n) for n, _ in training_set.get_networks_and_data()]
+    else:
+        uorf_info = None
+
+    return {"model": model, "D": pred.get_data_lazy(), "uorf_info": uorf_info}
+
+
 register_template(load_paper_dataset)
 register_template(network_plot_data)
 register_template(paper_per_network_pds)
 register_template(opt_list)
+register_template(paper_predict)
+register_template(matrix_predict)
 
 
 PAPER_PIPELINE_HELPERS: dict[str, Any] = {
@@ -70,13 +173,17 @@ PAPER_PIPELINE_HELPERS: dict[str, Any] = {
     "network_plot_data": network_plot_data,
     "paper_per_network_pds": paper_per_network_pds,
     "opt_list": opt_list,
+    "paper_predict": paper_predict,
+    "matrix_predict": matrix_predict,
 }
 
 
 __all__ = [
     "load_paper_dataset",
+    "matrix_predict",
     "network_plot_data",
     "opt_list",
     "paper_per_network_pds",
+    "paper_predict",
     "PAPER_PIPELINE_HELPERS",
 ]
