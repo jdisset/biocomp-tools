@@ -23,6 +23,10 @@ from biocomptools.jeanplot_panels.design import (
 )
 from biocomptools.jeanplot_panels.empty import ConstantTextPanel, EmptyPanel
 from biocomptools.jeanplot_panels.fluo import FluoDensitiesPanel
+from biocomptools.jeanplot_panels.heatmap import (
+    ClassSummaryHeatmapPanel,
+    HorizontalHeatmapPanel,
+)
 from biocomptools.jeanplot_panels.latent_density import LatentProjectionHistogramPanel
 from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
@@ -34,6 +38,7 @@ from biocomptools.jeanplot_panels.pipelines import (
 )
 from biocomptools.jeanplot_panels.quantile import QuantileCoveragePanel
 from biocomptools.jeanplot_panels.row_composer import build_per_network_row
+from biocomptools.jeanplot_panels.shapley import ShapleyDetailPanel
 from biocomptools.jeanplot_panels.voxel import (
     BenchmarkDistributionPanel,
     SmoothVoxelPanel,
@@ -50,6 +55,9 @@ JEANPLOT_PANEL_TYPES = [
     EmptyPanel,
     ConstantTextPanel,
     FluoDensitiesPanel,
+    HorizontalHeatmapPanel,
+    ClassSummaryHeatmapPanel,
+    ShapleyDetailPanel,
     DesignMetricsPanel,
     LatticeHeatmapPanel,
     NetworkDiagramFullWidthPanel,
@@ -118,10 +126,12 @@ __all__ = [
     "BenchmarkSliceGridPanel",
     "BlurbPanel",
     "CircuitPanel",
+    "ClassSummaryHeatmapPanel",
     "ConstantTextPanel",
     "DesignMetricsPanel",
     "EmptyPanel",
     "FluoDensitiesPanel",
+    "HorizontalHeatmapPanel",
     "JEANPLOT_PANEL_TYPES",
     "LatentProjectionHistogramPanel",
     "LatticeHeatmapPanel",
@@ -133,6 +143,7 @@ __all__ = [
     "NetworkPredictedPlotData",
     "PAPER_PIPELINE_HELPERS",
     "QuantileCoveragePanel",
+    "ShapleyDetailPanel",
     "SmoothVoxelPanel",
     "build_per_network_row",
     "get_jeanplot_panel_helpers",

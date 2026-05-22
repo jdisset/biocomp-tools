@@ -76,15 +76,8 @@ from biocomptools.toollib.figuremakers.datasetsummary import (
     trained_on_status,
 )
 from biocomptools.toollib.figuremakers.measuredvspredicted import MeasuredVsPredictedData
-from biocomptools.toollib.analysis.generalization.shapley_figure import (
-    ShapleyDetailFigure,
-    ShapleyDetailConfig,
-)
-from biocomptools.toollib.analysis.generalization.heatmap_figure import (
-    HorizontalHeatmapFigure,
-    ClassSummaryHeatmapFigure,
-    HeatmapConfig,
-)
+from biocomptools.toollib.analysis.generalization.shapley_figure import ShapleyDetailConfig
+from biocomptools.toollib.analysis.generalization.heatmap_figure import HeatmapConfig
 from biocomptools.toollib.analysis.generalization.views import GenViewConfig
 from biocomptools.toollib.analysis.generalization.pivot_build import load_metrics_csv
 from biocomptools.modelmodel import BiocompModel, NetworkModel
@@ -363,10 +356,7 @@ DEFAULT_TYPES = [
     PartialFunction,
     DataRescaler,
     UORFMatrixFigure,
-    ShapleyDetailFigure,
     ShapleyDetailConfig,
-    HorizontalHeatmapFigure,
-    ClassSummaryHeatmapFigure,
     HeatmapConfig,
     GenViewConfig,
     load_metrics_csv,

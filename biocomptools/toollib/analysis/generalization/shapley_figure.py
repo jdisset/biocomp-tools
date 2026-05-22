@@ -17,10 +17,7 @@ from dracon import Arg
 from matplotlib.colors import SymLogNorm, TwoSlopeNorm
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from biocomptools.toollib.plot import BiocompPlotFigure
-
 from ._render import (
-    _FigaxStub,
     composite_icon,
     find_default_pictogram_dir,
     load_pictograms,
@@ -227,7 +224,7 @@ class ShapleyDetailConfig(BaseModel):
         return self
 
 
-class ShapleyDetailFigure(BiocompPlotFigure):
+class ShapleyDetailFigure(BaseModel):
     view: ViewConfig
     view_name: str = ""
     shapley_conf: ShapleyDetailConfig = Field(default_factory=ShapleyDetailConfig)
@@ -239,21 +236,13 @@ class ShapleyDetailFigure(BiocompPlotFigure):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def run(self, overwrite: bool = True) -> None:
-        if (
-            not overwrite
-            and self.figure_spec.output_path
-            and self.figure_spec.output_path.exists()
-        ):
-            return
-
+    def compute(self):
         df = self.df if self.df is not None else load_metrics_csv(self.dataframe_path or "")
         pivot, net_meta, row_order = build_pivot(
             df, self.view, metric=self.metric, loss_filter=self.loss_filter
         )
-
         sc = self.shapley_conf
-        shapley_mat, players, detailed = compute_shapley(
+        return compute_shapley(
             pivot, net_meta, row_order, self.view,
             exclude_target=sc.exclude_target,
             weighted=sc.weighted,
@@ -261,26 +250,12 @@ class ShapleyDetailFigure(BiocompPlotFigure):
             marginal_mode=sc.marginal_mode,
         )
 
-        with mpl.rc_context(rc=self.plot_config.rc_context):
-            fig = self._draw(shapley_mat, players, detailed)
-            metadata = dict(self.figure_spec.metadata) if self.figure_spec.metadata else {}
-            metadata["analysis"] = {
-                "view": self.view_name or "unnamed",
-                "players": list(players),
-                "loss_filter": self.loss_filter,
-                "metric": self.metric,
-                "marginal_mode": sc.marginal_mode,
-                "aggregation": sc.aggregation,
-                "shapley_matrix": shapley_mat.tolist(),
-            }
-            self.figure_spec.metadata = metadata
-            self.figure_spec.finalize(_FigaxStub(fig))
-
     def _draw(
         self,
         shapley: np.ndarray,
         players: list[str],
         detailed: list[list[list[tuple[str, float, float]]]],
+        parent_ax: plt.Axes | None = None,
     ) -> plt.Figure:
         sc = self.shapley_conf
         view = self.view
@@ -387,12 +362,23 @@ class ShapleyDetailFigure(BiocompPlotFigure):
             return composite_icon(parse_condition(label, players), pictograms, picto_bg, invert=invert)
 
         n_gs_rows = 4 if sc.show_tension else 2
-        fig = plt.figure(figsize=figsize)
-        fig.subplots_adjust(top=sc.top, bottom=sc.bottom, left=sc.left, right=sc.right)
+        if parent_ax is not None:
+            fig = parent_ax.get_figure()
+            pos = parent_ax.get_position()
+            parent_ax.set_axis_off()
+            _gs_bounds = dict(
+                figure=fig, left=pos.x0, right=pos.x1, top=pos.y1, bottom=pos.y0,
+            )
+        else:
+            fig = plt.figure(figsize=figsize)
+            fig.subplots_adjust(top=sc.top, bottom=sc.bottom, left=sc.left, right=sc.right)
+            pos = None
+            _gs_bounds = {}
         gs = gridspec.GridSpec(
             n_gs_rows, 2,
             height_ratios=h_ratios_all, width_ratios=sc.width_ratios,
             hspace=sc.gridspec_hspace, wspace=sc.gridspec_wspace,
+            **_gs_bounds,
         )
 
         ax = fig.add_subplot(gs[1, 0])
@@ -819,11 +805,24 @@ class ShapleyDetailFigure(BiocompPlotFigure):
                    fontsize=sc.colorbar_annotation_fontsize, color=sc.helps_color,
                    fontweight="bold")
 
-        fig.suptitle(sc.title_text, fontsize=sc.title_fontsize, fontweight="bold", y=sc.title_y)
-        fig.text(0.5, sc.subtitle_y,
-                 sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
-                 ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
-        fig.text(0.5, sc.footnote_y, sc.footnote_text,
-                 ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
-                 style="italic")
+        if pos is not None:
+            cx = (pos.x0 + pos.x1) / 2
+            def _remap_y(y: float) -> float:
+                return pos.y0 + y * (pos.y1 - pos.y0)
+            fig.text(cx, _remap_y(sc.title_y), sc.title_text,
+                     fontsize=sc.title_fontsize, fontweight="bold", ha="center")
+            fig.text(cx, _remap_y(sc.subtitle_y),
+                     sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
+                     ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
+            fig.text(cx, _remap_y(sc.footnote_y), sc.footnote_text,
+                     ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
+                     style="italic")
+        else:
+            fig.suptitle(sc.title_text, fontsize=sc.title_fontsize, fontweight="bold", y=sc.title_y)
+            fig.text(0.5, sc.subtitle_y,
+                     sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
+                     ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
+            fig.text(0.5, sc.footnote_y, sc.footnote_text,
+                     ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
+                     style="italic")
         return fig

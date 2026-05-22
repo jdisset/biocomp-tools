@@ -4,22 +4,16 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 
-import matplotlib as mpl
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from biocomp.plotutils import *  # noqa: F401, F403
-from dracon import Arg
 from matplotlib.colors import Normalize, SymLogNorm, TwoSlopeNorm
-from pydantic import BaseModel, ConfigDict, Field
-
-from biocomptools.toollib.plot import BiocompPlotFigure
+from pydantic import BaseModel, Field
 
 from ._render import (
-    _FigaxStub,
     composite_icon,
     draw_heatmap_cells,
     find_default_pictogram_dir,
@@ -27,14 +21,7 @@ from ._render import (
     load_pictograms,
     maybe_truncate,
 )
-from .heatmap_math import (
-    build_class_pivot,
-    build_network_pivot,
-    col_stats,
-    deviation,
-    log_fold_dev,
-)
-from .pivot_build import load_metrics_csv
+from .heatmap_math import col_stats, deviation, log_fold_dev
 from .views import GenViewConfig, parse_condition
 
 DataMode = Literal["abs", "dev_mean", "dev_best"]
@@ -152,136 +139,59 @@ def _set_fold_cb_ticks(cb, norm):
     cb.set_ticklabels([labels[i] for i in order])
 
 
-class HorizontalHeatmapFigure(BiocompPlotFigure):
-    view: GenViewConfig
-    view_name: str = ""
-    heatmap_conf: HeatmapConfig = Field(default_factory=HeatmapConfig)
-    dataframe_path: str | None = None
-    df: pd.DataFrame | None = None
-    loss_filter: str | None = "regression"
-    metric: str = "grid_nrmse"
-    data_mode: Annotated[DataMode, Arg(help="abs | dev_mean | dev_best")] = "abs"
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def run(self, overwrite: bool = True) -> None:
-        if (
-            not overwrite
-            and self.figure_spec.output_path
-            and self.figure_spec.output_path.exists()
-        ):
-            return
-        df = self.df if self.df is not None else load_metrics_csv(self.dataframe_path or "")
-        pivot, net_meta, conds = build_network_pivot(
-            df, self.view, metric=self.metric, loss_filter=self.loss_filter
-        )
-        with mpl.rc_context(rc=self.plot_config.rc_context):
-            fig = self._draw(pivot.values, net_meta, conds)
-            self.figure_spec.metadata = {
-                **(self.figure_spec.metadata or {}),
-                "analysis": {
-                    "kind": "horizontal_heatmap",
-                    "view": self.view_name,
-                    "data_mode": self.data_mode,
-                    "metric": self.metric,
-                    "n_networks": int(pivot.shape[0]),
-                    "n_conditions": int(pivot.shape[1]),
-                },
-            }
-            self.figure_spec.finalize(_FigaxStub(fig))
-
-    def _draw(self, matrix: np.ndarray, net_meta: pd.DataFrame, row_order: list[str]) -> plt.Figure:
-        cfg = self.heatmap_conf
-        view = self.view
-        loss = self.loss_filter or ""
-        ref_label, data = _matrix_for_mode(matrix, self.data_mode, cfg.dev_mode)
-        kind = {"abs": "abs", "dev_mean": "dev", "dev_best": "best"}[self.data_mode]
-        norm, cmap_name = _norm_for(data, kind, cfg)
-        cmap = maybe_truncate(cmap_name, cfg.cmap_truncate)
-        stats = col_stats(data, net_meta, view.players, weighted=cfg.weighted)
-        order = list(np.argsort(stats))
-        data = data[:, order]
-        row_order = [row_order[i] for i in order]
-        stats = stats[order]
-
-        title, cb_label = _titles_for(self.data_mode, cfg, view, self.view_name, loss)
-        return _draw_horizontal_figure(data, net_meta, row_order, stats, cmap, norm,
-                                       title, cb_label, view, cfg)
+def _resolve_horizontal_heatmap(
+    data: np.ndarray, net_meta: pd.DataFrame, row_order: list[str],
+    *, view: GenViewConfig, view_name: str, data_mode: DataMode,
+    loss_filter: str | None, cfg: HeatmapConfig,
+):
+    loss = loss_filter or ""
+    _ref_label, data = _matrix_for_mode(data, data_mode, cfg.dev_mode)
+    kind = {"abs": "abs", "dev_mean": "dev", "dev_best": "best"}[data_mode]
+    norm, cmap_name = _norm_for(data, kind, cfg)
+    cmap = maybe_truncate(cmap_name, cfg.cmap_truncate)
+    stats = col_stats(data, net_meta, view.players, weighted=cfg.weighted)
+    order = list(np.argsort(stats))
+    data = data[:, order]
+    row_order = [row_order[i] for i in order]
+    stats = stats[order]
+    title, cb_label = _titles_for(data_mode, cfg, view, view_name, loss)
+    return data, row_order, stats, cmap, norm, title, cb_label
 
 
-class ClassSummaryHeatmapFigure(BiocompPlotFigure):
-    view: GenViewConfig
-    view_name: str = ""
-    heatmap_conf: HeatmapConfig = Field(default_factory=HeatmapConfig)
-    dataframe_path: str | None = None
-    df: pd.DataFrame | None = None
-    loss_filter: str | None = "regression"
-    metric: str = "grid_nrmse"
-    data_mode: Annotated[ClassDataMode, Arg(help="abs | devmean | devfull")] = "abs"
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def run(self, overwrite: bool = True) -> None:
-        if (
-            not overwrite
-            and self.figure_spec.output_path
-            and self.figure_spec.output_path.exists()
-        ):
-            return
-        df = self.df if self.df is not None else load_metrics_csv(self.dataframe_path or "")
-        pivot, net_meta, _ = build_network_pivot(
-            df, self.view, metric=self.metric, loss_filter=self.loss_filter
-        )
-        class_pivot, class_order, cond_order = build_class_pivot(pivot, net_meta, self.view)
-        with mpl.rc_context(rc=self.plot_config.rc_context):
-            fig = self._draw(class_pivot.values, class_order, cond_order)
-            self.figure_spec.metadata = {
-                **(self.figure_spec.metadata or {}),
-                "analysis": {
-                    "kind": "class_summary",
-                    "view": self.view_name,
-                    "data_mode": self.data_mode,
-                    "metric": self.metric,
-                    "class_order": list(class_order),
-                    "condition_order": list(cond_order),
-                },
-            }
-            self.figure_spec.finalize(_FigaxStub(fig))
-
-    def _draw(self, matrix: np.ndarray, class_order: list[str], cond_order: list[str]) -> plt.Figure:
-        cfg = self.heatmap_conf
-        view = self.view
-        loss = (self.loss_filter or "").title()
-
-        if self.data_mode == "abs":
-            finite = matrix[np.isfinite(matrix)]
-            vmin, vmax = np.nanpercentile(finite, [cfg.percentile_low, cfg.percentile_high])
-            norm = (SymLogNorm(linthresh=cfg.symlog_linthresh, vmin=vmin, vmax=vmax)
-                    if cfg.norm_type == "symlog" else Normalize(vmin=vmin, vmax=vmax))
-            cmap = maybe_truncate(cfg.abs_cmap, cfg.cmap_truncate)
-            data = matrix
-            title = f"Class-Level Prediction Quality ({loss} Loss, {self.view_name})"
-            cb_label = cfg.metric_label
-            fold = False
+def _resolve_class_summary(
+    matrix: np.ndarray, cond_order: list[str],
+    *, view: GenViewConfig, view_name: str, data_mode: ClassDataMode,
+    loss_filter: str | None, cfg: HeatmapConfig,
+):
+    loss = (loss_filter or "").title()
+    if data_mode == "abs":
+        finite = matrix[np.isfinite(matrix)]
+        vmin, vmax = np.nanpercentile(finite, [cfg.percentile_low, cfg.percentile_high])
+        norm = (SymLogNorm(linthresh=cfg.symlog_linthresh, vmin=vmin, vmax=vmax)
+                if cfg.norm_type == "symlog" else Normalize(vmin=vmin, vmax=vmax))
+        cmap = maybe_truncate(cfg.abs_cmap, cfg.cmap_truncate)
+        data = matrix
+        title = f"Class-Level Prediction Quality ({loss} Loss, {view_name})"
+        cb_label = cfg.metric_label
+        fold = False
+    else:
+        if data_mode == "devmean":
+            ref = np.nanmean(matrix, axis=1, keepdims=True)
+            title = f"Fold Change from Mean ({loss} Loss, {view_name})"
         else:
-            if self.data_mode == "devmean":
-                ref = np.nanmean(matrix, axis=1, keepdims=True)
-                title = f"Fold Change from Mean ({loss} Loss, {self.view_name})"
-            else:
-                full_cond = "".join(sorted(view.players))
-                if full_cond not in cond_order:
-                    raise ValueError(f"devfull requires '{full_cond}' in cond_order")
-                ref = matrix[:, cond_order.index(full_cond):cond_order.index(full_cond) + 1]
-                title = f"Fold Change from Full Training ({loss} Loss, {self.view_name})"
-            data = log_fold_dev(matrix, ref)
-            finite = data[np.isfinite(data)]
-            vmax = float(np.nanpercentile(np.abs(finite), cfg.dev_percentile)) or 1.0
-            norm = SymLogNorm(linthresh=cfg.class_summary_linthresh, vmin=-vmax, vmax=vmax, base=10)
-            cmap = maybe_truncate(cfg.fold_cmap, cfg.cmap_truncate)
-            cb_label = f"{cfg.metric_short} fold change"
-            fold = True
-        return _draw_class_summary_figure(data, class_order, cond_order, cmap, norm,
-                                          cb_label, title, view, cfg, fold_colorbar=fold)
+            full_cond = "".join(sorted(view.players))
+            if full_cond not in cond_order:
+                raise ValueError(f"devfull requires '{full_cond}' in cond_order")
+            ref = matrix[:, cond_order.index(full_cond):cond_order.index(full_cond) + 1]
+            title = f"Fold Change from Full Training ({loss} Loss, {view_name})"
+        data = log_fold_dev(matrix, ref)
+        finite = data[np.isfinite(data)]
+        vmax = float(np.nanpercentile(np.abs(finite), cfg.dev_percentile)) or 1.0
+        norm = SymLogNorm(linthresh=cfg.class_summary_linthresh, vmin=-vmax, vmax=vmax, base=10)
+        cmap = maybe_truncate(cfg.fold_cmap, cfg.cmap_truncate)
+        cb_label = f"{cfg.metric_short} fold change"
+        fold = True
+    return data, cmap, norm, title, cb_label, fold
 
 
 def _matrix_for_mode(matrix: np.ndarray, mode: DataMode, dev_mode: str):
@@ -311,11 +221,12 @@ def _titles_for(mode: DataMode, cfg: HeatmapConfig, view: GenViewConfig, view_na
     )
 
 
-def _draw_horizontal_figure(
+def draw_horizontal_heatmap_to_ax(
+    ax: plt.Axes,
     data: np.ndarray, net_meta: pd.DataFrame, row_order: list[str],
     stats: np.ndarray, cmap, norm, title: str, cb_label: str,
     view: GenViewConfig, cfg: HeatmapConfig,
-) -> plt.Figure:
+) -> None:
     mat_t = data.T
     n_conds, n_nets = mat_t.shape
     topo_arr = net_meta["topo_class"].values
@@ -325,11 +236,13 @@ def _draw_horizontal_figure(
     pictos, picto_bg = load_pictograms(Path(cfg.pictogram_h_dir), view.players)
     use_picto = cfg.use_pictograms and bool(pictos) and len(view.players) > cfg.show_values_threshold
 
-    figsize = (cfg.figsize[0], cfg.figsize[1] * (1.2 if use_picto else 1.0))
-    fig = plt.figure(figsize=figsize)
+    fig = ax.get_figure()
+    pos = ax.get_position()
+    ax.set_axis_off()
     gs = gridspec.GridSpec(
         4, 2, height_ratios=cfg.height_ratios, width_ratios=cfg.width_ratios,
         hspace=cfg.gridspec_hspace, wspace=cfg.gridspec_wspace,
+        figure=fig, left=pos.x0, right=pos.x1, top=pos.y1, bottom=pos.y0,
     )
 
     ax_topo = fig.add_subplot(gs[0, 0])
@@ -425,15 +338,18 @@ def _draw_horizontal_figure(
     ])
     cb = fig.colorbar(im, cax=ax_cb, label=cb_label)
     _set_horizontal_cb_ticks(cb, norm, cfg)
-    fig.suptitle(title, fontsize=cfg.title_fontsize, y=cfg.title_y)
-    return fig
+    fig.text(
+        (pos.x0 + pos.x1) / 2, pos.y1,
+        title, fontsize=cfg.title_fontsize, ha="center", va="bottom",
+    )
 
 
-def _draw_class_summary_figure(
+def draw_class_summary_to_ax(
+    ax: plt.Axes,
     matrix: np.ndarray, class_order: list[str], cond_order: list[str],
     cmap, norm, cb_label: str, title: str,
     view: GenViewConfig, cfg: HeatmapConfig, *, fold_colorbar: bool = False,
-) -> plt.Figure:
+) -> None:
     n_classes = len(class_order)
     n_conds = len(cond_order)
     view_keys = sorted(view.players, key=len, reverse=True)
@@ -452,12 +368,15 @@ def _draw_class_summary_figure(
     picto_classes = list({*view.topo_mapping.values()} | set(view.players))
     pictos_v, picto_bg_v = load_pictograms(picto_v_dir, picto_classes)
 
-    fig = plt.figure(figsize=(cfg.class_summary_figsize[0], 1.6 + n_classes * cfg.class_summary_row_inch))
+    fig = ax.get_figure()
+    pos = ax.get_position()
+    ax.set_axis_off()
     gs = gridspec.GridSpec(
         3, 2,
         height_ratios=[cfg.class_summary_strip_ratio, cfg.class_summary_bracket_ratio, cfg.class_summary_heatmap_ratio],
         width_ratios=[20, 0.8],
         hspace=0.04, wspace=0.05,
+        figure=fig, left=pos.x0, right=pos.x1, top=pos.y1, bottom=pos.y0,
     )
 
     ax_comp = fig.add_subplot(gs[0, 0])
@@ -552,5 +471,7 @@ def _draw_class_summary_figure(
     else:
         _set_horizontal_cb_ticks(cb, norm, cfg)
 
-    fig.suptitle(title, fontsize=cfg.title_fontsize, y=1.03)
-    return fig
+    fig.text(
+        (pos.x0 + pos.x1) / 2, min(1.0, pos.y1 + 0.02),
+        title, fontsize=cfg.title_fontsize, ha="center", va="bottom",
+    )
