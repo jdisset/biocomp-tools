@@ -112,4 +112,7 @@ biocomp-replay = "biocomptools.run_replay:main"
 biocomp-tuner = "biocomptools.tuner.api:main"
 biocomp-interactive-link = "biocomptools.toollib.interactive_link:main"
 biocomp-extract-metrics = "biocomptools.toollib.analysis.generalization.metrics_extract:main"
+biocomp-archive-extract = "biocomptools.archive.extract:main"
+biocomp-archive-collect = "biocomptools.archive.collect_static:main"
+biocomp-archive-render = "biocomptools.archive.render_pdf:main"
 
