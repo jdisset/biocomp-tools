@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from biocomptools.logging_config import get_logger
 from biocomptools.trainutils import make_json_ready
 from biocomp.tracing import is_plot_debug_enabled, save_debug_state
+from biocomp._legacy_deprecation import warn_legacy
 
 logger = get_logger(__name__)
 
@@ -114,6 +115,10 @@ class PlotConfig(BaseModel):
         auto_callstack_bind: bool = True,
         overwrite_kwargs: Optional[dict] = None,
     ):
+        warn_legacy(
+            "biocomptools.toollib.plot.PlotConfig.prepare_func",
+            "jeanplot @panel_from drawing functions (cascade-fill replaces callstack_params)",
+        )
         callstack_conf = {}
         if auto_callstack_bind:
             callstack_conf = ut.generate_full_nested_config(
@@ -256,6 +261,10 @@ class Figure(BaseModel):
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
+        warn_legacy(
+            "biocomptools.toollib.plot.Figure",
+            "jeanplot.panels.figure.Figure with native panels",
+        )
         self.plot_tasks = [task.copy(reroot=True) for task in self.plot_tasks]
 
     @property
