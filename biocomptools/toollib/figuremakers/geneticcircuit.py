@@ -12,14 +12,17 @@ _GENETIC_SCHEMATIC_THEME_CACHE: dict | None = None
 def _load_genetic_schematic_theme(types):
     global _GENETIC_SCHEMATIC_THEME_CACHE
     if _GENETIC_SCHEMATIC_THEME_CACHE is None:
-        from dracon import load, resolve_all_lazy
-        import importlib.resources
-        theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-            "genetic_schematic.yaml"
-        )
-        theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
-        resolve_all_lazy(theme)
-        _GENETIC_SCHEMATIC_THEME_CACHE = theme
+        from dracon import DraconLoader, resolve_all_lazy
+        from jeanplot import DEFAULT_TYPES, make_context_from_types
+
+        ctx = make_context_from_types(DEFAULT_TYPES + list(types))
+        loader = DraconLoader(enable_interpolation=True, context=ctx, base_dict_type=dict)
+        cfg = loader.stack(
+            "pkg:jeanplot:resources/themes/default.yaml",
+            "pkg:biocomptools.configs.themes:genetic_schematic.yaml",
+        ).construct()
+        resolve_all_lazy(cfg, except_for={"component"})
+        _GENETIC_SCHEMATIC_THEME_CACHE = cfg["rules"]
     return _GENETIC_SCHEMATIC_THEME_CACHE
 
 

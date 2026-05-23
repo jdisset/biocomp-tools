@@ -18,14 +18,13 @@ from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
 
 
-# Default per-kind widths (inches). 1D/2D/3D for `data` are mode-dependent.
 _DEFAULT_KIND_WIDTHS: dict[str, Any] = {
-    "diagram": 5.0,
+    "diagram": 4.0,
     "circuit": 5.0,
-    "blurb": 4.0,
-    "data": {1: 4.0, 2: 5.0, 3: 10.0},
-    "mvp": 5.0,
-    "mvp_floor": 5.0,
+    "blurb": 3.0,
+    "data": {1: 3.5, 2: 4.5, 3: 10.5},
+    "mvp": 4.0,
+    "mvp_floor": 4.0,
     "slices": 8.0,
 }
 
@@ -65,6 +64,16 @@ def _drop_none(d: dict | None) -> dict:
     return {k: v for k, v in (d or {}).items() if v is not None}
 
 
+_PANEL_COMMON_AXIS_KEYS = ("xlims", "ylims", "vlims")
+
+
+def _data_panel_kwargs(slice_grid_kwargs: dict, dim: int) -> dict:
+    common = {k: slice_grid_kwargs[k] for k in _PANEL_COMMON_AXIS_KEYS if k in slice_grid_kwargs}
+    if dim == 3:
+        return {**slice_grid_kwargs}
+    return common
+
+
 def _build_data_panel(
     pd: Any,
     *,
@@ -74,14 +83,13 @@ def _build_data_panel(
 ) -> Container:
     jpd = _as_jeanplot_pd(pd, rescaler=rescaler)
     dim = _resolve_data_dim(jpd)
+    kw = _data_panel_kwargs(slice_grid_kwargs, dim)
     if dim == 1:
-        return SmoothPanel1D(plot_data=jpd, rescaler=rescaler, title=title)
+        return SmoothPanel1D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
     if dim == 2:
-        return SmoothPanel2D(plot_data=jpd, rescaler=rescaler, title=title)
+        return SmoothPanel2D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
     if dim == 3:
-        return SmoothPanel3D(
-            plot_data=jpd, rescaler=rescaler, title=title, **slice_grid_kwargs
-        )
+        return SmoothPanel3D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
     raise ValueError(f"unsupported data dim={dim}")
 
 
@@ -119,20 +127,39 @@ def _build_slices_only_panel(
         )
     row_containers = [
         _C(
-            layout=_LC(direction="row", gap=4),
+            layout=_LC(
+                direction="row",
+                gap=0.05,
+                align_items="stretch",
+                main_axis_weights=[1.0] * cols,
+            ),
             children=cells[r * cols : (r + 1) * cols],
         )
         for r in range(rows)
     ]
-    return _C(layout=_LC(direction="column", gap=4), children=row_containers)
+    return _C(
+        layout=_LC(
+            direction="column",
+            gap=0.05,
+            align_items="stretch",
+            main_axis_weights=[1.0] * rows,
+        ),
+        children=row_containers,
+    )
 
 
 def _gap_spacer(width: float) -> Container:
-    return Container(min_dimensions=Size(width=float(width), height=0.0))
+    return Container(
+        min_dimensions=Size(width=float(width), height=0.0),
+        max_dimensions=Size(width=float(width), height=1e9),
+    )
 
 
 def _wrap_cell(child: Container, width: float, height: float) -> Container:
-    child.min_dimensions = Size(width=float(width), height=float(height))
+    # Pin both min and max so composite cells (cube + grid) can't balloon to their natural size.
+    sz = Size(width=float(width), height=float(height))
+    child.min_dimensions = sz
+    child.max_dimensions = sz
     return child
 
 
@@ -198,7 +225,7 @@ def build_per_network_row(
             add_with_gap(_wrap_cell(cell, _resolve_width("circuit", kw), row_height), None, None)
         elif kind == "blurb":
             cell = BlurbPanel(text=blurb_text or "", title=blurb_title)
-            add_with_gap(_wrap_cell(cell, _resolve_width("blurb", kw), row_height), 1.0, 2.0)
+            add_with_gap(_wrap_cell(cell, _resolve_width("blurb", kw), row_height), 0.4, 0.4)
         elif kind == "ground_truth":
             cell = _build_data_panel(
                 plot_data,
@@ -217,7 +244,7 @@ def build_per_network_row(
                 slice_grid_kwargs=slice_grid_kwargs,
             )
             add_with_gap(
-                _wrap_cell(cell, _resolve_width("data", kw, predicted_data), row_height), 3.0, None
+                _wrap_cell(cell, _resolve_width("data", kw, predicted_data), row_height), 0.5, None
             )
         elif kind == "ground_truth_slices":
             cell = _build_slices_only_panel(
@@ -237,7 +264,7 @@ def build_per_network_row(
                 extra_metrics=mvp_extras,
                 show_grid_overlay=show_mvp_grid_overlay,
             )
-            add_with_gap(_wrap_cell(cell, _resolve_width("mvp", kw), row_height), 0.75, 0.75)
+            add_with_gap(_wrap_cell(cell, _resolve_width("mvp", kw), row_height), 0.3, 0.3)
         elif kind == "mvp_floor":
             cell = MVPNetworkPanel(
                 mvp_data=mvp_data,
@@ -245,7 +272,7 @@ def build_per_network_row(
                 title="Noise floor",
                 show_grid_overlay=False,
             )
-            add_with_gap(_wrap_cell(cell, _resolve_width("mvp_floor", kw), row_height), 3.0, None)
+            add_with_gap(_wrap_cell(cell, _resolve_width("mvp_floor", kw), row_height), 0.8, None)
         elif kind == "mvp_global":
             cell = MVPNetworkPanel(
                 mvp_data=mvp_data,
@@ -264,7 +291,7 @@ def build_per_network_row(
 
     if layout == "row":
         return Container(
-            layout=LayoutConstraints(direction="row", gap=4, align_items="stretch"),
+            layout=LayoutConstraints(direction="row", gap=0, align_items="stretch"),
             children=cells,
             min_dimensions=Size(width=0.0, height=float(row_height)),
         )
@@ -273,7 +300,7 @@ def build_per_network_row(
         # Each cell on its own row; drop pure gap spacers between rows.
         rows = [
             Container(
-                layout=LayoutConstraints(direction="row", gap=4, align_items="stretch"),
+                layout=LayoutConstraints(direction="row", gap=0, align_items="stretch"),
                 children=[c],
                 min_dimensions=Size(width=0.0, height=float(row_height)),
             )
@@ -281,7 +308,7 @@ def build_per_network_row(
             if not (isinstance(c, Container) and c.min_dimensions.height == 0.0 and not c.children)
         ]
         return Container(
-            layout=LayoutConstraints(direction="column", gap=4, align_items="stretch"),
+            layout=LayoutConstraints(direction="column", gap=0.25, align_items="stretch"),
             children=rows,
         )
 

@@ -136,10 +136,7 @@ def test_blurb_panel_carries_text():
 
 
 def test_none_kwargs_dropped_for_3d_data():
-    # Regression: YAML knobs default to None to mean "absent". Splatting
-    # {"zslices": None, ...} into SmoothPanel3D(zslices: list[float]) used to
-    # raise pydantic "Input should be a valid list". Composer must drop None
-    # so Pydantic defaults apply.
+    # None values in slice_grid_kwargs must be dropped so pydantic defaults apply
     from jeanplot.panels.smooth_3d import SmoothPanel3D
 
     net = _FakeNetwork()
@@ -150,15 +147,15 @@ def test_none_kwargs_dropped_for_3d_data():
         network=net,
         slice_grid_kwargs={
             "slice_grid": [3, 3],
-            "slice_zrange": [0.0, 0.5],
+            "slice_zrange": [0.05, 0.5],
             "slice_zvalues": None,
-            "zslices": None,
+            "stack_zslices": None,
             "cube_frac_w": 0.45,
         },
     )
     cell = next(c for c in row.children if isinstance(c, SmoothPanel3D))
-    # Pydantic default kicked in instead of None.
-    assert cell.zslices == [0.05, 0.25, 0.4, 0.55]
+    assert len(cell.children) == 2
+    assert cell.slice_grid == (3, 3)
 
 
 def test_none_kwargs_dropped_for_slices_panel():
@@ -191,6 +188,8 @@ def test_none_kwargs_dropped_for_slices_panel():
 def test_none_kind_widths_dropped():
     # kind_widths={"diagram": None} used to override the per-kind default with
     # None, then float(None) blew up. None means "use default" here too.
+    from biocomptools.jeanplot_panels.row_composer import _DEFAULT_KIND_WIDTHS
+
     net = _FakeNetwork()
     pd = _make_plot_data(2, network=net)
     row = build_per_network_row(
@@ -203,7 +202,7 @@ def test_none_kind_widths_dropped():
     from biocomptools.jeanplot_panels import NetworkDiagramPanel
 
     diag = next(c for c in row.children if isinstance(c, NetworkDiagramPanel))
-    assert diag.min_dimensions.width == 5.0  # _DEFAULT_KIND_WIDTHS["diagram"]
+    assert diag.min_dimensions.width == _DEFAULT_KIND_WIDTHS["diagram"]
 
 
 def test_prediction_panel_dropped_when_missing():
@@ -220,3 +219,94 @@ def test_prediction_panel_dropped_when_missing():
 
     data_cells = [c for c in row.children if isinstance(c, SmoothPanel2D)]
     assert len(data_cells) == 1
+
+
+def test_wrap_cell_clamps_both_min_and_max():
+    # composite cells (cube + 9-cell grid) would balloon to ~30in if max isn't pinned
+    from jeanplot.panels.smooth_3d import SmoothPanel3D
+
+    net = _FakeNetwork()
+    pd = _make_plot_data(3, network=net)
+    row = build_per_network_row(
+        panels=["ground_truth"],
+        plot_data=pd,
+        network=net,
+        kind_widths={"data": {3: 10.0}},
+    )
+    cell = next(c for c in row.children if isinstance(c, SmoothPanel3D))
+    assert cell.min_dimensions.width == 10.0
+    assert cell.max_dimensions.width == 10.0
+
+
+def test_full_mode_row_width_bounded():
+    # full-mode row used to render as 151in on 3D data; sanity-check the budget
+    from jeanplot.panels.smooth_3d import SmoothPanel3D
+
+    net = _FakeNetwork()
+    pd = _make_plot_data(3, network=net)
+    row = build_per_network_row(
+        panels=[
+            "diagram", "circuit", "blurb",
+            "ground_truth", "prediction",
+            "mvp_floor", "mvp_row", "mvp_global",
+        ],
+        plot_data=pd,
+        predicted_data=pd,
+        mvp_data=object(),
+        blurb_text="x",
+        network=net,
+    )
+    total_min = sum(c.min_dimensions.width for c in row.children)
+    total_max = sum(c.max_dimensions.width for c in row.children)
+    assert total_min < 60, f"full-mode row min width regression: {total_min}in"
+    assert total_max < 100, f"full-mode row max width regression: {total_max}in"
+    for c in (c for c in row.children if isinstance(c, SmoothPanel3D)):
+        assert c.max_dimensions.width <= 15.0
+
+
+def test_smooth_panel_3d_uses_cube_stack_panel():
+    from biocomptools.jeanplot_panels.data import _biocomp_to_jeanplot
+    from jeanplot.panels.smooth_3d import CubeStackPanel, SmoothPanel3D
+
+    net = _FakeNetwork()
+    pd = _biocomp_to_jeanplot(_make_plot_data(3, network=net))
+    panel = SmoothPanel3D(plot_data=pd)
+    cube_child = panel.children[0]
+    assert isinstance(cube_child, CubeStackPanel)
+    assert cube_child.zslices
+
+
+def test_smooth_panel_3d_slice_titles_use_rescaler():
+    from biocomptools.jeanplot_panels.data import _biocomp_to_jeanplot
+    from jeanplot.panels.smooth_2d import SmoothPanel2D
+    from jeanplot.panels.smooth_3d import SmoothPanel3D
+
+    class _IdRescaler:
+        def fwd(self, x):
+            return x
+
+        def inv(self, x):
+            return float(x) * 1e6
+
+    net = _FakeNetwork()
+    pd = _biocomp_to_jeanplot(_make_plot_data(3, network=net))
+    panel = SmoothPanel3D(
+        plot_data=pd,
+        rescaler=_IdRescaler(),
+        slice_grid=(3, 3),
+        slice_zrange=(0.05, 0.5),
+    )
+    grid = panel.children[1]
+    leaves: list[SmoothPanel2D] = []
+
+    def _walk(c):
+        if isinstance(c, SmoothPanel2D):
+            leaves.append(c)
+        for ch in getattr(c, "children", []) or []:
+            _walk(ch)
+
+    _walk(grid)
+    assert len(leaves) == 9
+    assert leaves[0].title.startswith("z=")
+    for c in leaves:
+        assert "0." not in c.title or "e" in c.title, f"latent-looking title: {c.title!r}"
