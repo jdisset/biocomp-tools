@@ -1305,9 +1305,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     executor.submit(_calculate_single_network_stats, **task): task['network_idx']
                     for task in tasks
                 }
-
-                done = 0
-                for future in as_completed(future_to_idx):
+                for future in each("network", as_completed(future_to_idx), total=n_total):
                     idx = future_to_idx[future]
                     task = tasks[idx]
                     try:
@@ -1318,9 +1316,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                             f"Error calculating stats for network {net_name}: {e}; "
                             f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
                         ) from e
-                    done += 1
-                    with step(f"network {done}/{n_total}"):
-                        process_and_log_stats(idx, task, result)
+                    process_and_log_stats(idx, task, result)
 
         else:
             if len(tasks) > 0:
@@ -1328,18 +1324,17 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     "Calculating network stats sequentially using the unified static method."
                 )
 
-            for i, task in enumerate(tasks):
+            for task in each("network", tasks, total=n_total):
                 idx = task['network_idx']
-                with step(f"network {i + 1}/{n_total}"):
-                    try:
-                        result = _calculate_single_network_stats(**task)
-                    except Exception as e:
-                        net_name = task['network_info'].get('network_name', f"Network_{idx}")
-                        raise RuntimeError(
-                            f"Error calculating stats for network {net_name}: {e}; "
-                            f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
-                        ) from e
-                    process_and_log_stats(idx, task, result)
+                try:
+                    result = _calculate_single_network_stats(**task)
+                except Exception as e:
+                    net_name = task['network_info'].get('network_name', f"Network_{idx}")
+                    raise RuntimeError(
+                        f"Error calculating stats for network {net_name}: {e}; "
+                        f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                    ) from e
+                process_and_log_stats(idx, task, result)
         assert all(s is not None for s in all_stats), "all network stats must be populated"
         return [s for s in all_stats if s is not None]
 
