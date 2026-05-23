@@ -36,6 +36,7 @@ import xxhash
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor, as_completed
 
 from biocomp.utils import get_cache
+from dracon.progress import each, step
 
 logger = get_logger(__name__)
 
@@ -997,20 +998,21 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 self._output_shapes.append(output_shapes)
 
         def _run_predict_and_stats():
-            yhats, (cin, cout) = predict_f(
-                stacked_x,
-                key=self.seed,
-                z_value=self.z_value,
-                z_normal_mean=self.z_normal_mean,
-                z_normal_std=self.z_normal_std,
-                z_normal_clip=self.z_normal_clip,
-                disable_variational=self.disable_variational,
-                with_shared_params=with_shared_params,
-                with_local_params=with_local_params,
-                collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
-                collect_out_indices=np.concatenate(collect_out_idx).flatten() if collect_out_idx else None,
-                device=self.device,
-            )
+            with step("predict"):
+                yhats, (cin, cout) = predict_f(
+                    stacked_x,
+                    key=self.seed,
+                    z_value=self.z_value,
+                    z_normal_mean=self.z_normal_mean,
+                    z_normal_std=self.z_normal_std,
+                    z_normal_clip=self.z_normal_clip,
+                    disable_variational=self.disable_variational,
+                    with_shared_params=with_shared_params,
+                    with_local_params=with_local_params,
+                    collect_in_indices=np.concatenate(collect_in_idx).flatten() if collect_in_idx else None,
+                    collect_out_indices=np.concatenate(collect_out_idx).flatten() if collect_out_idx else None,
+                    device=self.device,
+                )
             outs = self.network_model.split_outputs_per_network(np.asarray(yhats), effective_max_evals)
             self._process_prediction_results(outs, effective_max_evals)
             self._collected_in = np.asarray(cin) if cin is not None else None
@@ -1018,7 +1020,8 @@ class NetworkPrediction(GridStatsFields, DataSource):
             if self.defer_stats_compute:
                 self._network_stats = [None] * len(self.network_model.network)
             else:
-                self._network_stats = self._calculate_all_network_stats()
+                with step("stats"):
+                    self._network_stats = self._calculate_all_network_stats()
             return {
                 'yhats': self._yhats,
                 'gtruths': self._gtruths,
@@ -1292,6 +1295,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                 latent_x = rescaler.fwd(task['x'])
                 self._log_stats(idx, result, latent_gt, latent_yhat, latent_x)
 
+        n_total = len(tasks)
         if self.n_stats_workers > 1 and len(tasks) > 1:
             logger.info(
                 f"Calculating network stats in parallel with {self.n_stats_workers} workers."
@@ -1302,6 +1306,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     for task in tasks
                 }
 
+                done = 0
                 for future in as_completed(future_to_idx):
                     idx = future_to_idx[future]
                     task = tasks[idx]
@@ -1313,7 +1318,9 @@ class NetworkPrediction(GridStatsFields, DataSource):
                             f"Error calculating stats for network {net_name}: {e}; "
                             f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
                         ) from e
-                    process_and_log_stats(idx, task, result)
+                    done += 1
+                    with step(f"network {done}/{n_total}"):
+                        process_and_log_stats(idx, task, result)
 
         else:
             if len(tasks) > 0:
@@ -1321,17 +1328,18 @@ class NetworkPrediction(GridStatsFields, DataSource):
                     "Calculating network stats sequentially using the unified static method."
                 )
 
-            for task in tasks:
+            for i, task in enumerate(tasks):
                 idx = task['network_idx']
-                try:
-                    result = _calculate_single_network_stats(**task)
-                except Exception as e:
-                    net_name = task['network_info'].get('network_name', f"Network_{idx}")
-                    raise RuntimeError(
-                        f"Error calculating stats for network {net_name}: {e}; "
-                        f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
-                    ) from e
-                process_and_log_stats(idx, task, result)
+                with step(f"network {i + 1}/{n_total}"):
+                    try:
+                        result = _calculate_single_network_stats(**task)
+                    except Exception as e:
+                        net_name = task['network_info'].get('network_name', f"Network_{idx}")
+                        raise RuntimeError(
+                            f"Error calculating stats for network {net_name}: {e}; "
+                            f"task={_stats_task_dump(task=task, idx=idx, n_networks=len(self.network_model.network), yhats=self._yhats, xvals=self._x, input_order=self.input_order, collection_points=self.collection_points)}"
+                        ) from e
+                    process_and_log_stats(idx, task, result)
         assert all(s is not None for s in all_stats), "all network stats must be populated"
         return [s for s in all_stats if s is not None]
 
@@ -1574,7 +1582,7 @@ class NetworkPrediction(GridStatsFields, DataSource):
             input_order = self._normalize_input_order()
             logger.debug(f"normalized input_order: {input_order}")
 
-        for i, network in enumerate(self.network_model.network):
+        for i, network in each("extract", list(enumerate(self.network_model.network))):
             metadata = self._create_network_metadata(i, network)
             plot_data = self._extract_plot_data(
                 i,
