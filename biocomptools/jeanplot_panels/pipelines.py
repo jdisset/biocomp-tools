@@ -66,6 +66,24 @@ def opt_list(item: Any) -> list:
     return [item] if item is not None else []
 
 
+def paper_data(
+    xp_name: str,
+    rcp_name: str,
+    calibration_regex: str = ".*[Ff][Ii][Nn][Aa][Ll].*",
+):
+    """Load experimental PlotData for one (xp, recipe) without running a model."""
+    from biocomp.network import recipe_to_networks  # noqa: F401
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.networkselector import iRegex
+
+    src = DBSource(content=[{
+        "experiment_name": xp_name,
+        "recipe_name": rcp_name,
+        "calibration_name": iRegex(calibration_regex),
+    }])
+    return src.get_data()[0]
+
+
 def paper_predict(
     xp_name: str,
     rcp_name: str,
@@ -75,8 +93,16 @@ def paper_predict(
     input_order: list[list[int]] = [[0, 1, 2]],  # noqa: B006
     z_value: str = "uniform",
     max_evals: int = 300000,
+    mode: str = "prediction",
 ):
-    """Load model+experiment, run a NetworkPrediction, return the first PlotData."""
+    """Load model+experiment, run a NetworkPrediction, return the first PlotData.
+
+    When ``mode='data'`` (or both model_name/model_path are unset), skip the
+    model entirely and return the raw experimental PlotData. This lets a single
+    panel YAML render both fig4 c/g (predictions) and d/h (experiment) rows.
+    """
+    if mode == "data" or (model_name is None and model_path is None):
+        return paper_data(xp_name, rcp_name, calibration_regex)
     from biocomp.network import recipe_to_networks  # noqa: F401  (ensure builders registered)
     from biocomptools.modelmodel import BiocompModel, NetworkModel
     from biocomptools.toollib.datasources import DBSource
@@ -164,6 +190,7 @@ register_template(load_paper_dataset)
 register_template(network_plot_data)
 register_template(paper_per_network_pds)
 register_template(opt_list)
+register_template(paper_data)
 register_template(paper_predict)
 register_template(matrix_predict)
 
@@ -173,6 +200,7 @@ PAPER_PIPELINE_HELPERS: dict[str, Any] = {
     "network_plot_data": network_plot_data,
     "paper_per_network_pds": paper_per_network_pds,
     "opt_list": opt_list,
+    "paper_data": paper_data,
     "paper_predict": paper_predict,
     "matrix_predict": matrix_predict,
 }
@@ -183,6 +211,7 @@ __all__ = [
     "matrix_predict",
     "network_plot_data",
     "opt_list",
+    "paper_data",
     "paper_per_network_pds",
     "paper_predict",
     "PAPER_PIPELINE_HELPERS",
