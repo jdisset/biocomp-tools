@@ -32,6 +32,10 @@ def render_circuit_to_ax(
     hide_marker_tus: bool = True,
     hide_disabled_tus: bool = False,
     disabled_tu_ids: Optional[set[str]] = None,
+    show_tu_labels: bool = True,
+    axis_tags: Optional[dict[str, str]] = None,
+    bias_axis_tag: Optional[str] = None,
+    orientation: Literal["column", "row"] = "column",
     grid_gap: tuple[float, float] = (40.0, 20.0),
     connection_style: Literal["orthogonal", "bezier", "straight"] = "orthogonal",
     style_overrides: Optional[dict] = None,
@@ -64,20 +68,30 @@ def render_circuit_to_ax(
         hide_markers=hide_marker_tus,
         disabled_tu_ids=disabled_tu_ids,
         hide_disabled=hide_disabled_tus,
+        show_tu_labels=show_tu_labels,
+        axis_tags=axis_tags,
+        bias_axis_tag=bias_axis_tag,
     )
     schematic = GeneticSchematic.from_circuit(
         circuit_data,
         grid_gap=grid_gap,
         connection_style=connection_style,
+        orientation=orientation,
     )
     jstyle.apply(schematic)
 
-    ax.set_aspect(aspect)
     ax.axis("off")
     ax.set_facecolor("none")
 
+    # pre-set: set_aspect after the draw doesn't stick on positioned axes
+    ax.set_aspect(aspect)
+
     renderer = MatplotlibRenderer()
-    renderer.render_component(ax, schematic, adjust_lims=True)
+    # padding=0 fills the panel; set_aspect=False keeps our `aspect` (not forced "equal")
+    renderer.render_component(
+        ax, schematic, adjust_lims=True,
+        adjust_lims_padding=0.0, adjust_lims_set_aspect=False,
+    )
 
     # Optional fixed-canvas widening - schematic content is left at its
     # rendered data coords, lims are expanded around it so smaller recipes

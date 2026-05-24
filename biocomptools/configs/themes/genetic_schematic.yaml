@@ -1,105 +1,51 @@
-!noconstruct theme_vars: &tvars
-  fluo_colors: &fcolors
-    red: { dark: "#840137", base: "#ef957d", light: "#ffe5de", bright: "#FF2C4944" }
-    green: { dark: "#0e633a", base: "#6ccb83", light: "#efffdd", bright: "#0EFF7377" }
-    blue: { dark: "#006394", base: "#6cafc3", light: "#f3fafd", bright: "#1AD5FF60" }
-    yellow: { dark: "#9b6600", base: "#fad26d", light: "#fff888", bright: "#FFC83Caa" }
-    ir: { dark: "#6c1772", base: "#df9ae4", light: "#ffe7f4", bright: "#FF82FCaa" }
-    maroon: { dark: "#734727", base: "#d3a888", light: "#f4decd", bright: "#FF9853a0" }
-
-  marker_colors: &marker_colors
-    EYFPG5A: *fcolors@yellow
-    EYFP: *fcolors@yellow
-    NEONGREEN: *fcolors@green
-    EGFP: *fcolors@green
-    MNG: *fcolors@green
-    MNEONGREEN: *fcolors@green
-    EBFP: *fcolors@blue
-    EBFP2: *fcolors@blue
-    MKATE: *fcolors@red
-    MKATE2: *fcolors@red
-    MKO: *fcolors@red
-    MKO2: *fcolors@red
-    TDTOMATO: *fcolors@red
-    IRFP720: *fcolors@ir
-    IRFP: *fcolors@ir
-    MMAROON: *fcolors@maroon
-    MMAROON1: *fcolors@maroon
-
-  input_main_marker_color: &input_main "#0000ff"
-  input_secondary_marker_color: &input_sec "#00ff00"
-  border_color: &border_color "#222"
-  text_color: &text_color "#222"
-
-!define theme: ${construct(&tvars)}
+# biocomp-specific tweaks on top of jeanplot's default theme.
+# Marker/source coloring lives in default.yaml via the live-scope `swatch`
+# helper; only schematic-layout details and biocomp-specific overrides
+# belong here.
 
 rules: !cascade:jstyle_fill
-  GeneticSchematic:
-    grid_gap: [40, 20]
-    style.padding: [10, 10, 10, 10]
-
   SourceAnnotation:
-    style.padding: [18, 18, 20, 18]
-    style.margin: [4, 4, 4, 4]
-    style.border_color: ${theme.border_color}
-    style.border_width: 1
-    style.corner_radius: 5
-    style.border_style: custom
-    style.dash_sequence: [3, 4]
+    Text[style_class=axis_tag]:
+      font_size: 14
+      font_weight: bold
+      color: "#222"
+      offset: !Offset
+        reference_relative: [0, 0.5]
+        relative: [-1, -0.5]
+        absolute: [-7, 0]
 
-  !each(e) ${theme.marker_colors.items()}:
-    SourceAnnotation[marker=~${e[0]}]:
-      style.border_color: ${e[1]['base']}
-      Container[style_class=source_tag]:
-        style.background_color: ${e[1]['light']}
-        style.border_color: ${e[1]['dark']}
-        SVGElement:
-          color_remap:
-            ${theme.input_main_marker_color}: ${e[1]['dark']}
-        Text:
-          color: ${e[1]['dark']}
-
-    FluoMarker[part_name=~${e[0]}]:
-      SVGElement:
-        color_remap:
-          ${theme.input_main_marker_color}: ${e[1]['light']}
-          ${theme.input_secondary_marker_color}: ${e[1]['base']}
-      Text:
-        color: ${e[1]['dark']}
-        offset.absolute: [-2, 0]
-
-  # ERN and recognition site styling
   ERN:
-    layout.direction: row
-    Text:
-      align: center
-      vertical_align: middle
-      font_size: 9
-      z_index: 10
-      offset.absolute: [-8, 0]
     AnchorComponent[style_class=ern-anchor-top]:
-      offset: !Offset { reference_relative: [0.72, 1], relative: [-0.5, 0], absolute: [0, 2] }
+      offset: !Offset
+        reference_relative: [0.75, 1]
+        relative: [-0.5, 0]
+        absolute: [0, 2]
       direction: [0, 1]
       min_segment: 20.0
     AnchorComponent[style_class=ern-anchor-bottom]:
-      offset: !Offset { reference_relative: [0.72, 0], relative: [-0.5, 0], absolute: [0, 0] }
+      offset: !Offset
+        reference_relative: [0.72, 0]
+        relative: [-0.5, 0]
+        absolute: [0, 0]
 
   ERN5pRecog:
-    offset: !Offset { relative: [0, 0.4], absolute: [0, 0.5] }
-    style.margin: [0, 2, 0, -4]
-    # Anchor at top center of recognition site for interaction line
     AnchorComponent[style_class=ern-recog-anchor-top]:
-      offset: !Offset { reference_relative: [0.5, 1], relative: [-0.5, 0], absolute: [0, 2] }
+      offset: !Offset
+        reference_relative: [0.5, 1]
+        relative: [-0.5, 0]
+        absolute: [0, 2]
       direction: [0, 1]
       min_segment: 15.0
     AnchorComponent[style_class=ern-recog-anchor-bottom]:
-      offset: !Offset { reference_relative: [0.5, -0.2], relative: [-0.5, 0], absolute: [0, 0] }
+      offset: !Offset
+        reference_relative: [0.5, -0.2]
+        relative: [-0.5, 0]
+        absolute: [0, 0]
 
-  # ERN interaction (inhibition) line styling
   Connection:
     color: "#999"
     line_width: 1.25
-    end_cap: !LineEndFlat { stroke_width: 2.0, length: 8.0, stroke_color: "#999" }
-
-  "[style_class=disabled]":
-    opacity: 0.3
+    end_cap:
+      stroke_color: "#999"
+      stroke_width: 1.25
+      length: 8.0
