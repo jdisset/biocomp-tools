@@ -10,10 +10,7 @@ from jeanplot.panels.smooth_3d import SmoothPanel3D
 
 from biocomptools.jeanplot_panels.blurb import BlurbPanel
 from biocomptools.jeanplot_panels.circuit import CircuitPanel
-from biocomptools.jeanplot_panels.data import (
-    NetworkPlotData,
-    NetworkPredictedPlotData,
-)
+from biocomptools.jeanplot_panels.data import NetworkPlotData
 from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
 
@@ -40,7 +37,7 @@ def _as_jeanplot_pd(pd: Any, rescaler: Any = None):
     from jeanplot.data.plot_data import PlotData as JeanplotPlotData
     from biocomptools.jeanplot_panels.data import _biocomp_to_jeanplot
 
-    if isinstance(pd, (NetworkPlotData, NetworkPredictedPlotData)):
+    if isinstance(pd, NetworkPlotData):
         return _biocomp_to_jeanplot(pd.source, rescaler=rescaler)
     if isinstance(pd, JeanplotPlotData):
         return pd

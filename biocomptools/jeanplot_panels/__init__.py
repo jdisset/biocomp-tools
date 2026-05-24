@@ -2,24 +2,14 @@
 # Copyright (c) 2026 Jean Disset
 from biocomptools.jeanplot_panels.activations import ActivationsPanel
 from biocomptools.jeanplot_panels.benchmark import (
-    BenchmarkCircuitMergedLeftPanel,
     BenchmarkHeaderPanel,
-    BenchmarkMetricsMergedRightPanel,
     BenchmarkMetricsPanel,
     BenchmarkSliceGridPanel,
 )
 from biocomptools.jeanplot_panels.blurb import BlurbPanel
 from biocomptools.jeanplot_panels.circuit import CircuitPanel
-from biocomptools.jeanplot_panels.data import (
-    MVPDataHolder,
-    NetworkPlotData,
-    NetworkPredictedPlotData,
-)
-from biocomptools.jeanplot_panels.design import (
-    DesignMetricsPanel,
-    LatticeHeatmapPanel,
-    NetworkDiagramFullWidthPanel,
-)
+from biocomptools.jeanplot_panels.data import MVPDataHolder, NetworkPlotData
+from biocomptools.jeanplot_panels.design import DesignMetricsPanel, LatticeHeatmapPanel
 from biocomptools.jeanplot_panels.empty import ConstantTextPanel, EmptyPanel
 from biocomptools.jeanplot_panels.fluo import FluoDensitiesPanel
 from biocomptools.jeanplot_panels.heatmap import (
@@ -62,18 +52,14 @@ JEANPLOT_PANEL_TYPES = [
     UORFMatrixPanel,
     DesignMetricsPanel,
     LatticeHeatmapPanel,
-    NetworkDiagramFullWidthPanel,
     QuantileCoveragePanel,
     SmoothVoxelPanel,
     BenchmarkDistributionPanel,
     BenchmarkHeaderPanel,
     BenchmarkMetricsPanel,
-    BenchmarkCircuitMergedLeftPanel,
-    BenchmarkMetricsMergedRightPanel,
     BenchmarkSliceGridPanel,
     LatentProjectionHistogramPanel,
     NetworkPlotData,
-    NetworkPredictedPlotData,
     MVPDataHolder,
 ]
 
@@ -119,10 +105,8 @@ def get_jeanplot_panel_helpers() -> dict:
 
 __all__ = [
     "ActivationsPanel",
-    "BenchmarkCircuitMergedLeftPanel",
     "BenchmarkDistributionPanel",
     "BenchmarkHeaderPanel",
-    "BenchmarkMetricsMergedRightPanel",
     "BenchmarkMetricsPanel",
     "BenchmarkSliceGridPanel",
     "BlurbPanel",
@@ -139,10 +123,8 @@ __all__ = [
     "LatticeHeatmapPanel",
     "MVPDataHolder",
     "MVPNetworkPanel",
-    "NetworkDiagramFullWidthPanel",
     "NetworkDiagramPanel",
     "NetworkPlotData",
-    "NetworkPredictedPlotData",
     "PAPER_PIPELINE_HELPERS",
     "QuantileCoveragePanel",
     "ShapleyDetailPanel",

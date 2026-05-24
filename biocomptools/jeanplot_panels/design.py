@@ -40,22 +40,5 @@ class LatticeHeatmapPanel(PlotPanel):
             ax.set_title(self.title, **(self.title_kwargs or {}))
 
 
-class NetworkDiagramFullWidthPanel(PlotPanel):
-    plot_data: None = None
-    network: Any
-    simplified: bool = True
-
-    def draw(self, ax: matplotlib.axes.Axes):
-        from biocomptools.toollib.figuremakers.networkdiagram import render_diagram_to_ax
-
-        render_diagram_to_ax(
-            network=self.network,
-            ax=ax,
-            simplified=self.simplified,
-            title=self.title,
-        )
-
-
 DesignMetricsPanel.model_rebuild(force=True)
 LatticeHeatmapPanel.model_rebuild(force=True)
-NetworkDiagramFullWidthPanel.model_rebuild(force=True)

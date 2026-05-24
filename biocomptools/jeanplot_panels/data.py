@@ -35,6 +35,8 @@ def _biocomp_to_jeanplot(pd: Any, rescaler: Any = None) -> JeanplotPlotData:
 
 
 class NetworkPlotData(BaseModel):
+    """Wraps a biocomp PlotData; exposes `.jeanplot` for panels."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source: Any
@@ -48,26 +50,10 @@ class NetworkPlotData(BaseModel):
         return self.jeanplot
 
 
-class NetworkPredictedPlotData(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    source: Any
-    rescaler: Any = None
-
-    @property
-    def jeanplot(self) -> JeanplotPlotData:
-        return _biocomp_to_jeanplot(self.source, rescaler=self.rescaler)
-
-    def to_jeanplot(self) -> JeanplotPlotData:
-        return self.jeanplot
-
-
-# Alias for registration symmetry with the other data holders.
 MVPDataHolder = MeasuredVsPredictedData
 
 
 __all__ = [
     "NetworkPlotData",
-    "NetworkPredictedPlotData",
     "MVPDataHolder",
 ]

@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Benchmark figure panels - header, per-item metrics, slice grid composer.
-
-Note on the "merged" panels: in the YAML world, ``render_circuit_merged_left``
-and ``render_metrics_merged_right`` spanned multiple axes via ``axes_to_remove``.
-In the jeanplot world, spanning is just layout - the caller nests
-``BenchmarkCircuitMergedLeftPanel`` / ``BenchmarkMetricsMergedRightPanel``
-inside a tall ``Container``, and the renderer hands the Panel its one
-laid-out cell.
-"""
+"""Benchmark figure panels - header, per-item metrics, slice grid composer."""
 
 from typing import Any
 
@@ -17,7 +9,6 @@ import matplotlib.axes
 from jeanplot.core.container import Container
 from jeanplot.core.models import LayoutConstraints
 from jeanplot.panels.base import PlotPanel
-from biocomptools.jeanplot_panels.circuit import CircuitPanel
 
 
 class BenchmarkHeaderPanel(PlotPanel):
@@ -44,13 +35,6 @@ class BenchmarkMetricsPanel(PlotPanel):
         if self.title:
             ax.set_title(self.title, **(self.title_kwargs or {}))
 
-
-class BenchmarkCircuitMergedLeftPanel(CircuitPanel):
-    pass
-
-
-class BenchmarkMetricsMergedRightPanel(BenchmarkMetricsPanel):
-    pass
 
 class BenchmarkSliceGridPanel(Container):
     plot_data: Any
@@ -100,6 +84,4 @@ class BenchmarkSliceGridPanel(Container):
 
 BenchmarkHeaderPanel.model_rebuild(force=True)
 BenchmarkMetricsPanel.model_rebuild(force=True)
-BenchmarkCircuitMergedLeftPanel.model_rebuild(force=True)
-BenchmarkMetricsMergedRightPanel.model_rebuild(force=True)
 BenchmarkSliceGridPanel.model_rebuild(force=True)
