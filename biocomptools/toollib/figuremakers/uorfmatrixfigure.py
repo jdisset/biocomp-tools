@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 from dracon.draconstructor import resolve_all_lazy
-from typing import Union, List, Optional, Dict, Tuple
+from typing import Literal, Union, List, Optional, Dict, Tuple
 from collections import defaultdict
-from biocomp.plotutils import PlotData, smooth, IDENTITY_RESCALER
+from biocomp.plotutils import PlotData, smooth, slice_panel_args, IDENTITY_RESCALER
+from jeanplot.plots.smooth_1d import smooth_1d
 from biocomp.datautils import DataRescaler
 from biocomptools.toollib.plot import PlotConfig, load_default_plotconf
 from biocomptools.toollib._bbox_subfig import carve_bbox
 from biocomptools.logging_config import get_logger
 from matplotlib.lines import Line2D
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 import numpy as np
 
 logger = get_logger(__name__)
@@ -138,6 +140,12 @@ ANNOTATION_STYLE = {
 }
 
 
+def _merge_lims(user, auto):
+    if user is None:
+        return list(auto)
+    return [auto[i] if v is None else v for i, v in enumerate(user)]
+
+
 class UORFCell(BaseModel):
     row: int
     col: int
@@ -187,8 +195,24 @@ class UORFMatrixFigure(BaseModel):
     overall_rmse_fontsize: int = 8
     rmse_prefix: str = "RMSE: "
 
+    # heatmap (default) or 1D slice overlay; held values are in plot_data.x space
+    cell_kind: Literal["heatmap", "slices"] = "heatmap"
+    slice_x_held_raw: List[float] = []
+    slice_y_held_raw: List[float] = []
+    slice_x_cmap: str = "bc_reds"
+    slice_y_cmap: str = "bc_greens"
+    slice_cmap_range: tuple[float, float] = (0.35, 0.9)
+    # None = auto-scale to union range across cells; per-bound null falls back to auto
+    slice_xlims: Optional[List[Optional[float]]] = None
+    slice_vlims: Optional[List[Optional[float]]] = None
+    slice_knn_stats_params: dict = {}
+    slice_lineplot_props: dict = {"lw": 1.2, "marker": ""}
+    slice_res: int = 200
+
     wspace: float = 0.25
     hspace: float = 0.25
+
+    _global_lims: dict = PrivateAttr(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -226,10 +250,76 @@ class UORFMatrixFigure(BaseModel):
         return cells
 
     def _draw_cell(self, ax, cell: UORFCell, grid_size: tuple[int, int]):
+        if self.cell_kind == "slices":
+            return self._draw_cell_slices(ax, cell, grid_size)
         cfg = self.get_plot_config_for_cell(cell.row, cell.col, grid_size)
         rescaler = cfg.rescaler or self.rescaler
         kw = dict(cfg.callstack_params.get("smooth_2d_params", {}))
         smooth(cell.data, ax=ax, rescaler=rescaler, force_dim=2, smooth_2d_params=kw)
+
+    def _resolve_slice_lims(self, rescaler):
+        """Auto-scale xlims/vlims to the union range across cells; cached per draw."""
+        if not self._global_lims:
+            xs = np.vstack([rescaler.fwd(d.x) for d in self.plot_data])
+            ys = np.vstack([rescaler.fwd(d.y) for d in self.plot_data])
+            self._global_lims.update({
+                "x": [float(np.nanmin(xs)), float(np.nanmax(xs))],
+                "y": [float(np.nanmin(ys)), float(np.nanmax(ys))],
+            })
+        return (
+            _merge_lims(self.slice_xlims, self._global_lims["x"]),
+            _merge_lims(self.slice_vlims, self._global_lims["y"]),
+        )
+
+    def _draw_cell_slices(self, ax, cell: UORFCell, grid_size: tuple[int, int]):
+        d = cell.data
+        # prefer plot_config's rescaler (else slice values read as raw fluo)
+        rescaler = self.plot_config.rescaler or self.rescaler
+        xlims, vlims = self._resolve_slice_lims(rescaler)
+        X_lat = rescaler.fwd(d.x)
+        Y_lat = rescaler.fwd(d.y)
+        names = list(d.input_names) if d.input_names else ["x", "y"]
+        # only border cells get ticks/labels; first smooth_1d owns label drawing
+        is_bottom = cell.row == grid_size[0] - 1
+        is_left = cell.col == 0
+        common = dict(
+            Y=Y_lat,
+            output_name=d.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            xlims=xlims,
+            vlims=vlims,
+            res=self.slice_res,
+            show_std=False,
+            show_legend=False,
+            knn_stats_params=dict(self.slice_knn_stats_params),
+            lineplot_props=dict(self.slice_lineplot_props),
+            show_theta=False,
+            show_slopes=False,
+        )
+        for i, (axis, held_raw, cmap_name) in enumerate((
+            ("x", self.slice_x_held_raw, self.slice_x_cmap),
+            ("y", self.slice_y_held_raw, self.slice_y_cmap),
+        )):
+            if not held_raw:
+                continue
+            args = slice_panel_args(axis, X_lat, rescaler, held_raw, input_names=names)
+            colors = plt.get_cmap(cmap_name)(
+                np.linspace(self.slice_cmap_range[0], self.slice_cmap_range[1], len(held_raw))
+            )
+            smooth_1d(
+                X=args["X"],
+                input_names=args["input_names"],
+                slices=args["slices_latent"],
+                colors=list(colors),
+                draw_xlabel=(i == 0) and is_bottom,
+                draw_ylabel=(i == 0) and is_left,
+                **common,
+            )
+        if not is_bottom:
+            ax.set_xticklabels([])
+        if not is_left:
+            ax.set_yticklabels([])
 
     def _final_touches(self, fig, axes, grid_size, cells):
         legend_row = self.legend_row if self.legend_row >= 0 else grid_size[0] - 1

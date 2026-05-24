@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-from typing import Literal
 
 import matplotlib.axes
 import pandas as pd

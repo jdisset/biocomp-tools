@@ -140,11 +140,16 @@ def matrix_predict(
     input_order: list[list[int]] = [[1, 0]],  # noqa: B006
     z_value: str = "uniform",
     max_evals: int = 300000,
+    mode: str = "prediction",
 ):
     """Load a uORF-bundled matrix experiment, return ``(model, D, uorf_info)``.
 
-    ``D`` is the lazy NetworkPrediction output. ``uorf_info`` is the per-network
-    uORF annotation list pulled from the model's training dataset.
+    With ``mode='prediction'`` (default), ``D`` is the lazy NetworkPrediction
+    output and ``uorf_info`` is the per-network uORF annotation list pulled
+    from the model's training dataset.
+
+    With ``mode='data'`` (or both model_name/model_path unset), skip the
+    model entirely and return the raw experimental PlotData list.
     """
     from biocomptools.modelmodel import BiocompModel, NetworkModel
     from biocomptools.toollib.datasources import DBSource
@@ -155,7 +160,6 @@ def matrix_predict(
     from biocomptools.toollib.networkprediction import NetworkPrediction
     from biocomptools.toollib.networkselector import NetworkSet, Regex
 
-    model = BiocompModel.resolve(name=model_name, path=model_path)
     data = DBSource(content=[{
         "experiment_name": Regex(xp),
         "recipe_name": Regex(recipe),
@@ -163,6 +167,10 @@ def matrix_predict(
     }])
     matrix_pd = bundle_uorf_data(data.get_data())[0]
 
+    if mode == "data" or (model_name is None and model_path is None):
+        return {"model": None, "D": matrix_pd, "uorf_info": None}
+
+    model = BiocompModel.resolve(name=model_name, path=model_path)
     pred = NetworkPrediction(
         predict_at=[d.x for d in matrix_pd],
         ground_truth=[d.y for d in matrix_pd],
