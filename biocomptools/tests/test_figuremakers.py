@@ -162,43 +162,10 @@ def multi_dependent_output_network(lib):
 
 
 def _apply_network_theme(diagram):
-    from dracon import load, resolve_all_lazy
-    from jeanplot import jstyle, Container
-    from jeanplot.core import (
-        Size,
-        BoxStyle,
-        LayoutConstraints,
-        Offset,
-        Shadow,
-        SimpleBezierCurve,
-        StraightCurve,
-        OrthogonalCurve,
-        LineEndFlat,
-        LineEndCircle,
-        LineEndArrow,
-    )
-    import importlib.resources
+    from jeanplot import jstyle, Container, load_default_theme
+    from jeanplot.core import LayoutConstraints
 
-    types = [
-        Size,
-        BoxStyle,
-        LayoutConstraints,
-        Offset,
-        Shadow,
-        SimpleBezierCurve,
-        StraightCurve,
-        OrthogonalCurve,
-        LineEndFlat,
-        LineEndCircle,
-        LineEndArrow,
-    ]
-    theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-        "network_diagram.yaml"
-    )
-    theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
-    resolve_all_lazy(theme)
-    jstyle.update(theme)
-
+    load_default_theme()
     root = Container(
         children=[diagram],
         layout=LayoutConstraints(direction="row", justify_content="center", align_items="stretch"),
@@ -665,45 +632,14 @@ class TestNetworkAdapter:
 
 class TestThemeLoading:
     def test_network_diagram_theme_loads(self):
-        from dracon import load, resolve_all_lazy
-        from jeanplot.core import (
-            Size,
-            BoxStyle,
-            LayoutConstraints,
-            Offset,
-            Shadow,
-            SimpleBezierCurve,
-            StraightCurve,
-            OrthogonalCurve,
-            LineEndFlat,
-            LineEndCircle,
-            LineEndArrow,
-        )
-        import importlib.resources
+        # network-diagram styling now lives in jeanplot's default theme (SSOT).
+        from jeanplot import jstyle, load_default_theme
+        from biocomptools.toollib.figuremakers.networkdiagram import ComputeNode
 
-        jeanplot_types = [
-            Size,
-            BoxStyle,
-            LayoutConstraints,
-            Offset,
-            Shadow,
-            SimpleBezierCurve,
-            StraightCurve,
-            OrthogonalCurve,
-            LineEndFlat,
-            LineEndCircle,
-            LineEndArrow,
-        ]
-        theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-            "network_diagram.yaml"
-        )
-        theme = load(
-            str(theme_file), context={t.__name__: t for t in jeanplot_types}, raw_dict=True
-        )
-        resolve_all_lazy(theme)
-
-        assert "ComputeNode" in theme
-        assert "NetworkDiagram" in theme
+        load_default_theme(force=True)
+        node = ComputeNode(node_type="transcription")
+        jstyle.apply(node)
+        assert node.min_dimensions.width == 18 and node.min_dimensions.height == 18
 
     def test_genetic_schematic_theme_loads(self):
         from dracon import load, resolve_all_lazy

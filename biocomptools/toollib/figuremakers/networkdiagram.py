@@ -5,11 +5,13 @@
 from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr
 from collections import defaultdict
+from statistics import median
 import matplotlib.axes
 
-from jeanplot.core.component import AnchorComponent
+from jeanplot.core.component import AnchorComponent, Component
 from jeanplot.core.connection_label import ConnectionLabel
 from jeanplot.core.container import Container
+from jeanplot.core.ordering import min_crossing_permutation, relax_y
 from jeanplot.core.models import BoxStyle, LayoutConstraints, Offset, Size
 from jeanplot.core.connector import Connection, OrthogonalCurve, SimpleBezierCurve
 from jeanplot.core.svg import LineEndFlat
@@ -69,11 +71,7 @@ class LayoutSpec(BaseModel):
             graph = net.compute_graph
             if graph is None:
                 continue
-            ern_ids = [
-                n.node_id
-                for n in graph.nodes.values()
-                if n.node_type == "sequestron_ERN"
-            ]
+            ern_ids = [n.node_id for n in graph.nodes.values() if n.node_type == "sequestron_ERN"]
             if not ern_ids:
                 continue
             layers = list(graph.topological_order(ern_ids))
@@ -88,10 +86,7 @@ class LayoutSpec(BaseModel):
         if not per_layer_types:
             return cls()
 
-        ern_slot_order = [
-            sorted(per_layer_types.get(i, set()))
-            for i in range(max_layers)
-        ]
+        ern_slot_order = [sorted(per_layer_types.get(i, set())) for i in range(max_layers)]
 
         return cls(
             ern_slot_order=ern_slot_order,
@@ -145,23 +140,6 @@ def _format_ratio_proportion(val: float) -> str:
     if abs(pct - round(pct)) < 0.1:
         return f"({int(round(pct))}%)"
     return f"({pct:.1f}%)"
-
-
-_NETWORK_DIAGRAM_THEME_CACHE: dict | None = None
-
-
-def _load_network_diagram_theme(types):
-    global _NETWORK_DIAGRAM_THEME_CACHE
-    if _NETWORK_DIAGRAM_THEME_CACHE is None:
-        from dracon import load, resolve_all_lazy
-        import importlib.resources
-        theme_file = importlib.resources.files("biocomptools.configs.themes").joinpath(
-            "network_diagram.yaml"
-        )
-        theme = load(str(theme_file), context={t.__name__: t for t in types}, raw_dict=True)
-        resolve_all_lazy(theme)
-        _NETWORK_DIAGRAM_THEME_CACHE = theme
-    return _NETWORK_DIAGRAM_THEME_CACHE
 
 
 EMBEDDING_CATEGORY: dict[str, str] = {
@@ -1065,11 +1043,7 @@ class NetworkDiagram(Container):
 
         for i in range(target_ern_count):
             ern_layer = actual_ern_layers[i] if i < len(actual_ern_layers) else []
-            slot_order = (
-                self.layout_spec.get_slot_order_for_layer(i)
-                if self.layout_spec
-                else None
-            )
+            slot_order = self.layout_spec.get_slot_order_for_layer(i) if self.layout_spec else None
             if not ern_layer and not slot_order:
                 continue
 
@@ -1224,6 +1198,114 @@ class NetworkDiagram(Container):
             return layer.id
         return "unknown"
 
+    def optimize_input_order(self, renderer) -> None:
+        """Reorder input-column groups to minimize outgoing-wire crossings."""
+        input_layer = next(
+            (c for c in self.children if "input_layer" in getattr(c, "style_class", [])),
+            None,
+        )
+        if input_layer is None:
+            return
+        aggs = [c for c in input_layer.children if isinstance(c, AggregationNode)]
+        if len(aggs) < 2:
+            return
+
+        self.measure_and_layout(renderer)
+        idx_of = {id(a): k for k, a in enumerate(aggs)}
+
+        def center_y(comp: Component) -> float:
+            b = comp.get_world_bounds()
+            return (b[1] + b[3]) / 2 if b else 0.0
+
+        def group_of(comp: Component | None) -> int | None:
+            while comp is not None:
+                k = idx_of.get(id(comp))
+                if k is not None:
+                    return k
+                comp = comp.parent
+            return None
+
+        targets: list[list[float]] = [[] for _ in aggs]
+        for conn in self._connections:
+            k = group_of(
+                conn.start_component if isinstance(conn.start_component, Component) else None
+            )
+            if k is not None and isinstance(conn.end_component, Component):
+                targets[k].append(center_y(conn.end_component))
+
+        perm = min_crossing_permutation([center_y(a) for a in aggs], targets)
+        if perm == list(range(len(aggs))):
+            return
+        ordered = iter(aggs[i] for i in perm)
+        input_layer.children = [
+            next(ordered) if isinstance(c, AggregationNode) else c for c in input_layer.children
+        ]
+
+    def relax_free_node_y(self, sweeps: int = 4) -> None:
+        """Median-relax y of free Tx/Tl nodes (post-layout) to straighten edges."""
+        owners = {id(c): c for c in self._nodes.values()}
+
+        def owner_of(comp: Component | None) -> Component | None:
+            while comp is not None:
+                if id(comp) in owners:
+                    return comp
+                comp = comp.parent
+            return None
+
+        idx: dict[int, int] = {}
+        comps: list[Component] = []
+        cx: list[float] = []
+        cy: list[float] = []
+        ch: list[float] = []
+
+        def reg(comp: Component) -> int | None:
+            k = idx.get(id(comp))
+            if k is None:
+                b = comp.get_world_bounds()
+                if b is None:
+                    return None
+                k = len(comps)
+                idx[id(comp)] = k
+                comps.append(comp)
+                cx.append((b[0] + b[2]) / 2)
+                cy.append((b[1] + b[3]) / 2)
+                ch.append(b[3] - b[1])
+            return k
+
+        pairs: list[tuple[int, int]] = []
+        for conn in self._connections:
+            a = owner_of(
+                conn.start_component if isinstance(conn.start_component, Component) else None
+            )
+            b = owner_of(conn.end_component if isinstance(conn.end_component, Component) else None)
+            if a is None or b is None or a is b:
+                continue
+            ia, ib = reg(a), reg(b)
+            if ia is not None and ib is not None:
+                pairs.append((ia, ib))
+
+        movable = [
+            isinstance(c, (TranscriptionNode, TranslationNode)) and c.attached_to is None
+            for c in comps
+        ]
+        if not any(movable):
+            return
+
+        neighbors: list[list[int]] = [[] for _ in comps]
+        for ia, ib in pairs:
+            neighbors[ia].append(ib)
+            neighbors[ib].append(ia)
+
+        gap = (median(ch) if ch else 0.0) * 1.25
+        newy = relax_y(cy, neighbors, movable, [round(x) for x in cx], min_gap=gap, sweeps=sweeps)
+
+        for i, c in enumerate(comps):
+            if not movable[i] or abs(newy[i] - cy[i]) < 1e-6:
+                continue
+            yscale = c.parent.compute_world_matrix()[1][1] if c.parent else 1.0
+            dy = (newy[i] - cy[i]) / yscale if yscale else (newy[i] - cy[i])
+            c.offset = Offset(absolute=(c.offset.absolute[0], c.offset.absolute[1] + dy))
+
 
 def render_diagram_to_ax(
     network: Any,
@@ -1251,42 +1333,16 @@ def render_diagram_to_ax(
     no margins (boxes/text become slightly anisotropic; usually acceptable
     for schematic content).
     """
+    import jeanplot
     from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
-    from jeanplot.core import (
-        Size,
-        BoxStyle,
-        LayoutConstraints,
-        Offset,
-        Shadow,
-        SimpleBezierCurve,
-        StraightCurve,
-        OrthogonalCurve,
-        LineEndFlat,
-        LineEndCircle,
-        LineEndArrow,
-    )
-    from jeanplot.core.models import TextHalo
+    from jeanplot.core.style_engine import merge_jstyle_rules
 
     load_default_theme()
-
-    types = [
-        Size,
-        BoxStyle,
-        LayoutConstraints,
-        Offset,
-        Shadow,
-        TextHalo,
-        SimpleBezierCurve,
-        StraightCurve,
-        OrthogonalCurve,
-        LineEndFlat,
-        LineEndCircle,
-        LineEndArrow,
-    ]
-    theme = _load_network_diagram_theme(types)
-    jstyle.update(theme)
     if style_overrides:
-        jstyle.update(style_overrides)
+        # jstyle.update *replaces* the cascade, so overrides must be merged onto
+        # the default rules (just loaded into _DEFAULT_THEME_CACHE) or the layout
+        # rules are wiped and the diagram collapses.
+        jstyle.update(merge_jstyle_rules(jeanplot._DEFAULT_THEME_CACHE, style_overrides))
 
     diagram = NetworkDiagram(
         network=network,
@@ -1308,10 +1364,17 @@ def render_diagram_to_ax(
     ax.set_aspect(aspect)
     ax.axis("off")
     renderer = MatplotlibRenderer()
-    # Apply variable line widths via pre_render callback so they survive
-    # jstyle re-application during measure_and_layout.
+    renderer.create_context(ax=ax)
+    diagram.optimize_input_order(renderer)
+    # pre_render callbacks run post-measure so they survive jstyle re-application:
+    # line widths, then free-node y straightening (reads measured positions).
     renderer.pre_render_callbacks.append(lambda _ax: diagram.apply_variable_line_widths())
-    renderer.render_component(ax, root, adjust_lims=True)
+    renderer.pre_render_callbacks.append(lambda _ax: diagram.relax_free_node_y())
+    # padding=0 fills the cell; set_aspect=False keeps our `aspect` (default 0.1 padding
+    # was the margin around the diagram).
+    renderer.render_component(
+        ax, root, adjust_lims=True, adjust_lims_padding=0.0, adjust_lims_set_aspect=False
+    )
 
     from biocomptools.toollib.figuremakers._jeanplot_canvas import apply_canvas
 
@@ -1319,5 +1382,3 @@ def render_diagram_to_ax(
 
     if title:
         ax.set_title(title, fontsize=12, fontweight="bold")
-
-

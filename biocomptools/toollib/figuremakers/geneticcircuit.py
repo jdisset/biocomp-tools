@@ -51,18 +51,19 @@ def render_circuit_to_ax(
     ``aspect="auto"`` stretches to fill (no margins).
     """
     from jeanplot.gene import GeneticSchematic
-    from jeanplot import MatplotlibRenderer, jstyle, load_default_theme
+    from jeanplot import MatplotlibRenderer, jstyle
     from jeanplot.core import Size, BoxStyle, LayoutConstraints, Offset, Shadow
     from jeanplot.core.svg import LineEndFlat
 
-    load_default_theme()
-
+    # theme stack already includes default.yaml, so no separate load_default_theme
     jeanplot_types = [Size, BoxStyle, LayoutConstraints, Offset, Shadow, LineEndFlat]
-    theme = _load_genetic_schematic_theme(jeanplot_types)
-    jstyle.update(theme)
+    from jeanplot.core.style_engine import merge_jstyle_rules
 
+    theme = _load_genetic_schematic_theme(jeanplot_types)
+    jstyle.clear()
     if style_overrides:
-        jstyle.update(style_overrides)
+        theme = merge_jstyle_rules(theme, style_overrides)
+    jstyle.update(theme)
 
     circuit_data = network.to_circuit_data(
         hide_markers=hide_marker_tus,
