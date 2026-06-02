@@ -8,8 +8,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from biocomptools.toollib.networkprediction import (
-    _calculate_grid_stats,
+from biocomptools.toollib.networkprediction import _calculate_grid_stats
+from biocomptools.toollib.kernel_floor import (
     _kernel_smoother_lattice,
     kernel_lattice_interp,
     make_hypercube,
@@ -101,6 +101,8 @@ def test_calculate_grid_stats_returns_finite_metrics(synthetic_2d, gridstats_par
     # In this synthetic setup the model adds extra noise on top of gt, so
     # the model should be no better than the kernel.
     assert stats['ratio_rmse'] >= 1.0 - 1e-6
+    m, k = stats['model_rmse_latent'], stats['kernel_rmse_latent']
+    assert stats['ermse_latent'] == pytest.approx(np.sqrt(max(0.0, m * m - k * k)), abs=1e-9)
 
 
 def test_calculate_grid_stats_subsample_indices_in_range(synthetic_2d, gridstats_params):

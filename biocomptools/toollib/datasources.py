@@ -227,6 +227,16 @@ class FileSource(DataSource):
     data_file: str | Path
     recipe_file: str | Path
     input_order: Optional[InputOrderSpec] = None
+    # Axis anchor: reorders the network's native input_position so X loaded for
+    # both ground truth AND prediction agree. Use this (not input_order) to swap
+    # which input is x vs y -- input_order permutes the display array that feeds
+    # predict_at, which would silently corrupt the model inputs.
+    input_axes: Optional[list] = None
+    # Promote collapsed fluo_bias groups back to real inputs so the held axis
+    # becomes a sliceable z dimension in BOTH ground truth and prediction. A
+    # bias is just an input frozen at a value; this restores it (no bespoke
+    # filtering -- the standard z-slice machinery then handles both panels).
+    bias_as_input: bool = False
 
     _networks: list = []
     _lib: Any = None
@@ -255,7 +265,37 @@ class FileSource(DataSource):
         else:
             is_legacy = any('sources' in c for c in recipe_data.get('content', []))
             recipe = dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
+
+        if self.input_axes is not None:
+            recipe.input_axes = self.input_axes
+
         self._networks = recipe_to_networks(recipe, lib=self._lib)
+
+        if self.bias_as_input:
+            from biocomp.recipe import InputAxis
+
+            for net in self._networks:
+                for prot in net.get_bias_proteins():
+                    net.set_bias_as_input(prot)
+                # set_bias_as_input renumbers input_positions by output_pos,
+                # clobbering whatever apply_input_axes set inside
+                # recipe_to_networks. Re-apply user axes (appending any
+                # newly-promoted bias proteins at the end) so axis_order
+                # survives slicing mode.
+                if self.input_axes is not None:
+                    given = [
+                        ax if isinstance(ax, InputAxis) else InputAxis.model_validate(
+                            {"name": ax} if isinstance(ax, str) else ax
+                        )
+                        for ax in self.input_axes
+                    ]
+                    given_names = {ax.name for ax in given}
+                    extra = [
+                        InputAxis(name=p)
+                        for p in net.get_inverted_input_proteins()
+                        if p not in given_names
+                    ]
+                    net.apply_input_axes(given + extra)
 
     def _data_from_network(self, network: bc.network.Network) -> Optional[PlotData]:
         from biocomp.datautils import get_network_XY

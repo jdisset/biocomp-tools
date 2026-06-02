@@ -19,8 +19,9 @@ def _make_mock_prediction(
 ):
     """Create a mock NetworkPrediction-like object with _yhats and _gtruths.
 
-    ``stats_list`` is what ``pred.get_network_stats()`` returns. Pass a list of
-    dicts to exercise the ``subsample_indices`` consumption path.
+    ``stats_list`` is the per-network stats (one dict per network), set on
+    ``pred._stats_list``. The mock mirrors the real ``get_network_stats``
+    contract: ``network_idx=i`` -> that network's dict (or None), else the list.
     """
     rng = np.random.default_rng(seed)
     pred = MagicMock()
@@ -32,7 +33,12 @@ def _make_mock_prediction(
     network.get_output_proteins.return_value = ["output1"]
     pred.network_model = MagicMock()
     pred.network_model.network = [network]
-    pred.get_network_stats = MagicMock(return_value=stats_list or [])
+    pred._stats_list = list(stats_list) if stats_list else []
+    pred.get_network_stats = MagicMock(
+        side_effect=lambda network_idx=None, **_: pred._stats_list
+        if network_idx is None
+        else (pred._stats_list[network_idx] if network_idx < len(pred._stats_list) else None)
+    )
     return pred
 
 
@@ -107,7 +113,7 @@ def test_mvp_uses_subsample_indices_from_stats():
     """Cloud must equal gt[subsample_indices].ravel() (SSOT with the metric)."""
     pred = _make_mock_prediction(n_points=300)
     sub_idx = np.array([5, 17, 42, 99, 200, 250], dtype=np.intp)
-    pred.get_network_stats.return_value = [{'subsample_indices': sub_idx}]
+    pred._stats_list = [{'subsample_indices': sub_idx}]
 
     data = MeasuredVsPredictedData(predictions=[pred], dependent_output_only=False)
     expected_m = pred._gtruths[0][sub_idx].ravel()
@@ -120,7 +126,7 @@ def test_mvp_subsample_indices_with_duplicates_keep_multiplicity():
     """With-replacement indices appear N times in the cloud (matching the metric)."""
     pred = _make_mock_prediction(n_points=50)
     sub_idx = np.array([3, 3, 3, 7, 7], dtype=np.intp)
-    pred.get_network_stats.return_value = [{'subsample_indices': sub_idx}]
+    pred._stats_list = [{'subsample_indices': sub_idx}]
     data = MeasuredVsPredictedData(predictions=[pred], dependent_output_only=False)
     assert data.measured.shape == (5,)
     np.testing.assert_array_equal(data.measured, pred._gtruths[0][sub_idx].ravel())
@@ -130,7 +136,7 @@ def test_mvp_subsample_indices_multi_output_ravel_order():
     """For multi-output: cloud == gt[idx, :].ravel() in row-major order."""
     pred = _make_mock_prediction(n_points=20, n_outputs=3)
     sub_idx = np.array([0, 5, 10], dtype=np.intp)
-    pred.get_network_stats.return_value = [{'subsample_indices': sub_idx}]
+    pred._stats_list = [{'subsample_indices': sub_idx}]
     data = MeasuredVsPredictedData(predictions=[pred], dependent_output_only=False)
     assert data.measured.shape == (9,)  # 3 rows × 3 outs
     np.testing.assert_array_equal(data.measured, pred._gtruths[0][sub_idx].ravel())
@@ -139,7 +145,7 @@ def test_mvp_subsample_indices_multi_output_ravel_order():
 def test_mvp_falls_back_when_stats_empty():
     """No stats -> original random-sampling path (existing behavior)."""
     pred = _make_mock_prediction(n_points=1000)
-    pred.get_network_stats.return_value = []
+    pred._stats_list = []
     data = MeasuredVsPredictedData(
         predictions=[pred],
         resample_per_experiment=200,
@@ -151,7 +157,7 @@ def test_mvp_falls_back_when_stats_empty():
 def test_mvp_falls_back_when_subsample_indices_missing():
     """Stats present but no subsample_indices -> fallback to random sampling."""
     pred = _make_mock_prediction(n_points=1000)
-    pred.get_network_stats.return_value = [{'grid_nrmse': 0.1}]  # no subsample_indices
+    pred._stats_list = [{'grid_nrmse': 0.1}]  # no subsample_indices
     data = MeasuredVsPredictedData(
         predictions=[pred],
         resample_per_experiment=300,
@@ -165,7 +171,7 @@ def test_mvp_subsample_indices_filters_nan_after_subsample():
     pred = _make_mock_prediction(n_points=20)
     pred._gtruths[0][3, 0] = np.nan
     sub_idx = np.array([1, 3, 5, 7], dtype=np.intp)
-    pred.get_network_stats.return_value = [{'subsample_indices': sub_idx}]
+    pred._stats_list = [{'subsample_indices': sub_idx}]
     data = MeasuredVsPredictedData(predictions=[pred], dependent_output_only=False)
     assert data.measured.shape == (3,)  # row 3 dropped
     assert np.all(np.isfinite(data.measured))

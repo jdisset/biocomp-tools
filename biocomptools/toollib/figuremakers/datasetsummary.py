@@ -37,9 +37,7 @@ def _data_subax_spec_3d(
     cube_w = float(cube_frac_w)
     gap_w = float(gap_frac)
     slice_w = 1.0 - cube_w - gap_w
-    assert slice_w > 0, (
-        f"cube_frac_w + gap_frac too large for cell ({cube_w} + {gap_w} >= 1)"
-    )
+    assert slice_w > 0, f"cube_frac_w + gap_frac too large for cell ({cube_w} + {gap_w} >= 1)"
     return {
         "regions": {
             "cube": {"x": 0.0, "y": 0.0, "w": cube_w, "h": 1.0},
@@ -121,9 +119,7 @@ def expand_panel_atomics(
             zs = np.linspace(slice_zrange[0], slice_zrange[1], R * C)
         else:
             zs = np.asarray(slice_zvalues, dtype=float)
-            assert zs.size == R * C, (
-                f"slice_zvalues has {zs.size} entries, expected R*C={R * C}"
-            )
+            assert zs.size == R * C, f"slice_zvalues has {zs.size} entries, expected R*C={R * C}"
         spec = _slices_only_subax_spec(
             slice_grid=(R, C),
             slice_vgap_frac=slice_vgap_frac,
@@ -186,9 +182,7 @@ def expand_panel_atomics(
             zs = np.linspace(slice_zrange[0], slice_zrange[1], R * C)
         else:
             zs = np.asarray(slice_zvalues, dtype=float)
-            assert zs.size == R * C, (
-                f"slice_zvalues has {zs.size} entries, expected R*C={R * C}"
-            )
+            assert zs.size == R * C, f"slice_zvalues has {zs.size} entries, expected R*C={R * C}"
         spec = _data_subax_spec_3d(
             cube_frac_w=cube_frac_w,
             gap_frac=cube_slice_gap_frac,
@@ -224,7 +218,9 @@ def expand_panel_atomics(
     raise ValueError(f"expand_panel_atomics: unsupported data dim={dim}")
 
 
-def compose_rows(groups: Sequence[Sequence[Optional[dict]]], layout: str = "row") -> list[list[dict]]:
+def compose_rows(
+    groups: Sequence[Sequence[Optional[dict]]], layout: str = "row"
+) -> list[list[dict]]:
     """Compose row-groups into a rows-of-panels list for ``autofig_dataset_row``.
 
     Each group is a list of panel dicts with ``None`` entries representing
@@ -413,9 +409,9 @@ def training_set_count(model) -> tuple[int, bool]:
     """
     if model is None:
         return 0, False
-    dmi = model.metadata.get('data_manager_info') or {}
-    names = dmi.get('network_names', [])
-    weights = dmi.get('network_weights', [])
+    dmi = model.metadata.get("data_manager_info") or {}
+    names = dmi.get("network_names", [])
+    weights = dmi.get("network_weights", [])
     if weights and len(weights) == len(names):
         return sum(1 for w in weights if float(w) > 0), True
     return len(names), False
@@ -431,18 +427,41 @@ def trained_on_status(model, network_name: str | None) -> str:
       - weights NOT recorded          -> "name in training YAML, weight unknown"
     """
     if model is None or not network_name:
-        return ''
-    dmi = model.metadata.get('data_manager_info') or {}
-    names = dmi.get('network_names', [])
+        return ""
+    dmi = model.metadata.get("data_manager_info") or {}
+    names = dmi.get("network_names", [])
     if network_name not in names:
-        return ''
-    weights = dmi.get('network_weights', [])
+        return ""
+    weights = dmi.get("network_weights", [])
     if not weights or len(weights) != len(names):
-        return '[purple]*name in training set YAML, weight unknown*[/purple]'
+        return "[purple]*name in training set YAML, weight unknown*[/purple]"
     w = float(weights[names.index(network_name)])
     if w > 0:
-        return f'[purple]*seen during training (w={w:.3g})*[/purple]'
-    return '[grey]*in training YAML but excluded (w=0)*[/grey]'
+        return f"[purple]*seen during training (w={w:.3g})*[/purple]"
+    return "[grey]*in training YAML but excluded (w=0)*[/grey]"
+
+
+def model_short_name(model) -> str | None:
+    """Short architecture code for a model (e.g. ``"SN"``, ``"SMLcLbrN"``).
+
+    Recovered from training metadata: the ``training_set_file`` stem
+    (``.../SN.yaml`` -> ``"SN"``), falling back to the middle segment of
+    ``run_name`` (``"{date}-{name}-{rep}"``). ``None`` when neither is present.
+    """
+    if model is None:
+        return None
+    mm = model.metadata or {}
+    tsf = mm.get("training_set_file")
+    if tsf:
+        stem = tsf.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if stem:
+            return stem
+    run_name = mm.get("run_name")
+    if run_name:
+        parts = run_name.split("-")
+        if len(parts) >= 3:
+            return "-".join(parts[1:-1])
+    return None
 
 
 def extract_model_metadata(model) -> dict:
@@ -450,6 +469,7 @@ def extract_model_metadata(model) -> dict:
     mm = dict(model.metadata or {})
     return {
         "signature": model.signature,
+        "short_name": model_short_name(model),
         "experiment_name": mm.get("experiment_name"),
         "run_name": mm.get("run_name"),
         "host": mm.get("host"),
@@ -492,7 +512,9 @@ def smart_title(s: str) -> str:
     return " ".join(w.title() if w.islower() else w for w in s.split(" "))
 
 
-def format_z_label(z_latent: float, rescaler=None, fmt: str | None = None, prefix: str = "z=") -> str:
+def format_z_label(
+    z_latent: float, rescaler=None, fmt: str | None = None, prefix: str = "z="
+) -> str:
     """Format a slice-z label for a heatmap title.
 
     With ``rescaler=None`` returns the latent value formatted ``"z=0.25"``.
@@ -507,6 +529,7 @@ def format_z_label(z_latent: float, rescaler=None, fmt: str | None = None, prefi
     raw = float(rescaler.inv(float(z_latent)))
     if fmt is None:
         from jeanplot.plots.ticks import format_powers
+
         return f"{prefix}{format_powers(raw, n_decimals=0)}"
     return f"{prefix}{raw:{fmt}}"
 
@@ -534,18 +557,19 @@ def filter_compatible(D):
     mapping post-hoc.
     """
     import sys
+
     out = []
     for i, d in enumerate(D):
-        bn = d.metadata.get('built_network')
+        bn = d.metadata.get("built_network")
         if bn is None:
             out.append(d)
             continue
         x_cols = d.x.shape[1] if d.x.ndim > 1 else 1
         if x_cols != bn.nb_inputs:
-            name = d.metadata.get('network_name') or d.metadata.get('file_stem') or f'#{i}'
+            name = d.metadata.get("network_name") or d.metadata.get("file_stem") or f"#{i}"
             print(
-                f'[filter_compatible] skip {name}: X has {x_cols} columns '
-                f'but network expects {bn.nb_inputs} inputs',
+                f"[filter_compatible] skip {name}: X has {x_cols} columns "
+                f"but network expects {bn.nb_inputs} inputs",
                 file=sys.stderr,
             )
             continue
@@ -600,6 +624,87 @@ def build_prediction_pipeline(
         **pred_kwargs,
     )
     return model, pred, pred.get_data_lazy()
+
+
+def reorder_plot_data_for_display(plot_data, input_order):
+    """Apply the prediction's display `input_order` to a ground-truth PlotData.
+
+    `input_order` is a *display* permutation (the same one handed to
+    NetworkPrediction). The model is uninvolved: the underlying X stays in the
+    network's `input_position` order so `predict_at` is never scrambled - this
+    only permutes the display columns of an already-native PlotData, exactly
+    mirroring `extract_lazy_plot_data_from_network`. Without this, only the
+    prediction panel honors `input_order` and the ground-truth panel keeps
+    native axis order (the asymmetry this fixes).
+    """
+    if input_order is None or plot_data is None:
+        return plot_data
+
+    from biocomp.plotutils import LazyPlotData, get_reordered_protein_names
+
+    net = plot_data.metadata.get("built_network")
+    if net is None:
+        return plot_data
+
+    in_order, _, names, _ = get_reordered_protein_names(net, input_order)
+    if list(in_order) == list(range(len(in_order))):
+        return plot_data
+
+    raw_names = net.get_inverted_input_proteins()
+    column_proteins = [raw_names[i] for i in in_order]
+    order = list(in_order)
+
+    def get_xy(_pd):
+        x, y = plot_data.x, plot_data.y
+        return np.asarray(x)[:, order], y
+
+    return LazyPlotData(
+        get_xy=get_xy,
+        input_names=names,
+        output_name=plot_data.output_name,
+        column_proteins=column_proteins,
+        metadata={**plot_data.metadata, "input_order": list(in_order), "input_names": names},
+    )
+
+
+def build_uniform_prediction(
+    model,
+    D,
+    n: int = 100_000,
+    slice_z: Optional[float] = None,
+    panels: Optional[Sequence[str]] = None,
+    input_order: Optional[list] = None,
+):
+    """Per-network prediction on a uniform hypercube; returns list aligned with D."""
+    if model is None or D is None or not len(D):
+        return [None] * (len(D) if D else 0)
+    if panels is not None and "prediction_uniform" not in panels:
+        return [None] * len(D)
+
+    import numpy as np
+    from biocomptools.modelmodel import NetworkModel
+    from biocomptools.toollib.networkprediction import NetworkPrediction
+    from biocomptools.toollib.kernel_floor import make_hypercube
+
+    networks = [d.metadata["built_network"] for d in D]
+    predict_at = []
+    for net in networks:
+        ndim = net.nb_inputs
+        if ndim == 3 and slice_z is not None:
+            xy = make_hypercube(2, res=max(2, int(round(n ** 0.5))))
+            X = np.column_stack([xy, np.full(xy.shape[0], float(slice_z))])
+        else:
+            X = make_hypercube(ndim, res=max(2, int(round(n ** (1.0 / max(ndim, 1))))))
+        predict_at.append(X.astype(np.float32))
+
+    pred = NetworkPrediction(
+        predict_at=predict_at,
+        network_model=NetworkModel(model=model, network=networks),
+        already_latent=True,
+        enable_gridstats=False,
+        input_order=input_order,
+    )
+    return pred.get_data(rescale_latent=True)
 
 
 def maybe_build_mvp(
@@ -1044,7 +1149,8 @@ def panel_plot_method(
         D = panel["plot_data"]
         cube_ax = FIG.subdivide(atomic["axnum"], atomic["subax_spec"])[atomic["subax_role"]]
         zslices = (
-            list(stack_zslices) if stack_zslices is not None
+            list(stack_zslices)
+            if stack_zslices is not None
             else list(np.linspace(stack_zrange[0], stack_zrange[1], int(stack_n_slices)))
         )
         return {
@@ -1074,13 +1180,9 @@ def panel_plot_method(
         # "Ground Truth" / "Prediction" title belongs above the whole row,
         # not on every cell.
         prefix = (
-            panel.get("title")
-            if atomic.get("r") == 0 and panel.get("kind") == "slices"
-            else None
+            panel.get("title") if atomic.get("r") == 0 and panel.get("kind") == "slices" else None
         )
-        cell_title = (
-            f"{prefix}  {z_label}" if prefix else z_label
-        ) if slice_show_title else None
+        cell_title = (f"{prefix}  {z_label}" if prefix else z_label) if slice_show_title else None
         return {
             "func": "biocomp.plotutils.smooth",
             "kwargs": {

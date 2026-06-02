@@ -35,7 +35,8 @@ class RecipePredictionData(BaseModel):
         from biocomp.recipe import Recipe
         from biocomp.network import recipe_to_networks
         from biocomptools.modelmodel import BiocompModel, NetworkModel
-        from biocomptools.toollib.networkprediction import NetworkPrediction, make_hypercube
+        from biocomptools.toollib.networkprediction import NetworkPrediction
+        from biocomptools.toollib.kernel_floor import make_hypercube
         from biocomptools.toollib.typical_experimental_distribution import sample_latent
 
         model = BiocompModel.resolve(path=self.model_path)
