@@ -43,6 +43,7 @@ import numpy as np
 from numpy.typing import NDArray as NdArray
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
+from biocomp.metric_utils import ermse
 from biocomp.plotutils import get_reordered_protein_names
 from biocomptools.logging_config import get_logger
 
@@ -90,6 +91,7 @@ class MeasuredVsPredictedData(BaseModel):
     _noise_floor_measured: NdArray | None = PrivateAttr(default=None)
     _noise_floor_predicted: NdArray | None = PrivateAttr(default=None)
     _noise_floor_model_predicted: NdArray | None = PrivateAttr(default=None)
+    _ermse_latent: float | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _initialize(self):
@@ -101,6 +103,7 @@ class MeasuredVsPredictedData(BaseModel):
         all_floor_m: list[NdArray] = []
         all_floor_p: list[NdArray] = []
         all_floor_mp: list[NdArray] = []
+        sum_n = sum_n_mmse = sum_n_kmse = 0.0
 
         for pred in self.predictions:
             if self._rescaler is None and hasattr(pred, "network_model"):
@@ -140,6 +143,15 @@ class MeasuredVsPredictedData(BaseModel):
 
                 stats_dict = pred.get_network_stats(network_idx=i)
                 sub_rows = None if stats_dict is None else stats_dict.get('subsample_indices')
+
+                if stats_dict is not None:
+                    m = stats_dict.get('model_rmse_latent')
+                    k = stats_dict.get('kernel_rmse_latent')
+                    nss = stats_dict.get('n_subsample_used', 0)
+                    if m is not None and k is not None and nss and np.isfinite(m) and np.isfinite(k):
+                        sum_n += nss
+                        sum_n_mmse += nss * m * m
+                        sum_n_kmse += nss * k * k
 
                 if self.lattice_res is not None:
                     m_flat = gt.ravel()
@@ -198,6 +210,8 @@ class MeasuredVsPredictedData(BaseModel):
             self._noise_floor_measured = np.concatenate(all_floor_m)
             self._noise_floor_predicted = np.concatenate(all_floor_p)
             self._noise_floor_model_predicted = np.concatenate(all_floor_mp)
+        if sum_n > 0:
+            self._ermse_latent = ermse(sum_n_mmse / sum_n, sum_n_kmse / sum_n)
         return self
 
     def _project_grid_means(
@@ -236,7 +250,7 @@ class MeasuredVsPredictedData(BaseModel):
         computed by ``_calculate_grid_stats``).
         """
         from biocomp.datautils import IdentityRescaler
-        from biocomptools.toollib.networkprediction import kernel_lattice_interp
+        from biocomptools.toollib.kernel_floor import kernel_lattice_interp
 
         if stats is None:
             return None
@@ -267,7 +281,7 @@ class MeasuredVsPredictedData(BaseModel):
         return gt_v.ravel(), kernel_pred_raw.ravel(), yh_v.ravel()
 
     def _lattice_query(self, measured: NdArray, predicted: NdArray) -> tuple[NdArray, NdArray]:
-        from jeanplot.plots.smooth_kernel import build_tree, knn_stats
+        from jeanplot.plots.smooth_kernel import build_tree, smooth_stats
 
         assert self.lattice_res is not None
         lattice = np.linspace(measured.min(), measured.max(), self.lattice_res)[:, None]
@@ -276,14 +290,20 @@ class MeasuredVsPredictedData(BaseModel):
         kw = dict(self.knn_stats_params)
         tree = build_tree(measured_2d)
 
-        m_mean = knn_stats(lattice, y=measured_2d, tree=tree, stats="mean", **kw)
-        p_mean = knn_stats(lattice, y=predicted[:, None], tree=tree, stats="mean", **kw)
+        m_mean = smooth_stats(lattice, y=measured_2d, tree=tree, stats="mean", **kw)
+        p_mean = smooth_stats(lattice, y=predicted[:, None], tree=tree, stats="mean", **kw)
 
         m_out = np.asarray(m_mean).ravel()
         p_out = np.asarray(p_mean).ravel()
 
         mask = np.isfinite(m_out) & np.isfinite(p_out)
         return m_out[mask], p_out[mask]
+
+    @property
+    def ermse_latent(self) -> float | None:
+        """Pooled latent eRMSE = sqrt(mMSE - kMSE) over all included networks.
+        Scale-stable (always latent), unlike the raw noise-floor clouds."""
+        return self._ermse_latent
 
     @property
     def measured(self) -> NdArray:
