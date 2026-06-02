@@ -70,7 +70,8 @@ class TwoInputProjectionData(BaseModel):
     x2_idx: int = 1
     xlabel: str | None = None
     ylabel: str = "output"
-    mode: Literal["raw", "knn", "knn_uniform"] = "raw"
+    # "knn"/"knn_uniform" are deprecated aliases of "smooth"/"smooth_uniform".
+    mode: Literal["raw", "smooth", "smooth_uniform", "knn", "knn_uniform"] = "raw"
     grid_resolution: int = 100
     query_seed: int = 0
     latent_xlims: tuple[float, float] = (0.0, 1.0)
@@ -94,7 +95,7 @@ class TwoInputProjectionData(BaseModel):
         self, x_latent: np.ndarray, y_latent: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         x_2d = x_latent[:, [self.x1_idx, self.x2_idx]]
-        query_mode = "uniform" if self.mode == "knn_uniform" else "grid"
+        query_mode = "uniform" if self.mode.endswith("_uniform") else "grid"
         knn_kw = dict(
             x=x_2d, y=y_latent,
             xlims=list(self.latent_xlims), ylims=list(self.latent_ylims),
@@ -137,7 +138,7 @@ class TwoInputProjectionData(BaseModel):
             y_lat = rescaler.fwd(y)
             d_pernet: np.ndarray | None = None
 
-            if self.mode in ("knn", "knn_uniform"):
+            if self.mode != "raw":
                 x_lat, y_lat, d_pernet = self._knn_smooth(x_lat, y_lat)
 
             x_raw = rescaler.inv(x_lat) if self.project_in_raw_space else x_lat
@@ -174,7 +175,7 @@ class TwoInputProjectionData(BaseModel):
                 "n_networks": len(self.plot_data_list),
                 "n_points": int(xpool.shape[0]),
                 "n_raw_points": int(n_input_points),
-                "grid_resolution": self.grid_resolution if self.mode in ("knn", "knn_uniform") else None,
+                "grid_resolution": self.grid_resolution if self.mode != "raw" else None,
             },
         )
         return self
