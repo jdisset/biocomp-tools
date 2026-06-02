@@ -21,6 +21,14 @@ def _biocomp_to_jeanplot(pd: Any, rescaler: Any = None) -> JeanplotPlotData:
     if rescaler is not None:
         x = np.asarray(rescaler.fwd(x), dtype=np.float32)
         y = np.asarray(rescaler.fwd(y), dtype=np.float32)
+    # Drop rows with any non-finite x/y. Raw calibration artifacts (-inf/nan)
+    # and rescaler edge cases (log of <=0) otherwise poison the KNN grid bounds.
+    finite = (
+        np.isfinite(x).reshape(x.shape[0], -1).all(axis=1)
+        & np.isfinite(y).reshape(y.shape[0], -1).all(axis=1)
+    )
+    if not finite.all():
+        x, y = x[finite], y[finite]
     output_name = pd.output_name
     if isinstance(output_name, list) and len(output_name) == 1:
         output_name = output_name[0]

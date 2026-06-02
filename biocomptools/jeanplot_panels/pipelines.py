@@ -84,6 +84,37 @@ def paper_data(
     return src.get_data()[0]
 
 
+def family_members(
+    xp_name: str,
+    tokens: list[str],
+    recipe_tmpl: str,
+    output_name: str | None = None,
+    rescaler: Any = None,
+    calibration_regex: str = ".*[Ff][Ii][Nn][Aa][Ll].*",
+) -> list[JeanplotPlotData]:
+    """Ordered 1-input jeanplot ``PlotData`` per token for an overlaid curve family.
+
+    ``recipe_tmpl`` is a ``{tok}`` ``str.format`` template (e.g. ``".*uORF_{tok}$"``).
+    Each recipe yields both transfection directions; ``output_name`` picks one.
+    """
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.networkselector import iRegex
+
+    out = []
+    for t in tokens:
+        src = DBSource(content=[{
+            "experiment_name": xp_name,
+            "recipe_name": iRegex(recipe_tmpl.format(tok=t)),
+            "calibration_name": iRegex(calibration_regex),
+        }])
+        ds = src.get_data()
+        if output_name is not None:
+            ds = [d for d in ds if d.output_name == output_name]
+        assert ds, f"no dataset: xp={xp_name} recipe~{recipe_tmpl.format(tok=t)} out={output_name}"
+        out.append(_biocomp_to_jeanplot(ds[0], rescaler=rescaler))
+    return out
+
+
 def paper_predict(
     xp_name: str,
     rcp_name: str,
@@ -199,6 +230,7 @@ register_template(network_plot_data)
 register_template(paper_per_network_pds)
 register_template(opt_list)
 register_template(paper_data)
+register_template(family_members)
 register_template(paper_predict)
 register_template(matrix_predict)
 
@@ -209,6 +241,7 @@ PAPER_PIPELINE_HELPERS: dict[str, Any] = {
     "paper_per_network_pds": paper_per_network_pds,
     "opt_list": opt_list,
     "paper_data": paper_data,
+    "family_members": family_members,
     "paper_predict": paper_predict,
     "matrix_predict": matrix_predict,
 }
@@ -220,6 +253,7 @@ __all__ = [
     "network_plot_data",
     "opt_list",
     "paper_data",
+    "family_members",
     "paper_per_network_pds",
     "paper_predict",
     "PAPER_PIPELINE_HELPERS",

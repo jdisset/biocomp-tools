@@ -77,16 +77,25 @@ def _build_data_panel(
     title: str | None,
     rescaler: Any | None,
     slice_grid_kwargs: dict,
+    contour_reference: Any | None = None,
+    panel_overrides: dict | None = None,
 ) -> Container:
     jpd = _as_jeanplot_pd(pd, rescaler=rescaler)
     dim = _resolve_data_dim(jpd)
-    kw = _data_panel_kwargs(slice_grid_kwargs, dim)
+    kw = {**_data_panel_kwargs(slice_grid_kwargs, dim), **_drop_none(panel_overrides)}
     if dim == 1:
         return SmoothPanel1D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
     if dim == 2:
         return SmoothPanel2D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
     if dim == 3:
-        return SmoothPanel3D(plot_data=jpd, rescaler=rescaler, title=title, **kw)
+        cube_ref = _as_jeanplot_pd(contour_reference, rescaler=rescaler) if contour_reference is not None else None
+        return SmoothPanel3D(
+            plot_data=jpd,
+            rescaler=rescaler,
+            title=title,
+            cube_contour_reference_plot_data=cube_ref,
+            **kw,
+        )
     raise ValueError(f"unsupported data dim={dim}")
 
 
@@ -96,6 +105,7 @@ def _build_slices_only_panel(
     title: str | None,
     rescaler: Any | None,
     slice_grid_kwargs: dict,
+    panel_overrides: dict | None = None,
 ) -> Container:
     import numpy as np
 
@@ -104,9 +114,15 @@ def _build_slices_only_panel(
 
     jpd = _as_jeanplot_pd(pd, rescaler=rescaler)
     rows, cols = slice_grid_kwargs.get("slice_grid", (3, 3))
-    zslices = slice_grid_kwargs.get("zslices", [0.05, 0.4])
     n = rows * cols
-    zs = np.linspace(float(zslices[0]), float(zslices[-1]), n)
+    # Honor the canonical knobs that dataset.yaml supplies: an explicit
+    # `slice_zvalues` list wins; otherwise space `n` slices across `slice_zrange`.
+    explicit = slice_grid_kwargs.get("slice_zvalues")
+    if explicit:
+        zs = np.asarray([float(z) for z in explicit], dtype=float)
+    else:
+        zr = slice_grid_kwargs.get("slice_zrange") or slice_grid_kwargs.get("zslices") or [0.05, 0.4]
+        zs = np.linspace(float(zr[0]), float(zr[-1]), n)
     cells = []
     for i, z in enumerate(zs):
         r, c = i // cols, i % cols
@@ -120,6 +136,7 @@ def _build_slices_only_panel(
                 draw_colorbar=(c == cols - 1),
                 draw_xlabel=(r == rows - 1),
                 draw_ylabel=(c == 0),
+                **_drop_none(panel_overrides),
             )
         )
     row_containers = [
@@ -165,6 +182,7 @@ def build_per_network_row(
     panels: Sequence[str],
     plot_data: Any,
     predicted_data: Any | None = None,
+    uniform_predicted_data: Any | None = None,
     mvp_data: Any | None = None,
     blurb_text: str | None = None,
     blurb_title: str | None = None,
@@ -176,6 +194,8 @@ def build_per_network_row(
     row_height: float = 5.0,
     rescaler: Any | None = None,
     slice_grid_kwargs: dict | None = None,
+    share_cube_contours: bool = False,
+    uniform_panel_overrides: dict | None = None,
 ) -> Container:
     """Build a per-network plotting row as a nested ``Container`` tree.
 
@@ -239,10 +259,36 @@ def build_per_network_row(
                 title="Prediction",
                 rescaler=rescaler,
                 slice_grid_kwargs=slice_grid_kwargs,
+                contour_reference=plot_data if share_cube_contours else None,
             )
             add_with_gap(
                 _wrap_cell(cell, _resolve_width("data", kw, predicted_data), row_height), 0.5, None
             )
+        elif kind == "prediction_uniform":
+            if uniform_predicted_data is None:
+                continue
+            slicing = bool(
+                slice_grid_kwargs.get("slice_zvalues") or slice_grid_kwargs.get("slice_zrange")
+            ) and _resolve_data_dim(_as_jeanplot_pd(uniform_predicted_data, rescaler=rescaler)) == 3
+            if slicing:
+                cell = _build_slices_only_panel(
+                    uniform_predicted_data,
+                    title="Pred (unif)",
+                    rescaler=rescaler,
+                    slice_grid_kwargs=slice_grid_kwargs,
+                    panel_overrides=uniform_panel_overrides,
+                )
+                width = _resolve_width("slices", kw)
+            else:
+                cell = _build_data_panel(
+                    uniform_predicted_data,
+                    title="Pred (uniform)",
+                    rescaler=rescaler,
+                    slice_grid_kwargs=slice_grid_kwargs,
+                    panel_overrides=uniform_panel_overrides,
+                )
+                width = _resolve_width("data", kw, uniform_predicted_data)
+            add_with_gap(_wrap_cell(cell, width, row_height), 0.5, None)
         elif kind == "ground_truth_slices":
             cell = _build_slices_only_panel(
                 plot_data, title="GT", rescaler=rescaler, slice_grid_kwargs=slice_grid_kwargs

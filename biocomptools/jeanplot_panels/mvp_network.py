@@ -38,6 +38,11 @@ class MVPNetworkPanel(PlotPanel):
 
         from jeanplot.plots.mvp import measured_vs_predicted
 
+        extras = dict(self.extra_metrics or {})
+        er = getattr(mvp, "ermse_latent", None)
+        if er is not None:
+            extras.setdefault("eRMSE", er)
+
         measured_vs_predicted(
             ax=ax,
             measured=mvp.measured,
@@ -45,7 +50,7 @@ class MVPNetworkPanel(PlotPanel):
             kernel_predicted=None,
             rescaler=mvp.rescaler,
             title=self.title,
-            extra_metrics=self.extra_metrics,
+            extra_metrics=extras,
             noise_floor=self.noise_floor,
             grid_measured=mvp.grid_measured if self.show_grid_overlay else None,
             grid_predicted=mvp.grid_predicted if self.show_grid_overlay else None,

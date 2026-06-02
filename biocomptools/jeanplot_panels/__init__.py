@@ -74,6 +74,7 @@ def _bio_helpers() -> dict:
     from biocomptools.toollib.figuremakers.datasetsummary import (
         build_figure_metadata,
         build_prediction_pipeline,
+        build_uniform_prediction,
         extract_model_metadata,
         extract_prediction_config,
         filter_compatible,
@@ -84,6 +85,7 @@ def _bio_helpers() -> dict:
 
     return {
         "build_prediction_pipeline": build_prediction_pipeline,
+        "build_uniform_prediction": build_uniform_prediction,
         "filter_compatible": filter_compatible,
         "predicted_stats": predicted_stats,
         "extract_model_metadata": extract_model_metadata,

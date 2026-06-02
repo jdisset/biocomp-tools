@@ -25,6 +25,9 @@ class FluoDensitiesPanel(PlotPanel):
     lpl_threshold: float = 200
     lpl_compression: float = 0.4
     rawdata2: Any | None = None
+    # figure-level null-point summary text; off when composed with other panels
+    # (it is stamped at figure y=0.97 and collides with subtitles/other titles).
+    show_summary: bool = True
 
     plot_data: None = None
     axes_size: Any = Field(default_factory=lambda: __import__(
@@ -52,6 +55,7 @@ class FluoDensitiesPanel(PlotPanel):
             lpl_compression=self.lpl_compression,
             zero_threshold=self.zero_threshold,
             n_inputs=self.n_inputs,
+            show_summary=self.show_summary,
         )
         if self.title:
             ax.set_title(self.title, **self.title_kwargs)
