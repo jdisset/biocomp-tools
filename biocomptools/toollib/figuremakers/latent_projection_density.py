@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from biocomp.datautils import DataRescaler, IdentityRescaler
 from jeanplot.plots.ticks import powers_of_ten
-from jeanplot.plots.smooth_kernel import knn_grid as _canonical_knn_grid
+from jeanplot.plots.smooth_kernel import smooth_grid as _canonical_knn_grid
 from biocomp.plotutils import PlotData
 from biocomp.plotutils import histogram as _canonical_histogram
 from biocomptools.logging_config import get_logger

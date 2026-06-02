@@ -71,15 +71,14 @@ def _kernel_smoother_lattice(
     latent_x: NdArray,
     latent_y: NdArray,
     params: Dict[str, Any],
-) -> Tuple[NdArray, NdArray, NdArray, SplatField]:
-    """Splat-smoothed mean/stdev/n_eff on the lattice (flattened to match
-    ``make_hypercube``). The returned field is the SSOT geometry."""
+) -> Tuple[NdArray, NdArray, NdArray]:
+    """Splat-smoothed (mean, stdev, n_eff) flattened to match ``make_hypercube``."""
     field = fit_lattice(latent_x, latent_y, params)
     n = field.n_outs
     mean = field.lattice('mean').reshape(-1, n)
     stdev = field.lattice('std').reshape(-1, n)
     n_eff = np.nan_to_num(field._n_eff).reshape(-1, 1)
-    return mean, stdev, n_eff, field
+    return mean, stdev, n_eff
 
 
 def lattice_kernel_predict(

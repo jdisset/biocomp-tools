@@ -385,9 +385,7 @@ def _compute_data_kernel_state(
         xmax=params['hypercube_max'],
     )
 
-    gt_mean, gt_stdev, n_eff, _gt_field = _kernel_smoother_lattice(
-        deduped_x, deduped_gt, params,
-    )
+    gt_mean, gt_stdev, n_eff = _kernel_smoother_lattice(deduped_x, deduped_gt, params)
 
     mu_interp = kernel_lattice_interp(gt_mean, params, d)
     sigma_interp = kernel_lattice_interp(gt_stdev, params, d)

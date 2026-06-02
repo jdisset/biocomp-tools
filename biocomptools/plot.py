@@ -225,7 +225,7 @@ def warm_caches_for_figure(figure):
     # task uses a `<<: !include` merge (as `tasks/mvp_panel.yaml` does).
     # Always work on a fresh copy here.
     try:
-        from jeanplot.plots.smooth_kernel import knn_grid
+        from jeanplot.plots.smooth_kernel import smooth_grid
         from biocomp.plotutils import LazyPlotData
         for tc in figure.plot_tasks:
             try:
@@ -253,7 +253,7 @@ def warm_caches_for_figure(figure):
                     continue
                 xlims = kw.get("xlims") or [0.0, 0.65]
                 ylims = kw.get("ylims") or xlims
-                knn_grid(rescaler.fwd(x_raw), rescaler.fwd(y_raw), xlims, ylims, grid_resolution=250)
+                smooth_grid(rescaler.fwd(x_raw), rescaler.fwd(y_raw), xlims, ylims, grid_resolution=250)
             except Exception:
                 continue
     except Exception:
