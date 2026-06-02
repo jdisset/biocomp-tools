@@ -280,7 +280,6 @@ def draw_horizontal_heatmap_to_ax(
             ref_icon,
             max_w_inch=margin_inch if margin_inch > 0 else None,
             max_h_inch=row_inch,
-            dpi=cfg.dpi,
             margin=0.85,
         )
         for i, cond in enumerate(row_order):
@@ -398,7 +397,6 @@ def draw_class_summary_to_ax(
             ref_v,
             max_w_inch=(comp_pos.width * fw) / n_conds,
             max_h_inch=comp_pos.height * fh,
-            dpi=cfg.dpi,
             margin=0.9,
         )
         for ci, members in enumerate(cond_members):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import re
 from pathlib import Path
 from typing import Annotated, Iterator
@@ -12,6 +11,8 @@ from typing import Annotated, Iterator
 import pikepdf
 from dracon import Arg, dracon_program
 from pydantic import BaseModel
+
+from biocomp.metric_utils import ermse
 
 METRIC_COLUMNS: list[str] = [
     "grid_nrmse",
@@ -27,7 +28,7 @@ METRIC_COLUMNS: list[str] = [
     "model_rmse_latent",
     "kernel_rmse_latent",
     "excess_rmse_latent",
-    "bias_mag_latent",
+    "ermse_latent",
     "model_r_squared_latent",
     "kernel_r_squared_latent",
     "model_nrmse_local",
@@ -122,18 +123,21 @@ def _row_from_pdf(pdf_path: Path, predictions_root: Path) -> dict | None:
     }
     for k in METRIC_COLUMNS:
         row[k] = metrics.get(k)
+    if row.get("ermse_latent") is None:
+        row["ermse_latent"] = metrics.get("bias_mag_latent")  # pre-rename PDFs
     _backfill_excess(row)
     return row
 
 
 def _backfill_excess(row: dict) -> None:
-    """Derive excess_rmse_latent / bias_mag_latent for PDFs that predate them."""
+    """Derive excess_rmse_latent / ermse_latent for PDFs that predate them."""
     m, k = row.get("model_rmse_latent"), row.get("kernel_rmse_latent")
-    if row.get("excess_rmse_latent") is None and m is not None and k is not None:
+    if m is None or k is None:
+        return
+    if row.get("excess_rmse_latent") is None:
         row["excess_rmse_latent"] = m - k
-    if row.get("bias_mag_latent") is None and m is not None and k is not None:
-        diff = m * m - k * k
-        row["bias_mag_latent"] = math.sqrt(diff) if diff > 0 else 0.0
+    if row.get("ermse_latent") is None:
+        row["ermse_latent"] = ermse(m * m, k * k)
 
 
 def iter_prediction_pdfs(predictions_root: Path) -> Iterator[Path]:

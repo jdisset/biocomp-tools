@@ -7,7 +7,6 @@ import math
 from pathlib import Path
 from typing import Annotated, Literal
 
-import matplotlib as mpl
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
@@ -102,7 +101,15 @@ class ShapleyDetailConfig(BaseModel):
     # Colormap
     norm_type: Literal["symlog", "linear"] = "symlog"
     linthresh: float = 5.0
-    symlog_linthresh: float = 5.0
+    symlog_linthresh: Annotated[
+        float, Arg(help="symlog linear band half-width; lower = stronger log compression")
+    ] = 5.0
+    symlog_base: Annotated[
+        float, Arg(help="symlog log base; higher = stronger compression of large values")
+    ] = 10.0
+    symlog_linscale: Annotated[
+        float, Arg(help="colormap decades given to the linear band; lower = more room for the log region")
+    ] = 1.0
     vmax_scale: float = 1.5
     vmax_percentile: float = 95.0
     heatmap_cmap: str = "bc_blrd_r"
@@ -217,10 +224,7 @@ class ShapleyDetailConfig(BaseModel):
 
     @model_validator(mode="after")
     def _link_linthresh(self):
-        # Back-compat: paper_plots_v2 uses `symlog_linthresh`; figuremaker
-        # uses `linthresh`. Sync if user only set one.
-        if self.symlog_linthresh != 5.0 and self.linthresh == 5.0:
-            object.__setattr__(self, "linthresh", self.symlog_linthresh)
+        object.__setattr__(self, "linthresh", self.symlog_linthresh)
         return self
 
 
@@ -351,7 +355,10 @@ class ShapleyDetailFigure(BaseModel):
             vmax = 1.0
         cmap_obj = maybe_truncate(sc.heatmap_cmap, sc.cmap_truncate)
         if sc.norm_type == "symlog":
-            color_norm = SymLogNorm(linthresh=sc.linthresh, vmin=-vmax, vmax=vmax, base=10)
+            color_norm = SymLogNorm(
+                linthresh=sc.linthresh, linscale=sc.symlog_linscale,
+                vmin=-vmax, vmax=vmax, base=sc.symlog_base,
+            )
         else:
             color_norm = TwoSlopeNorm(vcenter=0, vmin=-vmax, vmax=vmax)
 
@@ -364,15 +371,28 @@ class ShapleyDetailFigure(BaseModel):
         n_gs_rows = 4 if sc.show_tension else 2
         if parent_ax is not None:
             fig = parent_ax.get_figure()
-            pos = parent_ax.get_position()
+            _p = parent_ax.get_position()
+            px0, py0, pw, ph = float(_p.x0), float(_p.y0), float(_p.width), float(_p.height)
             parent_ax.set_axis_off()
+            pos = True
+            def _mx(x: float) -> float:
+                return px0 + x * pw
+            def _my(y: float) -> float:
+                return py0 + y * ph
             _gs_bounds = dict(
-                figure=fig, left=pos.x0, right=pos.x1, top=pos.y1, bottom=pos.y0,
+                figure=fig,
+                left=_mx(sc.left), right=_mx(sc.right),
+                top=_my(sc.top), bottom=_my(sc.bottom),
             )
         else:
             fig = plt.figure(figsize=figsize)
             fig.subplots_adjust(top=sc.top, bottom=sc.bottom, left=sc.left, right=sc.right)
             pos = None
+            ph = 1.0
+            def _mx(x: float) -> float:
+                return x
+            def _my(y: float) -> float:
+                return y
             _gs_bounds = {}
         gs = gridspec.GridSpec(
             n_gs_rows, 2,
@@ -385,6 +405,7 @@ class ShapleyDetailFigure(BaseModel):
         ax.set_xlim(-0.5, n - 0.5)
         ax.set_ylim(n - 0.5, -0.5)
         ax.set_aspect("equal")
+        ax.set_box_aspect(1.0)  # force a perfectly square matrix box
 
         margin = sc.cell_margin
         pad = sc.subcell_pad
@@ -750,7 +771,7 @@ class ShapleyDetailFigure(BaseModel):
                 )
 
         heat_pos = ax.get_position()
-        ax_cb = fig.add_axes([heat_pos.x0, sc.colorbar_y, heat_pos.width, sc.colorbar_height])
+        ax_cb = fig.add_axes([heat_pos.x0, _my(sc.colorbar_y), heat_pos.width, sc.colorbar_height * ph])
         sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=color_norm)
         sm.set_array([])
         cb = fig.colorbar(sm, cax=ax_cb, orientation="horizontal")
@@ -805,24 +826,13 @@ class ShapleyDetailFigure(BaseModel):
                    fontsize=sc.colorbar_annotation_fontsize, color=sc.helps_color,
                    fontweight="bold")
 
-        if pos is not None:
-            cx = (pos.x0 + pos.x1) / 2
-            def _remap_y(y: float) -> float:
-                return pos.y0 + y * (pos.y1 - pos.y0)
-            fig.text(cx, _remap_y(sc.title_y), sc.title_text,
-                     fontsize=sc.title_fontsize, fontweight="bold", ha="center")
-            fig.text(cx, _remap_y(sc.subtitle_y),
-                     sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
-                     ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
-            fig.text(cx, _remap_y(sc.footnote_y), sc.footnote_text,
-                     ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
-                     style="italic")
-        else:
-            fig.suptitle(sc.title_text, fontsize=sc.title_fontsize, fontweight="bold", y=sc.title_y)
-            fig.text(0.5, sc.subtitle_y,
-                     sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
-                     ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
-            fig.text(0.5, sc.footnote_y, sc.footnote_text,
-                     ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
-                     style="italic")
+        cx = _mx(0.5)
+        fig.text(cx, _my(sc.title_y), sc.title_text,
+                 fontsize=sc.title_fontsize, fontweight="bold", ha="center")
+        fig.text(cx, _my(sc.subtitle_y),
+                 sc.subtitle_template.format(loss_type=loss_label or "n/a", view=view_name),
+                 ha="center", fontsize=sc.subtitle_fontsize, color=sc.subtitle_color)
+        fig.text(cx, _my(sc.footnote_y), sc.footnote_text,
+                 ha="center", fontsize=sc.footnote_fontsize, color=sc.footnote_color,
+                 style="italic")
         return fig

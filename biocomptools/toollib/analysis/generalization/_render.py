@@ -96,20 +96,25 @@ def composite_icon(
     return result
 
 
+# matplotlib OffsetImage renders an image at `zoom * img_px / 72` inches
+# (the points-per-inch baseline), independent of figure or savefig dpi.
+_POINTS_PER_INCH = 72.0
+
+
 def fit_zoom(
     img: np.ndarray,
     *,
     max_w_inch: float | None,
     max_h_inch: float | None,
-    dpi: float,
     margin: float = 0.9,
 ) -> float:
+    """OffsetImage zoom that fits `img` within max_w_inch × max_h_inch."""
     h_px, w_px = img.shape[:2]
     candidates = []
     if max_w_inch is not None:
-        candidates.append(max_w_inch * dpi / w_px)
+        candidates.append(max_w_inch * _POINTS_PER_INCH / w_px)
     if max_h_inch is not None:
-        candidates.append(max_h_inch * dpi / h_px)
+        candidates.append(max_h_inch * _POINTS_PER_INCH / h_px)
     return min(candidates) * margin if candidates else margin
 
 
