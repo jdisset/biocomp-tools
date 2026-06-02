@@ -13,10 +13,13 @@ from biocomptools.logging_config import get_logger
 import biocomp.parameters as pr
 from biocomptools.toollib.datasources import DataSource
 from biocomptools.toollib.types import InputOrderElement
-from jeanplot.knn import get_gaussian_weighted_knn
-from jeanplot.plots.smooth_kernel import build_tree, knn_stats
 from biocomp.datautils import density_balanced_indices
-from scipy.interpolate import RegularGridInterpolator
+from biocomptools.toollib.kernel_floor import (
+    make_hypercube,
+    kernel_lattice_interp,
+    fit_lattice,
+    _kernel_smoother_lattice,
+)
 from biocomp.metric_utils import (
     grid_mse as compute_grid_mse,
     grid_r_squared as compute_grid_r_squared,
@@ -24,6 +27,7 @@ from biocomp.metric_utils import (
     grid_kl_divergence as compute_grid_kl,
     compute_nrmse,
     compute_nrmse_pointwise,
+    ermse,
     GridStatsFields,
 )
 from pathlib import Path
@@ -64,11 +68,7 @@ def _dks_save(data: Dict[str, Any], path: Path) -> None:
     arr_kwargs: Dict[str, Any] = {}
     scalar_kwargs: Dict[str, Any] = {}
     for k, v in data.items():
-        if k == 'iw':
-            idx, w = v
-            arr_kwargs['iw_idx'] = np.ascontiguousarray(idx, dtype=np.int32)
-            arr_kwargs['iw_w'] = np.ascontiguousarray(w, dtype=np.float32)
-        elif isinstance(v, np.ndarray):
+        if isinstance(v, np.ndarray):
             arr_kwargs[k] = v
         else:
             scalar_kwargs[k] = v
@@ -82,8 +82,7 @@ def _dks_save(data: Dict[str, Any], path: Path) -> None:
 def _dks_load(path: Path) -> Dict[str, Any]:
     with open(path, "rb") as fh:
         with np.load(fh, allow_pickle=False) as f:
-            out: Dict[str, Any] = {k: f[k] for k in f.files if k not in ('__scalars__', 'iw_idx', 'iw_w')}
-            out['iw'] = (f['iw_idx'], f['iw_w'])
+            out: Dict[str, Any] = {k: f[k] for k in f.files if k != '__scalars__'}
             out.update(_json.loads(str(f['__scalars__'])))
     return out
 
@@ -141,18 +140,6 @@ def reconstruct_from_flat(flat_values, shapes):
         result.append(flat_values[:, offset : offset + n].reshape(-1, *shape))
         offset += n
     return result
-
-
-def make_hypercube(ndim: int, res: int = 100, xmin: float = 0, xmax: float = 1) -> NdArray:
-    """Hypercube lattice with ``indexing='ij'`` so the flattened grid reshapes
-    naturally to ``(res, ..., res, n_outs)`` for ``RegularGridInterpolator``.
-    """
-    assert ndim > 0 and res > 0
-    grid = np.meshgrid(
-        *[np.linspace(xmin, xmax, res) for _ in range(ndim)],
-        indexing='ij',
-    )
-    return np.vstack([g.ravel() for g in grid]).T
 
 
 def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius=3.0):
@@ -237,58 +224,6 @@ def _knn_mean_var_neff(tree, grid, y, k, min_points, max_radius, sigma_in_radius
     variance[valid_rows] = variance_v
     n_eff[valid_rows] = n_eff_v
     return mean, variance, n_eff
-
-
-def kernel_lattice_interp(
-    grid_mean_latent: NdArray,
-    params: Dict[str, Any],
-    ndim: int,
-) -> RegularGridInterpolator:
-    """Linear interpolator over a flattened (res**ndim, n_outs) grid-mean
-    array, using the same lattice as ``make_hypercube``. SSOT for
-    evaluating kernel-smoother predictions at arbitrary points after
-    ``_calculate_grid_stats`` has produced the lattice means.
-    """
-    res = int(params['hypercube_res'])
-    arr = np.asarray(grid_mean_latent)
-    n_outs = arr.shape[-1] if arr.ndim > 1 else 1
-    grid_axes = tuple(
-        np.linspace(params['hypercube_min'], params['hypercube_max'], res)
-        for _ in range(ndim)
-    )
-    return RegularGridInterpolator(
-        grid_axes, arr.reshape(*([res] * ndim), n_outs),
-        method='linear', bounds_error=False, fill_value=np.nan,
-    )
-
-
-def _kernel_smoother_lattice(
-    latent_x: NdArray,
-    latent_y: NdArray,
-    grid: NdArray,
-    params: Dict[str, Any],
-) -> Tuple[NdArray, NdArray, NdArray, Tuple[NdArray, NdArray]]:
-    """Adaptive-sigma Gaussian-kNN smoother evaluated on the cube-view
-    lattice. Returns ``(mean, stdev, n_eff, (indices, norm_weights))``;
-    the ``iw`` tuple is reused for further ``knn_stats`` calls on
-    aligned y arrays.
-    """
-    tree = build_tree(latent_x)
-    indices, raw_weights = get_gaussian_weighted_knn(
-        grid, tree=tree,
-        k=params['k'], min_points=params['min_points'],
-        adaptive_sigma=True, max_radius=params['radius'],
-        normed_w=False,
-    )
-    n_eff = np.nansum(raw_weights, axis=1, keepdims=True)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        norm_weights = raw_weights / n_eff
-    _, stdev, mean = knn_stats(
-        grid, latent_y, iw=(indices, norm_weights),
-        stats=['iw', 'std', 'mean'],
-        k=params['k'], min_points=params['min_points'],
-    )
-    return mean, stdev, n_eff, (indices, norm_weights)
 
 
 def validate_predict_at(v: Any) -> List[NdArray]:
@@ -388,10 +323,9 @@ def _calculate_single_network_stats(
         network_stats['rmse'] = float(np.sqrt(mse))
 
         if enable_gridstats:
-            grid_stats, _grid_cache = _calculate_grid_stats(
-                latent_yhat, latent_gt, latent_x, gridstats_params
+            network_stats.update(
+                _calculate_grid_stats(latent_yhat, latent_gt, latent_x, gridstats_params)
             )
-            network_stats.update(grid_stats)
 
     return network_stats
 
@@ -451,8 +385,8 @@ def _compute_data_kernel_state(
         xmax=params['hypercube_max'],
     )
 
-    gt_mean, gt_stdev, n_eff, iw = _kernel_smoother_lattice(
-        deduped_x, deduped_gt, grid, params,
+    gt_mean, gt_stdev, n_eff, _gt_field = _kernel_smoother_lattice(
+        deduped_x, deduped_gt, params,
     )
 
     mu_interp = kernel_lattice_interp(gt_mean, params, d)
@@ -490,10 +424,10 @@ def _compute_data_kernel_state(
         'full_gt': full_gt,
         'd': d,
         'grid': grid,
+        'deduped_x': deduped_x,
         'gt_mean': gt_mean,
         'gt_stdev': gt_stdev,
         'n_eff': n_eff,
-        'iw': iw,
         'kernel_pred_full': kernel_pred_full,
         'sub_idx_in_valid': sub_idx_in_valid,
         'sub_finite_mask': sub_finite_mask,
@@ -509,12 +443,11 @@ def _calculate_grid_stats(
     latent_gt: NdArray,
     latent_x: NdArray,
     params: Dict[str, Any],
-) -> tuple[Dict[str, Any], NdArray]:
+) -> Dict[str, Any]:
     """Lattice-kernel grid stats + density-balanced kernel/model RMSE.
 
-    Returns ``(stats, grid)`` so the caller can reuse the lattice for
-    follow-on computations (e.g. split-half nRMSE). The lattice itself is
-    built on de-duplicated data so the adaptive-sigma kernel can't divide
+    Returns the stats dict; the lattice is in ``grid_xy_latent``. The lattice
+    is built on de-duplicated data so the adaptive-sigma kernel can't divide
     by zero; the density-balanced subsample for ``kernel_rmse_latent`` /
     ``model_rmse_latent`` runs on the original (non-deduped) data.
 
@@ -540,10 +473,10 @@ def _calculate_grid_stats(
     valid_x_mask = ds['valid_x_mask']
     unique_idx = ds['unique_idx']
     grid = ds['grid']
+    deduped_x = ds['deduped_x']
     gt_mean = ds['gt_mean']
     gt_stdev = ds['gt_stdev']
     n_eff = ds['n_eff']
-    iw = ds['iw']
     full_gt = ds['full_gt']
     kernel_pred_full = ds['kernel_pred_full']
     sub_idx_in_valid = ds['sub_idx_in_valid']
@@ -556,11 +489,12 @@ def _calculate_grid_stats(
     full_yhat = np.asarray(latent_yhat[valid_x_mask])
     deduped_yhat = full_yhat[unique_idx]
 
-    yhat_stdev, yhat_mean = knn_stats(
-        grid, deduped_yhat, iw=iw,
-        stats=['std', 'mean'],
-        k=params['k'], min_points=params['min_points'],
-    )
+    # yhat reuses the gt lattice geometry (same deduped_x + params), so the two
+    # smoothed surfaces share a normaliser and compare cell-for-cell.
+    n_outs = gt_mean.shape[1]
+    yhat_field = fit_lattice(deduped_x, deduped_yhat, params)
+    yhat_mean = yhat_field.lattice('mean').reshape(-1, n_outs)
+    yhat_stdev = yhat_field.lattice('std').reshape(-1, n_outs)
 
     sq_error = (yhat_mean - gt_mean) ** 2
     local_var = gt_stdev ** 2
@@ -594,10 +528,9 @@ def _calculate_grid_stats(
             model_rmse_latent / kernel_rmse_latent
             if kernel_rmse_latent > 0 else nan
         )
-        # Excess error over the kernel-smoother noise floor - single-pair,
-        # noise-invariant scalars for cross-network model comparison.
-        excess_rmse_latent = model_rmse_latent - kernel_rmse_latent
-        bias_mag_latent = float(np.sqrt(max(0.0, mse_model - mse_kernel)))
+        # Excess RMSE over the kernel-smoother noise floor: sqrt(max(0, mMSE -
+        # kMSE)). Noise-invariant scalar for cross-network model comparison.
+        ermse_latent = ermse(mse_model, mse_kernel)
         if var_gt > 0:
             kernel_r_squared_latent = 1.0 - mse_kernel / var_gt
             model_r_squared_latent = 1.0 - mse_model / var_gt
@@ -628,7 +561,7 @@ def _calculate_grid_stats(
         kernel_rmse_latent = model_rmse_latent = ratio_rmse = nan
         kernel_r_squared_latent = model_r_squared_latent = ratio_r_squared = nan
         kernel_nrmse_local = model_nrmse_local = kratio = nan
-        excess_rmse_latent = bias_mag_latent = nan
+        ermse_latent = nan
         subsample_indices = np.array([], dtype=np.intp)
 
     return {
@@ -643,8 +576,7 @@ def _calculate_grid_stats(
         'kernel_rmse_latent': kernel_rmse_latent,
         'model_rmse_latent': model_rmse_latent,
         'ratio_rmse': ratio_rmse,
-        'excess_rmse_latent': excess_rmse_latent,
-        'bias_mag_latent': bias_mag_latent,
+        'ermse_latent': ermse_latent,
         'kernel_r_squared_latent': kernel_r_squared_latent,
         'model_r_squared_latent': model_r_squared_latent,
         'ratio_r_squared': ratio_r_squared,
@@ -659,7 +591,7 @@ def _calculate_grid_stats(
         'grid_yhat_mean_latent': np.asarray(yhat_mean),
         'grid_yhat_stdev_latent': np.asarray(yhat_stdev),
         'grid_n_eff': np.asarray(n_eff).ravel(),
-    }, grid
+    }
 
 
 class NetworkPrediction(GridStatsFields, DataSource):
