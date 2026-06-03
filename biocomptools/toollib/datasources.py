@@ -57,7 +57,7 @@ def truncated_path(path: str | Path, max_len=50) -> str:
     if isinstance(path, Path):
         path = path.as_posix()
     if len(path) > max_len:
-        return '...' + path[-max_len:]
+        return "..." + path[-max_len:]
     return path
 
 
@@ -79,7 +79,7 @@ class DataSource(BaseModel):
     metadata: dict = {}
 
     def get_data(self) -> List[PlotData]:
-        raise NotImplementedError('Subclasses must implement get_data')
+        raise NotImplementedError("Subclasses must implement get_data")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -92,7 +92,7 @@ config = cm.config
 class DBSource(DataSource, NetworkSet):
     input_order: Optional[InputOrderSpec] = None
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     def show_data(cls, values):
         logger.debug(f"DBSource being constructed with {values=}")
         return values
@@ -119,20 +119,35 @@ class DBSource(DataSource, NetworkSet):
 
         assert isinstance(actual_network, bc.network.Network)
 
+        # Stamp the selector's asserted cell line onto the built network, mirroring
+        # build_data_manager (the training path). Without this a context-conditioned
+        # model evaluates every network as the default cell type (HEK), so cell-type
+        # transfer is invisible at eval time.
+        cell_type = next(
+            (
+                ndp.cell_type
+                for ndp in self.content
+                if ndp.network_name == network.name and getattr(ndp, "cell_type", None)
+            ),
+            None,
+        )
+        if cell_type is not None:
+            actual_network.metadata["cell_type"] = cell_type
+
         datafile_path = Path(self.path_prefix / datafile.file).expanduser().resolve()
         metadata = self.metadata.copy()
 
-        metadata['network'] = network.model_dump()
-        metadata['network_name'] = network.name
-        metadata['network_info'] = network.network_info
-        metadata['built_network'] = actual_network
-        metadata['datasource_type'] = 'database'
+        metadata["network"] = network.model_dump()
+        metadata["network_name"] = network.name
+        metadata["network_info"] = network.network_info
+        metadata["built_network"] = actual_network
+        metadata["datasource_type"] = "database"
 
-        metadata['datafile'] = datafile.model_dump()
-        metadata['file_stem'] = datafile_path.stem
+        metadata["datafile"] = datafile.model_dump()
+        metadata["file_stem"] = datafile_path.stem
 
         if not datafile_path.exists():
-            raise ValueError(f'Data file {datafile_path} does not exist for network {network.name}')
+            raise ValueError(f"Data file {datafile_path} does not exist for network {network.name}")
 
         def get_XY(_):
             logger.debug(f"DBSource: getting XY data for network {network.name}")
@@ -158,13 +173,11 @@ class DBSource(DataSource, NetworkSet):
             recipe_content = network.recipe.content or {}
             recipe_order = None
             if isinstance(recipe_content, dict):
-                axes = recipe_content.get('input_axes')
+                axes = recipe_content.get("input_axes")
                 if axes:
-                    recipe_order = [
-                        ax['name'] if isinstance(ax, dict) else ax for ax in axes
-                    ]
+                    recipe_order = [ax["name"] if isinstance(ax, dict) else ax for ax in axes]
                 else:
-                    recipe_order = recipe_content.get('input_order')
+                    recipe_order = recipe_content.get("input_order")
             if recipe_order:
                 effective_input_order = recipe_order
                 logger.debug(
@@ -183,11 +196,11 @@ class DBSource(DataSource, NetworkSet):
             logger.exception(e)
             return None
 
-        pdata.metadata['pretty_inputs'] = make_pretty_input_names(
-            metadata['network_info']['cotx'],
+        pdata.metadata["pretty_inputs"] = make_pretty_input_names(
+            metadata["network_info"]["cotx"],
             pdata.input_names,
         )
-        pdata.metadata['ordered_input_names'] = '-'.join(pdata.input_names)
+        pdata.metadata["ordered_input_names"] = "-".join(pdata.input_names)
 
         return pdata
 
@@ -195,13 +208,13 @@ class DBSource(DataSource, NetworkSet):
     def networks_and_datafiles(self):
         data = self.get_networks_and_data()
         if not data:
-            msg = f'No data found for {self.content}'
+            msg = f"No data found for {self.content}"
             raise ValueError(msg)
         return data
 
     def get_data(self) -> List[PlotData]:
         res = []
-        for n, f in maybetqdm(self.networks_and_datafiles, desc='Loading data'):
+        for n, f in maybetqdm(self.networks_and_datafiles, desc="Loading data"):
             try:
                 d = self.data_from_network(n, f)
             except Exception as e:
@@ -255,16 +268,18 @@ class FileSource(DataSource):
         assert recipe_path.exists(), f"Recipe file not found: {recipe_path}"
 
         content = recipe_path.read_text()
-        if '!biocomp.recipe.Recipe' in content and not content.strip().startswith('!biocomp'):
-            idx = content.find('!biocomp.recipe.Recipe')
+        if "!biocomp.recipe.Recipe" in content and not content.strip().startswith("!biocomp"):
+            idx = content.find("!biocomp.recipe.Recipe")
             content = content[idx:]
 
         recipe_data = dracon.loads(content)
         if isinstance(recipe_data, Recipe):
             recipe = recipe_data
         else:
-            is_legacy = any('sources' in c for c in recipe_data.get('content', []))
-            recipe = dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
+            is_legacy = any("sources" in c for c in recipe_data.get("content", []))
+            recipe = (
+                dict_to_recipe(recipe_data) if is_legacy else Recipe.model_validate(recipe_data)
+            )
 
         if self.input_axes is not None:
             recipe.input_axes = self.input_axes
@@ -284,9 +299,9 @@ class FileSource(DataSource):
                 # survives slicing mode.
                 if self.input_axes is not None:
                     given = [
-                        ax if isinstance(ax, InputAxis) else InputAxis.model_validate(
-                            {"name": ax} if isinstance(ax, str) else ax
-                        )
+                        ax
+                        if isinstance(ax, InputAxis)
+                        else InputAxis.model_validate({"name": ax} if isinstance(ax, str) else ax)
                         for ax in self.input_axes
                     ]
                     given_names = {ax.name for ax in given}
@@ -304,11 +319,11 @@ class FileSource(DataSource):
         assert data_path.exists(), f"Data file not found: {data_path}"
 
         metadata = self.metadata.copy()
-        metadata['network_name'] = network.name
-        metadata['built_network'] = network
-        metadata['datasource_type'] = 'file'
-        metadata['file_stem'] = data_path.stem
-        metadata['network_info'] = {'cotx': {}}
+        metadata["network_name"] = network.name
+        metadata["built_network"] = network
+        metadata["datasource_type"] = "file"
+        metadata["file_stem"] = data_path.stem
+        metadata["network_info"] = {"cotx": {}}
 
         def get_XY(_):
             logger.debug(f"FileSource: getting XY data for network {network.name}")
@@ -326,13 +341,13 @@ class FileSource(DataSource):
             metadata=metadata,
         )
 
-        pdata.metadata['pretty_inputs'] = pdata.input_names
-        pdata.metadata['ordered_input_names'] = '-'.join(pdata.input_names)
+        pdata.metadata["pretty_inputs"] = pdata.input_names
+        pdata.metadata["ordered_input_names"] = "-".join(pdata.input_names)
         return pdata
 
     def get_data(self) -> List[PlotData]:
         res = []
-        for network in maybetqdm(self._networks, desc='Loading data from files'):
+        for network in maybetqdm(self._networks, desc="Loading data from files"):
             pdata = self._data_from_network(network)
             if pdata is not None:
                 res.append(pdata)

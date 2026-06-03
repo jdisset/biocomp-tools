@@ -27,29 +27,29 @@ def extract_network_info(net: bc.network.Network) -> dict:
         dependent_outputs = tuple(sorted(net.get_dependent_output_proteins()))
 
         info = {
-            'markers': markers,
-            'all_outputs': all_outputs,
-            'output_proteins': all_outputs,
-            'dependent_outputs': dependent_outputs,
-            'nb_inputs': net.nb_inputs,
-            'nb_outputs': net.nb_outputs,
-            'sequestron_type': 'unknown',
-            'architecture': 'unknown',
-            'ern_names': [],
-            'uorf_values': (),
-            'uorf_names': [],
-            'genes': [],
-            'cotx': [],
-            'cotx_str': '',
-            'ern_names_str': '',
-            'all_parts': {},
+            "markers": markers,
+            "all_outputs": all_outputs,
+            "output_proteins": all_outputs,
+            "dependent_outputs": dependent_outputs,
+            "nb_inputs": net.nb_inputs,
+            "nb_outputs": net.nb_outputs,
+            "sequestron_type": "unknown",
+            "architecture": "unknown",
+            "ern_names": [],
+            "uorf_values": (),
+            "uorf_names": [],
+            "genes": [],
+            "cotx": [],
+            "cotx_str": "",
+            "ern_names_str": "",
+            "all_parts": {},
         }
 
     # Always ensure nb_inputs and nb_outputs are included (for backward compatibility)
-    if 'nb_inputs' not in info:
-        info['nb_inputs'] = net.nb_inputs
-    if 'nb_outputs' not in info:
-        info['nb_outputs'] = net.nb_outputs
+    if "nb_inputs" not in info:
+        info["nb_inputs"] = net.nb_inputs
+    if "nb_outputs" not in info:
+        info["nb_outputs"] = net.nb_outputs
 
     return info
 
@@ -85,8 +85,8 @@ class Experiment(BiocompDB, table=True):
 
     @staticmethod
     def sample_is_control(sample: dict) -> bool:
-        if 'control' in sample:
-            return sample['control']
+        if "control" in sample:
+            return sample["control"]
         return False
 
     def safe_copy(self):
@@ -107,7 +107,7 @@ class Experiment(BiocompDB, table=True):
         self,
         path_prefix: Optional[str] = None,
         recipe_subpath: Optional[str] = None,
-        recipe_ext='.recipe.json5',
+        recipe_ext=".recipe.json5",
         **kwargs,
     ) -> List["Recipe"]:
         """
@@ -117,7 +117,7 @@ class Experiment(BiocompDB, table=True):
         recipes = []
         if not self.content:
             raise ValueError("Experiment content is empty")
-        for s in self.content['samples']:
+        for s in self.content["samples"]:
             if self.sample_is_control(s):
                 continue
             basepath = Path(self.path)
@@ -131,13 +131,19 @@ class Experiment(BiocompDB, table=True):
             else:
                 filepath = basepath / f"{s['recipe']}{recipe_ext}"
 
-            recipe = Recipe.from_file(
-                filepath, xp_name=self.name, path_prefix=path_prefix, **kwargs
-            )
-            assert recipe.content.get('name') == s['recipe'], (
-                f"Recipe name mismatch {recipe.content.get('name')} != {s['recipe']}"
-            )
-            assert s['recipe'] not in recipes, f"Duplicate recipe name {s['recipe']}"
+            # A single malformed recipe must not void the whole experiment's
+            # recipe list (which would break datafile->recipe linking for every
+            # valid sibling). Skip and log instead.
+            try:
+                recipe = Recipe.from_file(
+                    filepath, xp_name=self.name, path_prefix=path_prefix, **kwargs
+                )
+                assert recipe.content.get("name") == s["recipe"], (
+                    f"Recipe name mismatch {recipe.content.get('name')} != {s['recipe']}"
+                )
+            except Exception as e:
+                logger.warning(f"Skipping recipe '{s['recipe']}' in {self.name}: {e}")
+                continue
             recipes.append(recipe)
         return recipes
 
@@ -195,9 +201,9 @@ class DataFile(BiocompDB, table=True):
         assert filepath.exists(), f"File {filepath} does not exist"
 
         ext = filepath.suffix
-        if ext == '.csv':
+        if ext == ".csv":
             return pd.read_csv(filepath)
-        elif ext == '.parquet':
+        elif ext == ".parquet":
             return pd.read_parquet(filepath)
         else:
             raise ValueError(f"Unsupported file extension {ext}")
@@ -254,7 +260,7 @@ class Network(BiocompDB, table=True):
         network_info = extract_network_info(network)
         logger.debug(f"Network markers: {network_info['markers']}")
         if recipe_name is None:
-            recipe_name = 'unknown'
+            recipe_name = "unknown"
         obj = cls(
             name=f"{recipe_name}_{'-'.join(network_info['markers'])}",
             recipe_name=recipe_name,
@@ -274,15 +280,15 @@ class Network(BiocompDB, table=True):
 
     @property
     def built(self):
-        if self.__pydantic_private__ is None or self.__pydantic_private__.get('_network') is None:
+        if self.__pydantic_private__ is None or self.__pydantic_private__.get("_network") is None:
             return False
         return self._network is not None
 
-    def build(self, lib, use_cache=config.paths.cache.networks, force=False, inverse='all'):
+    def build(self, lib, use_cache=config.paths.cache.networks, force=False, inverse="all"):
         if self.built and not force:
             return self._network
         # recipe = self.recipe  # should lazy load
-        recipe = self.__dict__.get('recipe')
+        recipe = self.__dict__.get("recipe")
         if recipe is None:
             logger.error(f"Recipe for network {self.name} not found. Skipping build.")
             return None
@@ -304,7 +310,7 @@ class Network(BiocompDB, table=True):
                 self._network = net._network
                 return self._network
 
-        all_net_names = '\n   - '.join([net.name for net in recipe_networks])
+        all_net_names = "\n   - ".join([net.name for net in recipe_networks])
         msg = f"""Network "{self.name}" not found after building recipe "{self.recipe.name}".
             Recipe yielded the following networks: {all_net_names}"""
         logger.error(msg)
@@ -318,7 +324,7 @@ class Network(BiocompDB, table=True):
         fresh_info = extract_network_info(self._network)
         titlestr = f"{fresh_info.get('architecture', 'unknown')}"
         titlestr = " ".join([x.capitalize() for x in titlestr.split()])
-        ern_names = fresh_info.get('ern_names', [])
+        ern_names = fresh_info.get("ern_names", [])
         if ern_names:
             titlestr = f"{titlestr} ({', '.join(ern_names)})"
         return titlestr
@@ -368,33 +374,35 @@ class Recipe(BiocompDB, table=True):
         self_json = json.dumps(self.content, sort_keys=True)
         xxhash_obj = xxhash.xxh128()
         xxhash_obj.update(str(self_json).encode())
-        return base64.b32encode(xxhash_obj.digest()).decode().rstrip('=')
+        return base64.b32encode(xxhash_obj.digest()).decode().rstrip("=")
 
     @staticmethod
     def from_file(file_path, xp_name=None, path_prefix=None, **kwargs):
         filepath = Path(file_path) if path_prefix is None else Path(path_prefix) / file_path
         filepath = Path(filepath).expanduser().resolve()
 
-        is_yaml = filepath.name.endswith('.recipe.yaml')
+        is_yaml = filepath.name.endswith(".recipe.yaml")
         if is_yaml:
             import dracon
             from biocomp.library import LibraryContext, load_lib
+
             with LibraryContext.with_library(load_lib()):
                 bcr = dracon.load(str(filepath))
-            content = bcr.model_dump(mode='python')
+            content = bcr.model_dump(mode="python")
             # recipe 'name' in the stored dict should be the local recipe short-name
-            content['name'] = filepath.name.removesuffix('.recipe.yaml')
-            display_name = bcr.display_name or content['name']
+            content["name"] = filepath.name.removesuffix(".recipe.yaml")
+            display_name = bcr.display_name or content["name"]
         else:
             import json5
-            with open(filepath, 'r') as f:
+
+            with open(filepath, "r") as f:
                 content = json5.load(f)
-            display_name = content.get('display_name') or content.get('name', filepath.stem)
+            display_name = content.get("display_name") or content.get("name", filepath.stem)
 
         if xp_name is not None:
             name = f"{xp_name}_{content.get('name', filepath.stem)}"
         else:
-            name = content.get('name', filepath.stem)
+            name = content.get("name", filepath.stem)
 
         return Recipe(
             name=name,
@@ -414,7 +422,7 @@ class Recipe(BiocompDB, table=True):
         self,
         lib=None,
         use_cache=config.paths.cache.networks,
-        inverse='all',
+        inverse="all",
         add_to_self=False,
     ) -> list["Network"]:
         """
@@ -442,8 +450,8 @@ class Recipe(BiocompDB, table=True):
                 from biocomp.recipe import dict_to_recipe
 
                 if isinstance(self.content, dict) and "content" in self.content:
-                    first = self.content['content'][0] if self.content['content'] else {}
-                    if isinstance(first, dict) and 'units' in first:
+                    first = self.content["content"][0] if self.content["content"] else {}
+                    if isinstance(first, dict) and "units" in first:
                         # new-style dict (e.g., from YAML via model_dump): validate directly
                         recipe_obj = Recipe.model_validate(self.content)
                     else:
@@ -463,7 +471,7 @@ class Recipe(BiocompDB, table=True):
                 else:
                     raise ValueError(f"Unexpected recipe content type: {type(self.content)}")
 
-                invert = inverse == 'all' or inverse is True
+                invert = inverse == "all" or inverse is True
                 return recipe_to_networks(recipe_obj, br.ALL_RULES, invert=invert)
 
         try:
@@ -485,12 +493,12 @@ class Recipe(BiocompDB, table=True):
 
         for net in networks:
             network_info = extract_network_info(net)
-            network_info['recipe_name'] = self.name
+            network_info["recipe_name"] = self.name
 
-            markers = network_info['markers']
+            markers = network_info["markers"]
             unique_name = f"{self.name}_{'-'.join(markers)}" if markers else self.name
             net.name = unique_name
-            net.metadata['recipe_name'] = self.name
+            net.metadata["recipe_name"] = self.name
 
             network = Network(
                 name=unique_name,
@@ -561,7 +569,7 @@ class DataSet(BiocompDB, table=True):
             pair_strings.append(f"{pair.network_name}:{pair.datafile_path}")
 
         content = "\n".join(pair_strings)
-        hash_val = pronounceable_hash32(content.encode('utf-8'))
+        hash_val = pronounceable_hash32(content.encode("utf-8"))
 
         return cls(name=name, hash=hash_val)
 
@@ -575,6 +583,7 @@ class NetworkDataPair(BiocompDB, table=True):
 
     _weight: float = 1.0  # runtime-only, not in DB
     _dataset_name: str | None = None  # runtime-only, tracks parent dataset for hyperopt
+    _cell_type: str | None = None  # runtime-only, overrides the recipe cell_type at build
 
     @property
     def weight(self) -> float:
@@ -583,6 +592,14 @@ class NetworkDataPair(BiocompDB, table=True):
     @weight.setter
     def weight(self, value: float):
         self._weight = value
+
+    @property
+    def cell_type(self) -> str | None:
+        return self._cell_type
+
+    @cell_type.setter
+    def cell_type(self, value: str | None):
+        self._cell_type = value
 
     @property
     def dataset_name(self) -> str | None:
@@ -737,18 +754,18 @@ def create_trained_model_from_file(
     file_path = Path(file_path).expanduser().resolve()
     base_dir = base_dir or Path(config.paths.root)
 
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         biocomp_model = pickle.load(f)
 
-    metadata = getattr(biocomp_model, 'metadata', {})
-    ts_meta = metadata.get('training_set', {})
-    ts_content = ts_meta.get('content', []) if isinstance(ts_meta, dict) else []
-    ts_name = ts_meta.get('name', None) if isinstance(ts_meta, dict) else None
+    metadata = getattr(biocomp_model, "metadata", {})
+    ts_meta = metadata.get("training_set", {})
+    ts_content = ts_meta.get("content", []) if isinstance(ts_meta, dict) else []
+    ts_name = ts_meta.get("name", None) if isinstance(ts_meta, dict) else None
 
     training_set = [
         NetworkDataPair(**e)
         for e in ts_content
-        if isinstance(e, dict) and 'network_name' in e and 'datafile_path' in e
+        if isinstance(e, dict) and "network_name" in e and "datafile_path" in e
     ]
 
     training_dataset = None
@@ -766,7 +783,7 @@ def create_trained_model_from_file(
             for pair in training_set
         ]
 
-    model_name = getattr(biocomp_model, 'signature', file_path.stem)
+    model_name = getattr(biocomp_model, "signature", file_path.stem)
     try:
         rel_path = file_path.relative_to(base_dir).as_posix()
     except ValueError:
@@ -775,9 +792,9 @@ def create_trained_model_from_file(
     trained_model = TrainedModel(
         name=model_name,
         path_to_model=rel_path,
-        run_name=metadata.get('run_name'),
-        experiment_name=metadata.get('experiment_name'),
-        end_loss=metadata.get('training_loss'),
+        run_name=metadata.get("run_name"),
+        experiment_name=metadata.get("experiment_name"),
+        end_loss=metadata.get("training_loss"),
         training_config=metadata,
         training_dataset_name=training_dataset.name if training_dataset else None,
         training_dataset_hash=training_dataset.hash if training_dataset else None,

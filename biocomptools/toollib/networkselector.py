@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
+import re
 from biocomp.library import PartsLibrary
 from biocomp.datautils import get_network_XY
 from tqdm import tqdm
@@ -79,6 +80,24 @@ def apply_regex_filter(query, column, pattern: str | Regex | iRegex):
         return query.where(column == pattern)
 
 
+def _calibration_version_key(calibration_name: str) -> tuple[int, str]:
+    # "latest" = highest `v<N>` token in the name (ignoring the trailing content
+    # hash after the last '-'); falls back to lexicographic (so date-tagged
+    # calibrations still order correctly).
+    base = calibration_name.rsplit("-", 1)[0]
+    versions = [int(n) for n in re.findall(r"v(\d+)", base)]
+    return (max(versions) if versions else -1, calibration_name)
+
+
+def pick_latest_datafile(datafiles: list[DataFile]) -> DataFile | None:
+    if not datafiles:
+        return None
+    return max(
+        datafiles,
+        key=lambda df: (*_calibration_version_key(df.calibration_name), -df.priority),
+    )
+
+
 class NetworkSelector(BaseModel):
     """
     Manually writing a NetworkAndData can be very annoying and verbose and error-prone.
@@ -89,8 +108,14 @@ class NetworkSelector(BaseModel):
     recipe_name: Optional[str | Regex | iRegex] = None
     recipe_display_name: Optional[str | Regex | iRegex] = None
     calibration_name: Optional[str | Regex | iRegex] = None
+    # Pick the highest-version calibration's datafile per matched recipe (instead
+    # of priority/best). Composes with calibration_name: latest among its matches.
+    latest_calibration: bool = False
     output_name: Optional[str] = None
     weight: float = 1.0
+    # Asserts the cell line of the selected data; stamped onto net.metadata["cell_type"]
+    # at build, overriding the recipe default (which is HEK293FT when unset).
+    cell_type: Optional[str] = None
 
     def get_networkdata_ids(self, session) -> List[NetworkDataPair]:
         """
@@ -143,7 +168,9 @@ class NetworkSelector(BaseModel):
 
             if self.recipe_display_name:
                 logger.debug(f"Applying recipe_display_name filter: {self.recipe_display_name}")
-                query = apply_regex_filter(query, col(Recipe.display_name), self.recipe_display_name)
+                query = apply_regex_filter(
+                    query, col(Recipe.display_name), self.recipe_display_name
+                )
 
             logger.debug(f"Final network query: {query}")
 
@@ -169,7 +196,7 @@ class NetworkSelector(BaseModel):
                 networks = [
                     network
                     for network in networks
-                    if network.network_info['dependent_outputs'][0].upper()
+                    if network.network_info["dependent_outputs"][0].upper()
                     == self.output_name.upper()
                 ]
 
@@ -202,22 +229,25 @@ class NetworkSelector(BaseModel):
                             logger.error(f"Database error while querying datafiles: {str(e)}")
                             logger.exception(e)
                             continue
+                    elif self.latest_calibration:
+                        with session.no_autoflush:
+                            datafiles = list(network.recipe.data_files)
                     else:
                         logger.debug("No calibration filter, getting best datafile")
                         with session.no_autoflush:
                             try:
-                                datafiles = [network.recipe.get_best_datafile()]
-                                if datafiles[0] is None:
-                                    logger.warning(
-                                        f"No best datafile found for recipe: {network.recipe_name}"
-                                    )
-                                    continue
+                                best = network.recipe.get_best_datafile()
                             except Exception as e:
                                 logger.error(
                                     f"Error getting best datafile for recipe {network.recipe_name}: {str(e)}"
                                 )
                                 logger.exception(e)
                                 continue
+                            datafiles = [best] if best is not None else []
+
+                    if self.latest_calibration:
+                        latest = pick_latest_datafile(datafiles)
+                        datafiles = [latest] if latest is not None else []
 
                     if not datafiles:
                         logger.error(f"No datafile for {network.recipe_name}. Skipping")
@@ -232,6 +262,7 @@ class NetworkSelector(BaseModel):
                                 network_name=network.name, datafile_path=datafile.file
                             )
                             ndp.weight = self.weight
+                            ndp.cell_type = self.cell_type
                             logger.debug(f"NetworkDataId created: {ndp}")
                             if ndp.network is None:
                                 ndp.network = network
@@ -291,7 +322,7 @@ class NetworkSelector(BaseModel):
                 )
                 available_recipes = session.exec(exp_query).all()
                 if available_recipes:
-                    recipe_names = '\n- '.join(list({r.name for r in available_recipes}))
+                    recipe_names = "\n- ".join(list({r.name for r in available_recipes}))
                     suggestions.append(
                         f"Available recipes for experiment '{self.experiment_name}':\n- {recipe_names}"
                     )
@@ -309,7 +340,7 @@ class NetworkSelector(BaseModel):
                     else:
                         # Show similar experiment names
                         all_exp_query = select(Experiment.name).distinct()
-                        all_experiments = '\n- '.join(
+                        all_experiments = "\n- ".join(
                             list({row for row in session.exec(all_exp_query).all()})
                         )
                         suggestions.append(
@@ -344,7 +375,7 @@ class NetworkSelector(BaseModel):
                 if available_recipes:
                     # Make recipe info distinct by (name, experiment)
                     recipe_info = list({(r.name, r.experiment.name) for r in available_recipes})
-                    recipe_lines = '\n- '.join(
+                    recipe_lines = "\n- ".join(
                         [f"{name} (experiment: {exp})" for name, exp in recipe_info]
                     )
                     filter_desc = []
@@ -412,14 +443,14 @@ class NetworkSet(BaseModel):
     def db_session(self):
         return Session(self._engine)
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     def content_field_was_skipped(cls, values):
         # accept shorthand notation without content=...
         if isinstance(values, list):
-            return {'content': values}
+            return {"content": values}
         return values
 
-    @field_validator('content', mode='before')
+    @field_validator("content", mode="before")
     @classmethod
     def route_content(cls, v: Any, info):
         logger.debug(
@@ -438,14 +469,14 @@ class NetworkSet(BaseModel):
             if isinstance(obj_in_list, (NetworkDataPair, NetworkSelector, NetworkSet)):
                 return obj_in_list
 
-            if hasattr(obj_in_list, 'network_name') and hasattr(obj_in_list, 'datafile_path'):
+            if hasattr(obj_in_list, "network_name") and hasattr(obj_in_list, "datafile_path"):
                 return obj_in_list
 
             if isinstance(obj_in_list, Mapping):
                 dict_obj = dict(obj_in_list)
-                if 'datafile_path' in dict_obj:
+                if "datafile_path" in dict_obj:
                     return NetworkDataPair(**dict_obj)
-                elif 'content' in dict_obj:  # NetworkSet-like structure
+                elif "content" in dict_obj:  # NetworkSet-like structure
                     return NetworkSet(**dict_obj)
                 else:
                     return NetworkSelector(**dict_obj)
@@ -532,7 +563,7 @@ class NetworkSet(BaseModel):
         return res
 
     def model_dump(self, **kwargs):
-        return super().model_dump(exclude={'recipe.networks'}, **kwargs)
+        return super().model_dump(exclude={"recipe.networks"}, **kwargs)
 
     def __len__(self):
         return len(self.content)
@@ -549,7 +580,7 @@ class NetworkSetOperation(NetworkSet):
 
     sets: List[NetworkSet] = []
     # exclude from export:
-    model_config = ConfigDict(exclude={'sets'})
+    model_config = ConfigDict(exclude={"sets"})
 
     def _update_name_with_operator(self, operator: str):
         """Update name with given operator between set names."""
@@ -557,7 +588,7 @@ class NetworkSetOperation(NetworkSet):
             return
         if any(s.name is None for s in self.sets):
             return
-        name = ''
+        name = ""
         for i, s in enumerate(self.sets):
             name += f"({s.name})"
             if i < len(self.sets) - 1:
@@ -572,7 +603,7 @@ class NetworkSetUnion(NetworkSetOperation):
 
     allow_duplicates: bool = False
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def normalize_list_input_to_sets(cls, data: Any) -> Any:
         logger.debug(f"{cls.__name__}.normalize_list_input_to_sets received: {data}")
@@ -582,7 +613,7 @@ class NetworkSetUnion(NetworkSetOperation):
         return data
 
     def update_name(self):
-        self._update_name_with_operator(' U ')
+        self._update_name_with_operator(" U ")
 
     def run_selectors(self, session=None):
         try:
@@ -612,7 +643,7 @@ class NetworkSetIntersection(NetworkSetOperation):
 
     pass
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def normalize_list_input_to_sets(cls, data: Any) -> Any:
         logger.debug(f"{cls.__name__}.normalize_list_input_to_sets received: {data}")
@@ -622,7 +653,7 @@ class NetworkSetIntersection(NetworkSetOperation):
         return data
 
     def update_name(self):
-        self._update_name_with_operator(' ∩ ')
+        self._update_name_with_operator(" ∩ ")
 
     def run_selectors(self, session=None):
         try:
@@ -740,10 +771,10 @@ class CleanupFilter(NetworkFilter):
 
     def _find_twice_same_rec_with_different_rna(self, net_info, lib):
         appears_twice = []
-        all_parts = net_info['all_parts'].values()
+        all_parts = net_info["all_parts"].values()
         for i, p1 in enumerate(all_parts):
             for pname, pcat in p1.items():
-                if pcat == 'ERN_recog_site_5p':
+                if pcat == "ERN_recog_site_5p":
                     # make sure this part doesn't appear in any other TU
                     for j, p2 in enumerate(all_parts):
                         if i == j:
@@ -763,13 +794,13 @@ class CleanupFilter(NetworkFilter):
 
     def _find_missing_complementary_parts(self, net_info, lib):
         missing = {}
-        if 'all_parts' not in net_info or not net_info['all_parts']:
+        if "all_parts" not in net_info or not net_info["all_parts"]:
             return missing
-        all_parts = net_info['all_parts'].values()
+        all_parts = net_info["all_parts"].values()
 
         def find_missing_part(part_name, part_col, complementary_col, valid_types=None):
             if valid_types is None:
-                valid_types = ['ERN']
+                valid_types = ["ERN"]
 
             rows = lib.sequestrons[part_col].eq(part_name) & lib.sequestrons.type.isin(valid_types)
             if rows.any():
@@ -785,16 +816,16 @@ class CleanupFilter(NetworkFilter):
         for tp in all_parts:
             parts = set(tp.keys())
             for p in parts:
-                find_missing_part(p, 'positive_part', 'negative_part')
-                find_missing_part(p, 'negative_part', 'positive_part')
+                find_missing_part(p, "positive_part", "negative_part")
+                find_missing_part(p, "negative_part", "positive_part")
 
         return missing
 
     def _find_invalid_sequestron_types(self, net_info, lib, valid_types=None):
         invalid_pairs = []
         if valid_types is None:
-            valid_types = ['ERN']
-        if 'all_parts' not in net_info or not net_info['all_parts']:
+            valid_types = ["ERN"]
+        if "all_parts" not in net_info or not net_info["all_parts"]:
             return invalid_pairs
         invalid_types = set(lib.sequestrons.type.unique()) - set(valid_types)
         invalid_rows = lib.sequestrons.type.isin(invalid_types)
@@ -802,7 +833,7 @@ class CleanupFilter(NetworkFilter):
         for _, row in lib.sequestrons[invalid_rows].iterrows():
             involved_parts = set([row.positive_part, row.negative_part])
             invalid_parts.append(involved_parts)
-        all_parts = net_info['all_parts'].values()
+        all_parts = net_info["all_parts"].values()
         all_parts = set([p for tp in all_parts for p in tp.keys()])
         for ip in invalid_parts:
             if ip.issubset(all_parts):
@@ -813,16 +844,16 @@ class CleanupFilter(NetworkFilter):
         invalid_parts = []
         if invalid_categories is None:
             invalid_categories = [
-                'inverted_seq',
-                'rcb_rec_5p',
-                'rcb_rec_3p',
-                'recombinase_bwd',
-                'recombinase_fwd',
-                'ERN_recog_site_3p',
+                "inverted_seq",
+                "rcb_rec_5p",
+                "rcb_rec_3p",
+                "recombinase_bwd",
+                "recombinase_fwd",
+                "ERN_recog_site_3p",
             ]
-        if 'all_parts' not in net_info or not net_info['all_parts']:
+        if "all_parts" not in net_info or not net_info["all_parts"]:
             return invalid_parts
-        all_parts = net_info['all_parts'].values()
+        all_parts = net_info["all_parts"].values()
         for tp in all_parts:
             for p, c in tp.items():
                 if c in invalid_categories:
@@ -879,18 +910,18 @@ class UorfFilter(NetworkFilter):
         # get uORF values from network info
         network_info = netdata.network.network_info
 
-        if not network_info or 'uorf_values' not in network_info:
+        if not network_info or "uorf_values" not in network_info:
             return False
 
         # network_info['uorf_values'] should be list[tuple[int, int]]
         # we want single ERN networks
-        if len(network_info['uorf_values']) != 1:
+        if len(network_info["uorf_values"]) != 1:
             logger.debug(
                 f"Unexpected uORF values for {netdata.network}: {network_info['uorf_values']}. Is it a single ERN?"
             )
             return False
 
-        uorf_values = tuple(network_info['uorf_values'][0])
+        uorf_values = tuple(network_info["uorf_values"][0])
 
         return uorf_values in self.uorf_values
 
@@ -917,13 +948,18 @@ def build_data_manager(
 
     networks, datafiles = zip(*net_data, strict=True)
     ndp_weights = {ndp.network_name: ndp.weight for ndp in dataset.content}
+    ndp_cell_types = {
+        ndp.network_name: ndp.cell_type for ndp in dataset.content if ndp.cell_type is not None
+    }
 
     data = []
     actual_networks = []
     weights = []
 
     inverse = data_conf.build_inverse
-    for n, f in tqdm(list(zip(networks, datafiles, strict=True)), desc='Building networks & loading data'):
+    for n, f in tqdm(
+        list(zip(networks, datafiles, strict=True)), desc="Building networks & loading data"
+    ):
         n.build(lib, inverse=inverse)
         network = n._network
         if isinstance(network, list):
@@ -935,9 +971,11 @@ def build_data_manager(
 
         for net in network:
             data.append(get_network_XY(net, path_prefix / f.file))
-            net.metadata['data_file'] = f.file
-            net.metadata['calibration_name'] = f.calibration.name
-            net.metadata['recipe_name'] = f.recipe_name
+            net.metadata["data_file"] = f.file
+            net.metadata["calibration_name"] = f.calibration.name
+            net.metadata["recipe_name"] = f.recipe_name
+            if n.name in ndp_cell_types:
+                net.metadata["cell_type"] = ndp_cell_types[n.name]
             actual_networks.append(net)
             weights.append(ndp_weights.get(n.name, 1.0))
 
