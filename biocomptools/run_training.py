@@ -5,7 +5,7 @@ from biocomptools.optimtools import (
     run_optimization_program,
     Logger,
 )
-from biocomptools.modelmodel import BiocompModel, get_shared_params
+from biocomptools.modelmodel import BiocompModel, get_shared_params, purify_config
 from biocomptools.trainutils import (
     get_best_smoothed_loss_replicate_id,
     get_latest_avg_loss,
@@ -147,6 +147,8 @@ class TrainingProgram(BaseOptimizationProgram):
             "data_config": dman.data_cfg.model_dump(),
         }
 
+        from biocomp.context import derive_context_values
+
         self._metadata.update(
             {
                 "training_id": self.training_id,
@@ -161,6 +163,10 @@ class TrainingProgram(BaseOptimizationProgram):
                 "data_conf": self.data_conf,
                 "data_manager_info": dataman_info,
                 "final_model_dump": self._modeldump,
+                # cell types this model knows = those in its training data (NOT a global
+                # constant). Persisted so prediction/warm-start rebuild a codebook-aligned
+                # value->index map; an unseen cell type falls back to the default row.
+                "context_values": derive_context_values(dman.get_networks()),
             }
         )
 
@@ -177,10 +183,32 @@ class TrainingProgram(BaseOptimizationProgram):
         assert self._training_dman is not None
         stack = self._training_dman.build_compute_stack(self.compute_conf)
         assert self.training_conf.seed is not None
+        from biocomp.context import (
+            derive_context_values,
+            infer_context_values_from_params,
+            grow_context_codebook,
+        )
+
         key = jax.random.PRNGKey(self.training_conf.seed)
         fresh_params = stack.init(key)
         merged = overlay_shared_params(fresh_params, pretrained.shared_params)
         logger.info(f"Overlaid shared params from pretrained model (sig={pretrained.signature})")
+
+        # The overlay would shrink the cell_type codebook back to the pretrained size.
+        # Rebuild it at the new (larger) size, copying the pretrained rows by value so a
+        # warm-started model GROWS its codebook for new cell types instead of losing them.
+        assert self._training_dman is not None
+        target_values = derive_context_values(self._training_dman.get_networks())
+        src_values = pretrained.metadata.get("context_values") or infer_context_values_from_params(
+            pretrained.shared_params
+        )
+        grow_context_codebook(
+            merged,
+            pretrained.shared_params,
+            src_values,
+            target_values,
+            jax.random.fold_in(key, 0xCE11),
+        )
 
         self._metadata["init_from_model"] = self.init_from_model
         self._metadata["init_from_model_signature"] = pretrained.signature
@@ -333,7 +361,7 @@ def create_replicate_model(
         local_metadata["logger_metrics"] = make_json_ready(rep_metrics)
 
     model = BiocompModel(
-        compute_config=compute_conf,
+        compute_config=purify_config(compute_conf),
         rescaler=rescaler,
         shared_params=tree_to_np(shared_params),
         metadata=make_json_ready(local_metadata),

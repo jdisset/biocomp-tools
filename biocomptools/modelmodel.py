@@ -22,6 +22,45 @@ logger = get_logger(__name__)
 lib = load_lib()
 
 
+def _find_unpicklable(obj, path="model", seen=None, depth=0) -> str:
+    """Walk an object graph to the first attribute pickle can't serialize, returning
+    its dotted path (e.g. a stray module ref). Used to turn 'cannot pickle module'
+    into an actionable location."""
+    import types
+
+    if seen is None:
+        seen = set()
+    if id(obj) in seen or depth > 50:
+        return ""
+    seen.add(id(obj))
+    if isinstance(obj, types.ModuleType):
+        return f"{path}  (<module '{obj.__name__}'>)"
+    try:
+        pickle.dumps(obj)
+        return ""
+    except Exception:
+        pass
+    children: list[tuple[str, object]] = []
+    if isinstance(obj, dict):
+        children = [(f"{path}[{k!r}]", v) for k, v in obj.items()]
+    elif isinstance(obj, (list, tuple, set)):
+        children = [(f"{path}[{i}]", v) for i, v in enumerate(obj)]
+    else:
+        d = getattr(obj, "__dict__", None)
+        if d:
+            children += [(f"{path}.{k}", v) for k, v in d.items()]
+        for k in getattr(obj, "model_fields", {}) or {}:
+            try:
+                children.append((f"{path}.{k}", getattr(obj, k)))
+            except Exception:
+                continue
+    for cpath, cval in children:
+        hit = _find_unpicklable(cval, cpath, seen, depth + 1)
+        if hit:
+            return hit
+    return f"{path}  ({type(obj).__name__}, no unpicklable child found)"
+
+
 def _hash_array(hasher, arr):
     arr = np.ascontiguousarray(arr) if isinstance(arr, np.ndarray) else np.asarray(arr)
     hasher.update(np.array(arr.shape, dtype=np.int64).tobytes())
@@ -46,6 +85,18 @@ def _model_hash(compute_config, rescaler, params: pr.ParameterTree) -> bytes:
         elif isinstance(val, (int, float)):
             hasher.update(np.array([val]).tobytes())
     return hasher.digest()
+
+
+CfgT = TypeVar("CfgT", bound=BaseModel)
+
+
+def purify_config(cfg: CfgT) -> CfgT:
+    """Rebuild a pydantic config as pure Python so a saved model stays picklable.
+    Dracon construction can leave Dracontainer wrappers (list/dict subclasses whose
+    metadata holds a module ref) inside config kwargs, and pickle rejects them. This
+    round-trips through the same `model_dump(mode="json")` that `_model_hash` trusts,
+    so the model signature is identical before and after."""
+    return type(cfg).model_validate(cfg.model_dump(mode="json"))
 
 
 def load_params(maybe_path):
@@ -148,8 +199,11 @@ class BiocompModel(ArbitraryModel):
 
     def save(self, path):
         """save model to file"""
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
+        try:
+            with open(path, "wb") as f:
+                pickle.dump(self, f)
+        except (TypeError, pickle.PicklingError) as e:
+            raise type(e)(f"{e}\n  unpicklable at: {_find_unpicklable(self)}") from e
 
     @property
     def signature(self):
@@ -357,15 +411,25 @@ class NetworkModel(BaseModel):
     def update_params(self):
         """update parameters from model and initialize local parameters"""
         from jax.random import PRNGKey
-        from biocomp.context import CONTEXT_EMBEDDINGS, _codebook_means_path
+        from biocomp.context import (
+            CONTEXT_EMBEDDINGS,
+            _codebook_means_path,
+            infer_context_values_from_params,
+        )
 
         assert self._stack is not None
         has_context = bool(CONTEXT_EMBEDDINGS) and all(
-            _codebook_means_path(ce.name) in self.model.shared_params
-            for ce in CONTEXT_EMBEDDINGS
+            _codebook_means_path(ce.name) in self.model.shared_params for ce in CONTEXT_EMBEDDINGS
+        )
+        # Map eval networks against THIS model's known cell types (so the rebuilt index
+        # array lines up with the trained codebook; an unseen cell type -> default row).
+        ctx_values = self.model.metadata.get("context_values") or (
+            infer_context_values_from_params(self.model.shared_params) if has_context else None
         )
         try:
-            init_params = self._stack.init(PRNGKey(0), allow_create_context=has_context)
+            init_params = self._stack.init(
+                PRNGKey(0), allow_create_context=has_context, context_values=ctx_values
+            )
         except Exception as e:
             logger.error(f"error initializing stack: {e}")
             logger.error(f"networks: {self.network}")
