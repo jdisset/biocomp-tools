@@ -147,8 +147,6 @@ class TrainingProgram(BaseOptimizationProgram):
             "data_config": dman.data_cfg.model_dump(),
         }
 
-        from biocomp.context import derive_context_values
-
         self._metadata.update(
             {
                 "training_id": self.training_id,
@@ -163,45 +161,67 @@ class TrainingProgram(BaseOptimizationProgram):
                 "data_conf": self.data_conf,
                 "data_manager_info": dataman_info,
                 "final_model_dump": self._modeldump,
-                # cell types this model knows = those in its training data (NOT a global
-                # constant). Persisted so prediction/warm-start rebuild a codebook-aligned
+                # cell types this model knows = training values UNION any retained from a
+                # warm-start source (so a fine-tune never drops a cell type the pretrained
+                # model knew). Persisted so prediction/warm-start rebuild a codebook-aligned
                 # value->index map; an unseen cell type falls back to the default row.
-                "context_values": derive_context_values(dman.get_networks()),
+                "context_values": self._effective_context_values(),
             }
         )
 
+    def _pretrained(self):
+        """The warm-start source model, loaded once and cached (used by both
+        enrich_metadata and _prepare_init_params). None if not warm-starting."""
+        if self.init_from_model is None:
+            return None
+        if getattr(self, "_pretrained_model", None) is None:
+            self._pretrained_model = BiocompModel.load(self.init_from_model)
+        return self._pretrained_model
+
+    @staticmethod
+    def _pretrained_context_values(pre) -> dict[str, list[str]]:
+        from biocomp.context import infer_context_values_from_params
+
+        return pre.metadata.get("context_values") or infer_context_values_from_params(
+            pre.shared_params
+        )
+
+    def _effective_context_values(self) -> dict[str, list[str]]:
+        """Cell types the trained model will know: training values, UNION the warm-start
+        source's values (so a fine-tune never drops a pretrained cell type). SSOT for both
+        the persisted metadata and the codebook grow target."""
+        from biocomp.context import derive_context_values, union_context_values
+
+        assert self._training_dman is not None
+        train_values = derive_context_values(self._training_dman.get_networks())
+        pre = self._pretrained()
+        if pre is None:
+            return train_values
+        return union_context_values(self._pretrained_context_values(pre), train_values)
+
     def _prepare_init_params(self):
         """Build init_params from a pretrained model if init_from_model is set."""
-        if self.init_from_model is None:
+        pretrained = self._pretrained()
+        if pretrained is None:
             return None
         import jax
         from biocomp.parameters import overlay_shared_params
+        from biocomp.context import grow_context_codebook
 
         logger.info(f"Warm-starting from pretrained model: {self.init_from_model}")
-        pretrained = BiocompModel.load(self.init_from_model)
-
         assert self._training_dman is not None
         stack = self._training_dman.build_compute_stack(self.compute_conf)
         assert self.training_conf.seed is not None
-        from biocomp.context import (
-            derive_context_values,
-            infer_context_values_from_params,
-            grow_context_codebook,
-        )
 
         key = jax.random.PRNGKey(self.training_conf.seed)
         fresh_params = stack.init(key)
         merged = overlay_shared_params(fresh_params, pretrained.shared_params)
         logger.info(f"Overlaid shared params from pretrained model (sig={pretrained.signature})")
 
-        # The overlay would shrink the cell_type codebook back to the pretrained size.
-        # Rebuild it at the new (larger) size, copying the pretrained rows by value so a
-        # warm-started model GROWS its codebook for new cell types instead of losing them.
-        assert self._training_dman is not None
-        target_values = derive_context_values(self._training_dman.get_networks())
-        src_values = pretrained.metadata.get("context_values") or infer_context_values_from_params(
-            pretrained.shared_params
-        )
+        # overlay shrinks the codebook to the pretrained size; regrow it to src ∪ training
+        # (the union already in metadata), copying pretrained rows by value so none are lost.
+        src_values = self._pretrained_context_values(pretrained)
+        target_values = self._metadata.get("context_values") or self._effective_context_values()
         grow_context_codebook(
             merged,
             pretrained.shared_params,
