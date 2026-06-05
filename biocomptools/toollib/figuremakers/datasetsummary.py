@@ -626,7 +626,7 @@ def build_prediction_pipeline(
     return model, pred, pred.get_data_lazy()
 
 
-def reorder_plot_data_for_display(plot_data, input_order):
+def reorder_plot_data_for_display(plot_data, input_order, network_index: int = 0):
     """Apply the prediction's display `input_order` to a ground-truth PlotData.
 
     `input_order` is a *display* permutation (the same one handed to
@@ -636,9 +636,20 @@ def reorder_plot_data_for_display(plot_data, input_order):
     mirroring `extract_lazy_plot_data_from_network`. Without this, only the
     prediction panel honors `input_order` and the ground-truth panel keeps
     native axis order (the asymmetry this fixes).
+
+    Accepts the same per-network list-of-lists form as NetworkPrediction (a
+    single inner list broadcasts to all networks); `network_index` selects the
+    entry for this plot_data.
     """
     if input_order is None or plot_data is None:
         return plot_data
+
+    if isinstance(input_order, list) and input_order and all(
+        x is None or isinstance(x, list) for x in input_order
+    ):
+        input_order = input_order[0] if len(input_order) == 1 else input_order[network_index]
+        if input_order is None:
+            return plot_data
 
     from biocomp.plotutils import LazyPlotData, get_reordered_protein_names
 

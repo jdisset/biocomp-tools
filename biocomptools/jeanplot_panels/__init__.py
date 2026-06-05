@@ -18,6 +18,7 @@ from biocomptools.jeanplot_panels.heatmap import (
 )
 from biocomptools.jeanplot_panels.inner_nodes import InnerNodesPanel
 from biocomptools.jeanplot_panels.latent_density import LatentProjectionHistogramPanel
+from biocomptools.jeanplot_panels.metric_badge import MetricBadgePanel, RulePanel
 from biocomptools.jeanplot_panels.mvp_network import MVPNetworkPanel
 from biocomptools.jeanplot_panels.network_diagram import NetworkDiagramPanel
 from biocomptools.jeanplot_panels.pipelines import (
@@ -27,7 +28,6 @@ from biocomptools.jeanplot_panels.pipelines import (
     paper_per_network_pds,
 )
 from biocomptools.jeanplot_panels.quantile import QuantileCoveragePanel
-from biocomptools.jeanplot_panels.row_composer import build_per_network_row
 from biocomptools.jeanplot_panels.shapley import ShapleyDetailPanel
 from biocomptools.jeanplot_panels.uorf_matrix import UORFMatrixPanel
 from biocomptools.jeanplot_panels.voxel import (
@@ -44,6 +44,8 @@ JEANPLOT_PANEL_TYPES = [
     ActivationsPanel,
     EmptyPanel,
     ConstantTextPanel,
+    MetricBadgePanel,
+    RulePanel,
     FluoDensitiesPanel,
     HorizontalHeatmapPanel,
     ClassSummaryHeatmapPanel,
@@ -99,7 +101,6 @@ def _bio_helpers() -> dict:
 def get_jeanplot_panel_helpers() -> dict:
     """Return the helper map for dracon ``context=`` registration."""
     return {
-        "build_per_network_row": build_per_network_row,
         **PAPER_PIPELINE_HELPERS,
         **_bio_helpers(),
     }
@@ -125,6 +126,8 @@ __all__ = [
     "LatticeHeatmapPanel",
     "MVPDataHolder",
     "MVPNetworkPanel",
+    "MetricBadgePanel",
+    "RulePanel",
     "NetworkDiagramPanel",
     "NetworkPlotData",
     "PAPER_PIPELINE_HELPERS",
@@ -132,7 +135,6 @@ __all__ = [
     "ShapleyDetailPanel",
     "SmoothVoxelPanel",
     "UORFMatrixPanel",
-    "build_per_network_row",
     "get_jeanplot_panel_helpers",
     "load_paper_dataset",
     "network_plot_data",

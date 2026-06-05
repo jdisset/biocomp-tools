@@ -182,13 +182,12 @@ def test_network_plot_data_adapter_roundtrip():
 def test_default_types_registration_count():
     from biocomptools.jeanplot_panels import JEANPLOT_PANEL_TYPES
 
-    assert len(JEANPLOT_PANEL_TYPES) == 28
+    assert len(JEANPLOT_PANEL_TYPES) == 24
 
 
-def test_helpers_registration_includes_row_composer():
+def test_helpers_registration_includes_pipeline_helpers():
     from biocomptools.jeanplot_panels import get_jeanplot_panel_helpers
 
     helpers = get_jeanplot_panel_helpers()
-    assert "build_per_network_row" in helpers
     assert "filter_compatible" in helpers
     assert "build_figure_metadata" in helpers

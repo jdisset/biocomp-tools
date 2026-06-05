@@ -509,13 +509,18 @@ class NetworkSet(BaseModel):
             else:
                 assert isinstance(n, NetworkDataPair), f"Expected NetworkDataPair but got {type(n)}"
                 new_content.append(n)
-        if self.weight is not None:
-            for ndp in new_content:
-                ndp.weight = self.weight
-        self.content = new_content
+        self.content = self._apply_weight(new_content)
         logger.debug(f"Finished running selectors. Found {len(self.content)} items")
         if session is None:
             sess.close()
+
+    def _apply_weight(self, content):
+        # honor the `weight` field uniformly: if set, override every item's weight.
+        # SSOT for weight propagation — base + every run_selectors override calls this.
+        if self.weight is not None:
+            for ndp in content:
+                ndp.weight = self.weight
+        return content
 
     def get_networks_and_data(self, session=None) -> List[Tuple[Network, DataFile]]:
         sess = session or self.db_session
@@ -628,7 +633,7 @@ class NetworkSetUnion(NetworkSetOperation):
             new_content.extend(self.content)
             if not self.allow_duplicates:
                 new_content = list(set(new_content))
-            self.content = new_content
+            self.content = self._apply_weight(new_content)
             self.update_name()
         except Exception as e:
             logger.error(f"Error running union on {len(self.sets)} sets.")
@@ -665,7 +670,7 @@ class NetworkSetIntersection(NetworkSetOperation):
             for s in self.sets[1:]:
                 new_content = list(set(new_content) & set(s.content))
             new_content = list(set(new_content) & set(self.content))
-            self.content = new_content
+            self.content = self._apply_weight(new_content)
             self.update_name()
         except Exception as e:
             logger.error(f"Error running intersection on {len(self.sets)} sets.")
@@ -697,7 +702,7 @@ class NetworkSetDifference(NetworkSet):
             self.set2.run_selectors(session)
 
             new_content = list(set(self.set1.content) - set(self.set2.content))
-            self.content = new_content
+            self.content = self._apply_weight(new_content)
             self.update_name()
         except Exception as e:
             logger.error(
@@ -726,12 +731,9 @@ class NetworkFilter(NetworkSet):
     def run_selectors(self, session=None):
         try:
             self.source_set.run_selectors(session)
-            self.content = [
-                net_id for net_id in self.source_set.content if self.should_keep(net_id, session)
-            ]
-            if self.weight is not None:
-                for ndp in self.content:
-                    ndp.weight = self.weight
+            self.content = self._apply_weight(
+                [net_id for net_id in self.source_set.content if self.should_keep(net_id, session)]
+            )
             # Track dataset name for hyperopt weight mapping
             if self.name is not None:
                 for ndp in self.content:

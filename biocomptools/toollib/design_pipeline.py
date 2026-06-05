@@ -303,13 +303,18 @@ def build_design_result(
     )
 
 
-def invoke_design_summary_plot(result: Any, *, output_dir: str | Path) -> None:
-    from biocomptools.plot import PlotJob
+def invoke_design_summary_plot(
+    result: Any, *, output_dir: str | Path, job_path: str | Path
+) -> None:
+    """Render the per-design summary by composing the paper plot job at `job_path`.
 
-    invoke_fn = getattr(PlotJob, "invoke", None)
-    assert callable(invoke_fn), "PlotJob.invoke is required for design summary plotting"
-    invoke_fn(
-        'paper-jobs/plot/figures/autofig_design_summary.yaml',
-        result=result,
-        output_dir=str(output_dir),
-    )
+    The figure is a composition of paper panel primitives (!PaperSurface2D,
+    !PaperCircuit, !LatticeHeatmapPanel, ...); this injects the precomputed
+    `result` + `output_dir` into the job's context and renders. SSOT for layout /
+    cmap / sizing lives in the YAML + the paper theme, not here."""
+    import dracon
+    from jeanplot import make_plot_context
+
+    ctx = make_plot_context(extra={'result': result, 'output_dir': str(output_dir)})
+    cfg = dracon.load(str(job_path), context=ctx, enable_interpolation=True)
+    cfg['figure'].render(overwrite=True)

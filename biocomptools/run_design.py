@@ -131,6 +131,10 @@ class DesignProgram(BaseOptimizationProgram):
 
     plot_results: Annotated[bool, Arg(help='Generate result plots')] = True
     plot_n_samples: Annotated[int, Arg(help='Max samples to plot')] = 5000
+    summary_plot_job: Annotated[
+        Optional[str],
+        Arg(help='Paper plot-job YAML for per-design summaries (skipped if unset)'),
+    ] = None
     skip_evaluation: Annotated[
         bool, Arg(help='Skip post-optimization evaluation (useful for DataTarget)')
     ] = False
@@ -965,6 +969,9 @@ class DesignProgram(BaseOptimizationProgram):
         assert n_results > 0, "at least one design result required"
         run_name = self._run_name
         assert run_name is not None, "run_name required for diagnostic plots"
+        if self.summary_plot_job is None:
+            logger.warning("summary_plot_job unset — skipping per-design summary plots")
+            return
         logger.info(f"Generating diagnostic plots for {n_results} designs...")
 
         # convert dicts to DesignInput objects
@@ -1024,7 +1031,9 @@ class DesignProgram(BaseOptimizationProgram):
                     mode="design",
                 )
 
-            invoke_design_summary_plot(result, output_dir=design_dir)
+            invoke_design_summary_plot(
+                result, output_dir=design_dir, job_path=self.summary_plot_job
+            )
             return inp.recipe_hash
 
         max_workers = min(8, len(evaluated))
@@ -1033,12 +1042,23 @@ class DesignProgram(BaseOptimizationProgram):
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_generate_single_plot, ev): ev for ev in evaluated}
+            failed = 0
             for future in as_completed(futures):
-                recipe_hash = future.result()
-                completed += 1
-                logger.debug(f"Generated summary plot for {recipe_hash}")
+                try:
+                    recipe_hash = future.result()
+                    completed += 1
+                    logger.debug(f"Generated summary plot for {recipe_hash}")
+                except Exception:
+                    # Diagnostic plot only — design outputs are already committed to
+                    # disk. A render failure must not fail the whole run; log loudly.
+                    failed += 1
+                    logger.warning(
+                        f"Summary plot failed for {futures[future].input.recipe_hash} "
+                        "(design outputs unaffected)",
+                        exc_info=True,
+                    )
 
-        logger.info(f"Plot generation complete: {completed} succeeded")
+        logger.info(f"Plot generation complete: {completed} succeeded, {failed} failed")
 
 
 async def main_async():

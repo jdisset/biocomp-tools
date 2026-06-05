@@ -43,6 +43,37 @@ def load_paper_dataset(dataset_file: str) -> list[Any]:
     return filter_compatible(src.get_data())
 
 
+def load_recipe_dataset(experiment: str, recipe: str, calibration: str = "latest") -> list[Any]:
+    """Like ``load_paper_dataset`` but addressed by (experiment, recipe) instead of
+    a NetworkSet file. ``calibration='latest'`` (default) auto-picks the highest-
+    version calibration; any other value is an iRegex (e.g. ``v3_satfix``)."""
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.figuremakers.datasetsummary import filter_compatible
+    from biocomptools.toollib.networkselector import NetworkSelector, iRegex
+
+    sel = NetworkSelector(
+        experiment_name=experiment,
+        recipe_name=recipe,
+        latest_calibration=calibration == "latest",
+        calibration_name=None if calibration == "latest" else iRegex(calibration),
+    )
+    return filter_compatible(DBSource(content=[sel]).get_data())
+
+
+def load_figure_dataset(
+    dataset_file: str | None = None,
+    experiment: str | None = None,
+    recipe: str | None = None,
+    calibration: str = "latest",
+) -> list[Any]:
+    """Unified figure data source: a NetworkSet file, or an (experiment, recipe) pair."""
+    if dataset_file:
+        return load_paper_dataset(dataset_file)
+    if experiment and recipe:
+        return load_recipe_dataset(experiment, recipe, calibration)
+    raise ValueError("load_figure_dataset: provide either dataset_file or (experiment, recipe)")
+
+
 def network_plot_data(D: list[Any], index: int = 0, rescaler: Any = None) -> JeanplotPlotData:
     """Build a jeanplot ``PlotData`` for one network, optionally rescaling x/y."""
     return _biocomp_to_jeanplot(D[index], rescaler=rescaler)
@@ -76,11 +107,15 @@ def paper_data(
     from biocomptools.toollib.datasources import DBSource
     from biocomptools.toollib.networkselector import iRegex
 
-    src = DBSource(content=[{
-        "experiment_name": xp_name,
-        "recipe_name": rcp_name,
-        "calibration_name": iRegex(calibration_regex),
-    }])
+    src = DBSource(
+        content=[
+            {
+                "experiment_name": xp_name,
+                "recipe_name": rcp_name,
+                "calibration_name": iRegex(calibration_regex),
+            }
+        ]
+    )
     return src.get_data()[0]
 
 
@@ -102,11 +137,15 @@ def family_members(
 
     out = []
     for t in tokens:
-        src = DBSource(content=[{
-            "experiment_name": xp_name,
-            "recipe_name": iRegex(recipe_tmpl.format(tok=t)),
-            "calibration_name": iRegex(calibration_regex),
-        }])
+        src = DBSource(
+            content=[
+                {
+                    "experiment_name": xp_name,
+                    "recipe_name": iRegex(recipe_tmpl.format(tok=t)),
+                    "calibration_name": iRegex(calibration_regex),
+                }
+            ]
+        )
         ds = src.get_data()
         if output_name is not None:
             ds = [d for d in ds if d.output_name == output_name]
@@ -141,11 +180,15 @@ def paper_predict(
     from biocomptools.toollib.networkselector import iRegex
 
     model = BiocompModel.resolve(name=model_name, path=model_path)
-    src = DBSource(content=[{
-        "experiment_name": xp_name,
-        "recipe_name": rcp_name,
-        "calibration_name": iRegex(calibration_regex),
-    }])
+    src = DBSource(
+        content=[
+            {
+                "experiment_name": xp_name,
+                "recipe_name": rcp_name,
+                "calibration_name": iRegex(calibration_regex),
+            }
+        ]
+    )
     d_train = [src.get_data()[0]]
     pred = NetworkPrediction(
         predict_at=[d.x for d in d_train],
@@ -191,11 +234,15 @@ def matrix_predict(
     from biocomptools.toollib.networkprediction import NetworkPrediction
     from biocomptools.toollib.networkselector import NetworkSet, Regex
 
-    data = DBSource(content=[{
-        "experiment_name": Regex(xp),
-        "recipe_name": Regex(recipe),
-        "calibration_name": Regex(calib),
-    }])
+    data = DBSource(
+        content=[
+            {
+                "experiment_name": Regex(xp),
+                "recipe_name": Regex(recipe),
+                "calibration_name": Regex(calib),
+            }
+        ]
+    )
     matrix_pd = bundle_uorf_data(data.get_data())[0]
 
     if mode == "data" or (model_name is None and model_path is None):
@@ -225,7 +272,183 @@ def matrix_predict(
     return {"model": model, "D": pred.get_data_lazy(), "uorf_info": uorf_info}
 
 
+# --- replicate strip + metrics (per-topology row/table) ---------------------
+
+# Canonical token order for model names (e.g. "SNMLcLbrLbl").
+_MODEL_CANON = ["S", "N", "M", "Lc", "Lbr", "Lbl"]
+_MODEL_GREEDY = ["Lbl", "Lbr", "Lc", "S", "M", "N"]  # longest-first for parsing
+
+
+def normalize_model_name(slug: str | None) -> str | None:
+    """Reorder a model architecture code into canonical ``S,N,M,Lc,Lbr,Lbl`` order."""
+    if not slug:
+        return slug
+    found: set[str] = set()
+    i = 0
+    while i < len(slug):
+        for tok in _MODEL_GREEDY:
+            if slug[i : i + len(tok)] == tok:
+                found.add(tok)
+                i += len(tok)
+                break
+        else:
+            i += 1
+    return "".join(t for t in _MODEL_CANON if t in found) or slug
+
+
+def replicate_info_for(groups: dict, network_name: str | None) -> dict | None:
+    """Find the biological-replicate group a network belongs to.
+
+    ``groups`` is ``data/replicates/groups_metadata.yaml@groups`` (passed in by the
+    YAML job - the package stays path-free). Matches by ``recipe_name`` prefix of the
+    network's ``network_name``. Returns ``{group_id, runs, short_name, n}`` or ``None``.
+    """
+    if not groups or not network_name:
+        return None
+    for gid, g in groups.items():
+        for run in g.get("runs", []) or []:
+            rn = run.get("recipe_name")
+            if rn and network_name.startswith(rn):
+                runs = list(g.get("runs", []))
+                return {
+                    "group_id": gid,
+                    "runs": runs,
+                    "short_name": g.get("short_name"),
+                    "n": len(runs),
+                }
+    return None
+
+
+def load_replicate_runs(runs: list[dict]) -> list[Any]:
+    """One ground-truth ``PlotData`` per replicate run (selector-free; built from the
+    group's ``runs`` entries). Mirrors ``plot/replicates/replicate_surfaces.yaml``."""
+    import re
+
+    from biocomptools.toollib.datasources import DBSource
+    from biocomptools.toollib.networkselector import iRegex
+
+    content = [
+        {
+            "experiment_name": r["xp"],
+            "recipe_name": iRegex("^" + re.escape(r["recipe_name"]) + "$"),
+            "calibration_name": iRegex("^" + re.escape(r["calibration"]) + "$"),
+        }
+        for r in runs
+    ]
+    return DBSource(content=content).get_data()
+
+
+def rep_noise_for(
+    group_id: str | None,
+    runs: list[Any] | None = None,
+    short_name: str | None = None,
+) -> float | None:
+    """Replicate noise = biological ``ermse_pooled`` (bioRMSE) for a group.
+
+    Reads the replicate study's precomputed
+    ``$BIOCOMP_ROOT/Plots/replicates/<gid>/sigma_repeat.yaml`` when present; else,
+    if the group's loaded ``runs`` (ground-truth PlotData, e.g. from
+    ``load_replicate_runs``) are given, computes it on the fly via ``compute_group``
+    and caches the result back to that yaml. ``None`` when there's no precomputed
+    file and fewer than two biological replicates to compute from."""
+    import os
+
+    import yaml
+
+    root = os.environ.get("BIOCOMP_ROOT")
+    if not group_id:
+        return None
+    path = (
+        os.path.join(root, "Plots", "replicates", group_id, "sigma_repeat.yaml") if root else None
+    )
+    if path and os.path.exists(path):
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        v = ((data.get("biological") or {}).get("aggregate") or {}).get("ermse_pooled")
+        if v is not None:
+            return float(v)
+
+    if not runs:
+        return None
+    from biocomptools.toollib.replicate_metrics import (
+        compute_group,
+        runs_from_plotdata,
+        write_yaml,
+    )
+
+    rr = runs_from_plotdata(runs)
+    if len(rr) < 2:
+        return None
+    gm = compute_group(group_id, short_name or group_id, group_id, rr)
+    v = gm.aggregate("biological").get("ermse_pooled")
+    if v is None:
+        return None
+    if path:
+        write_yaml(gm, path)
+    return float(v)
+
+
+def build_topology_table(
+    rows: list[Any],
+    headers: list[str] | None = None,
+    column_widths: list[Any] | None = None,
+    *,
+    table_class: str = "topology-table",
+    header_height: float = 0.22,
+) -> Any:
+    """Assemble per-network row bodies into one aligned jeanplot ``Table`` — **structure
+    only**. All chrome (frame, grid, header band, row/column separators, dashing, rounded
+    corners) is a **jstyle cascade** keyed on the Table's ``style_class`` (``table_class``,
+    default ``topology-table``); the SSOT for those defaults is the
+    ``Table[style_class=topology-table]`` rule hierarchy in ``paper-jobs/common/theme.yaml``
+    (which deep-merges onto jeanplot's base ``Table`` rules in
+    ``jeanplot/resources/themes/default.yaml``). Override by layering a more-specific rule
+    or a job's ``_theme_overrides`` — never a wall of style kwargs here.
+
+    ``rows`` are the per-network row ``Container``s (each one's ``children`` is its column
+    cells, in canonical order); each cell drops straight in, so any component composes.
+    The ``Table`` owns column alignment (every row's cell *c* shares column *c*'s width);
+    ``column_widths`` entries are a number (fixed inches) or ``"auto"`` (natural max across
+    rows). The cascade top-aligns cells so the GT / prediction surfaces line up across
+    columns regardless of how many badges/captions sit under each.
+    """
+    from jeanplot.core.models import Size
+    from jeanplot.core.table import ColumnStyle, Table, TableCell
+
+    from biocomptools.jeanplot_panels.empty import ConstantTextPanel
+
+    body = [list(getattr(r, "children", r)) for r in rows]
+    ncols = max((len(r) for r in body), default=len(headers or []))
+    if ncols == 0:
+        return Table(data=[])
+
+    widths = list(column_widths or [])
+    widths += ["auto"] * (ncols - len(widths))
+    col_styles = [ColumnStyle(width=widths[c]) for c in range(ncols)]
+
+    data: list[list[Any]] = []
+    n_head = 0
+    if headers:
+        labels = list(headers[:ncols]) + [""] * (ncols - len(headers))
+        # bare header cells: just the label text; the cascade (table-header-cell /
+        # table-header-row rules) paints weight/color/band/underline.
+        data.append(
+            [
+                TableCell(children=[ConstantTextPanel(text=str(h), axes_size=Size(0.5, header_height))])
+                for h in labels
+            ]
+        )
+        n_head = 1
+    data.extend([[TableCell(children=[c]) for c in row] for row in body])
+
+    table = Table(data=data, column_styles=col_styles, header_rows=n_head)
+    table.style_class = list(table.style_class) + [table_class]
+    return table
+
+
 register_template(load_paper_dataset)
+register_template(load_recipe_dataset)
+register_template(load_figure_dataset)
 register_template(network_plot_data)
 register_template(paper_per_network_pds)
 register_template(opt_list)
@@ -233,10 +456,17 @@ register_template(paper_data)
 register_template(family_members)
 register_template(paper_predict)
 register_template(matrix_predict)
+register_template(normalize_model_name)
+register_template(replicate_info_for)
+register_template(load_replicate_runs)
+register_template(rep_noise_for)
+register_template(build_topology_table)
 
 
 PAPER_PIPELINE_HELPERS: dict[str, Any] = {
     "load_paper_dataset": load_paper_dataset,
+    "load_recipe_dataset": load_recipe_dataset,
+    "load_figure_dataset": load_figure_dataset,
     "network_plot_data": network_plot_data,
     "paper_per_network_pds": paper_per_network_pds,
     "opt_list": opt_list,
@@ -244,11 +474,18 @@ PAPER_PIPELINE_HELPERS: dict[str, Any] = {
     "family_members": family_members,
     "paper_predict": paper_predict,
     "matrix_predict": matrix_predict,
+    "normalize_model_name": normalize_model_name,
+    "replicate_info_for": replicate_info_for,
+    "load_replicate_runs": load_replicate_runs,
+    "rep_noise_for": rep_noise_for,
+    "build_topology_table": build_topology_table,
 }
 
 
 __all__ = [
     "load_paper_dataset",
+    "load_recipe_dataset",
+    "load_figure_dataset",
     "matrix_predict",
     "network_plot_data",
     "opt_list",
@@ -256,5 +493,10 @@ __all__ = [
     "family_members",
     "paper_per_network_pds",
     "paper_predict",
+    "normalize_model_name",
+    "replicate_info_for",
+    "load_replicate_runs",
+    "rep_noise_for",
+    "build_topology_table",
     "PAPER_PIPELINE_HELPERS",
 ]

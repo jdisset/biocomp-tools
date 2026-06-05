@@ -760,6 +760,9 @@ class NetworkModel(BaseModel):
             logstd = params["shared"]["quantization"]["logstdevs"]
             for path, value in logstd.iter_leaves():
                 logstd[path] = jnp.ones_like(value) * -100
+            from biocomp.context import disable_context_variational
+
+            disable_context_variational(params)  # context samples too; pin it to its mean at eval
 
         assert self._stack is not None and self._stack.total_nb_of_outputs is not None
         outputs_per_sample = int(self._stack.total_nb_of_outputs)
